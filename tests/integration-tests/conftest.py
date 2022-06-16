@@ -70,7 +70,7 @@ from utils import (
     set_logger_formatter,
 )
 
-from tests.common.osu_common import run_osu_benchmarks
+from tests.common.osu_common import check_thresholds, results_csv_to_dict, run_osu_benchmarks
 from tests.common.schedulers_common import get_scheduler_commands
 from tests.common.utils import (
     fetch_instance_slots,
@@ -1387,6 +1387,8 @@ def to_pascal_case(snake_case_word):
 def run_benchmarks(request, mpi_variants, test_datadir, instance, os, region, benchmarks):
     def _run_benchmarks(remote_command_executor, scheduler_commands, **kwargs):
         function_name = request.function.__name__
+        failing_benchmarks = []
+        reference_results = {}
         if not request.config.getoption("benchmarks"):
             logging.info("Skipped benchmarks for %s", function_name)
             return
@@ -1404,9 +1406,13 @@ def run_benchmarks(request, mpi_variants, test_datadir, instance, os, region, be
                     "Os": os,
                     "Partition": partition,
                 }
+
                 for key, value in kwargs.items():
                     # Additional keyword arguments are put into dimensions
-                    dimensions[to_pascal_case(key)] = value
+                    if key == "check_result" and value:
+                        reference_results = results_csv_to_dict()
+                    else:
+                        dimensions[to_pascal_case(key)] = value
 
                 osu_benchmarks = benchmark.get("osu_benchmarks", [])
                 if osu_benchmarks:
@@ -1424,12 +1430,17 @@ def run_benchmarks(request, mpi_variants, test_datadir, instance, os, region, be
                         test_datadir,
                         dimensions,
                     )
+
                     for metric_data in metric_data_list:
+                        # Check threshold
+                        failing_benchmarks = check_thresholds(reference_results, metric_data)
+
                         cloudwatch_client.put_metric_data(
                             Namespace=metric_namespace,
                             MetricData=metric_data,
                         )
         logging.info("Finished benchmarks for %s", function_name)
+        return failing_benchmarks
 
     yield _run_benchmarks
 

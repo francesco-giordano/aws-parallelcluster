@@ -9,6 +9,7 @@
 # or in the "LICENSE.txt" file accompanying this file.
 # This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
+import csv
 import logging
 import pathlib
 import re
@@ -19,6 +20,7 @@ from constants import OSU_BENCHMARK_VERSION
 from utils import render_jinja_template
 
 OSU_COMMON_DATADIR = pathlib.Path(__file__).parent / "data/osu/"
+REFERENCE_RESULTS_FILE = OSU_COMMON_DATADIR / "reference_results.csv"
 SUPPORTED_MPIS = ["openmpi", "intelmpi"]
 
 
@@ -102,6 +104,97 @@ def run_individual_osu_benchmark(
 
     output = remote_command_executor.run_remote_command(f"cat /shared/{benchmark_name}.out").stdout
     return job_id, output
+
+
+def _csv_str_to_float(value: str) -> float:
+    return float(value.replace(".", "").replace(",", "."))
+
+
+def results_csv_to_dict() -> dict:
+    filename = REFERENCE_RESULTS_FILE
+    dict_result = {}
+    with open(filename, newline="", encoding="utf-8-sig") as results:
+        reader = csv.DictReader(results, delimiter=";")
+        for row in reader:
+            mpi_version = row["mpi_version"]
+            test_name = row["test_name"]
+            packet_size = row["packet_size"]
+
+            dict_result.setdefault(mpi_version, {})
+            dict_result[mpi_version].setdefault(test_name, {})
+            dict_result[mpi_version][test_name].setdefault(packet_size, {})
+
+            dict_result[mpi_version][test_name][packet_size]["average"] = float(_csv_str_to_float(row["average"]))
+            dict_result[mpi_version][test_name][packet_size]["std"] = float(_csv_str_to_float(row["std"]))
+    return dict_result
+
+
+def check_thresholds(reference_results: dict, metric_data: dict, variability_factor: int = 5) -> list:
+    """_summary_
+
+    Args:
+        reference_results (dict): The reference results used to compare the threshold.
+        If empty the function return immediately
+        metric_data (dict): The results from the benchmarks in the cloudwatch format
+        variability_factor (int, optional): The sensibility of the check: greater
+        is the value lower will be the sensibility. Defaults to 5.
+
+    Returns:
+        list: The benchmarks which are failed
+    """
+    if reference_results == {}:
+        return []
+
+    accepted_number_of_failures = 2
+    failing_benchmarks = []
+    failing_benchmarks_by_test = {}
+    for metric in metric_data:
+        # Read from the CloudWatch format the relevant variable to check the thresholds
+        if metric["MetricName"] == "Latency":
+            for dimension in metric["Dimensions"]:
+                name = dimension["Name"]
+                value = dimension["Value"]
+
+                if name == "PacketSize":
+                    packet_size = value
+                elif name == "OsuBenchmarkName":
+                    test_name = value
+                elif name == "MpiVariant":
+                    mpi_variant = value
+
+        # Check if the specific packet_size exist in the reference results because it can be missing due to the
+        # default of OSU benchmarks which limits to 512MB the memory allocations
+        if reference_results.get(mpi_variant, {}).get(test_name, {}).get(packet_size):
+            threshold = reference_results[mpi_variant][test_name][packet_size]["average"] + (
+                variability_factor * reference_results[mpi_variant][test_name][packet_size]["std"]
+            )
+        else:
+            logging.warning(
+                "Reference result not found for mpi variant "
+                f"'{mpi_variant}' test '{test_name}' and packet size '{packet_size}'"
+            )
+            # If the threshold cannot be defined, go to the next value
+            continue
+
+        message = (
+            f"{mpi_variant} - {test_name} - packet size {packet_size}: "
+            f"tolerated: {threshold}, current: {metric['Value']}"
+        )
+        if metric["Value"] > threshold:
+            failing_benchmarks_by_test.setdefault(test_name, {"number": 0, "failing_tests": []})
+            failing_benchmarks_by_test[test_name]["number"] += 1
+
+            failing_benchmarks_by_test[test_name]["failing_tests"].append(message)
+            logging.error(message)
+        else:
+            logging.info(message)
+
+    # Create a list from the failure by test which exceeds the accepted_number_of_failures
+    for test_name in failing_benchmarks_by_test:
+        if failing_benchmarks_by_test[test_name]["number"] > accepted_number_of_failures:
+            failing_benchmarks.append(failing_benchmarks_by_test[test_name]["failing_tests"])
+
+    return failing_benchmarks
 
 
 def run_osu_benchmarks(
