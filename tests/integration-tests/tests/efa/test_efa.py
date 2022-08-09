@@ -16,11 +16,22 @@ import boto3
 from assertpy import assert_that
 from remote_command_executor import RemoteCommandExecutor
 from utils import get_compute_nodes_instance_ids
+import pytest
 
 from tests.common.assertions import assert_no_errors_in_logs
 from tests.common.mpi_common import _test_mpi
 from tests.common.osu_common import run_individual_osu_benchmark
 from tests.common.utils import fetch_instance_slots, run_system_analyzer
+
+
+"""@pytest.mark.parametrize(
+    "mpi_variants", ""
+    [
+        (
+            "openmpi", "num_instances": [32], "osu_benchmarks": {"collective": ["osu_allreduce", "osu_alltoall"], "pt2pt": []}'
+        ),
+    ],
+)"""
 
 
 def test_efa(
@@ -37,6 +48,8 @@ def test_efa(
     scheduler_commands_factory,
     request,
     s3_bucket_factory,
+    run_benchmarks,
+    benchmarks,
 ):
     """
     Test all EFA Features.
@@ -79,33 +92,8 @@ def test_efa(
 
     if instance in osu_benchmarks_instances:
         benchmark_failures = []
-
-        # Run OSU benchmarks in efa-enabled queue.
-        for mpi_version in mpi_variants:
-            benchmark_failures.extend(
-                _test_osu_benchmarks_pt2pt(
-                    mpi_version,
-                    remote_command_executor,
-                    scheduler_commands,
-                    test_datadir,
-                    instance,
-                    slots_per_instance,
-                    partition="efa-enabled",
-                )
-            )
-            benchmark_failures.extend(
-                _test_osu_benchmarks_collective(
-                    mpi_version,
-                    remote_command_executor,
-                    scheduler_commands,
-                    test_datadir,
-                    instance,
-                    num_instances=max_queue_size,
-                    slots_per_instance=slots_per_instance,
-                    partition="efa-enabled",
-                )
-            )
-        assert_that(benchmark_failures, description="Some OSU benchmarks are failing").is_empty()
+        benchmark_failures = run_benchmarks(remote_command_executor, scheduler_commands, check_result=True)
+        assert_that(benchmark_failures, description="Some OSU benchmarks are passing the threshold").is_empty()
 
     if network_interfaces_count > 1:
         _test_osu_benchmarks_multiple_bandwidth(

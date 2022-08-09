@@ -1433,7 +1433,9 @@ def run_benchmarks(request, mpi_variants, test_datadir, instance, os, region, be
 
                     for metric_data in metric_data_list:
                         # Check threshold
-                        failing_benchmarks = check_thresholds(reference_results, metric_data)
+                        failing_benchmark = check_thresholds(reference_results, metric_data)
+                        if failing_benchmark:
+                            failing_benchmarks.append(failing_benchmark)
 
                         cloudwatch_client.put_metric_data(
                             Namespace=metric_namespace,

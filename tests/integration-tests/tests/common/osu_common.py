@@ -145,7 +145,7 @@ def check_thresholds(reference_results: dict, metric_data: dict, variability_fac
     if reference_results == {}:
         return []
 
-    accepted_number_of_failures = 2
+    accepted_number_of_failures = 3
     failing_benchmarks = []
     failing_benchmarks_by_test = {}
     for metric in metric_data:
@@ -181,18 +181,16 @@ def check_thresholds(reference_results: dict, metric_data: dict, variability_fac
             f"tolerated: {threshold}, current: {metric['Value']}"
         )
         if metric["Value"] > threshold:
-            failing_benchmarks_by_test.setdefault(test_name, {"number": 0, "failing_tests": []})
-            failing_benchmarks_by_test[test_name]["number"] += 1
-
-            failing_benchmarks_by_test[test_name]["failing_tests"].append(message)
+            failing_benchmarks_by_test.setdefault(test_name, [])
+            failing_benchmarks_by_test[test_name].append(message)
             logging.error(message)
         else:
             logging.info(message)
 
     # Create a list from the failure by test which exceeds the accepted_number_of_failures
     for test_name in failing_benchmarks_by_test:
-        if failing_benchmarks_by_test[test_name]["number"] > accepted_number_of_failures:
-            failing_benchmarks.append(failing_benchmarks_by_test[test_name]["failing_tests"])
+        if len(failing_benchmarks_by_test[test_name]) > accepted_number_of_failures:
+            failing_benchmarks.append(failing_benchmarks_by_test[test_name])
 
     return failing_benchmarks
 
