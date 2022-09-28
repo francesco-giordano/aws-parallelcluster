@@ -238,31 +238,49 @@ def _check_osu_benchmarks_results(test_datadir, instance, mpi_version, benchmark
     logging.info(output)
     # Check avg latency for all packet sizes
     failures = 0
-    for packet_size, latency in re.findall(r"(\d+)\s+(\d+)\.", output):
+    for packet_size, value in re.findall(r"(\d+)\s+(\d+)\.", output):
         with open(
             str(test_datadir / "osu_benchmarks" / "results" / instance / mpi_version / benchmark_name), encoding="utf-8"
         ) as result:
             previous_result = re.search(rf"{packet_size}\s+(\d+)\.", result.read()).group(1)
 
-            # Use a tolerance of 10us for 2 digits values.
-            # For 3+ digits values use a 20% tolerance, except for the higher-variance latency benchmark.
-            if len(previous_result) <= 2:
-                accepted_tolerance = 10
-            else:
-                multiplier = 0.3 if benchmark_name == "osu_latency" else 0.2
-                accepted_tolerance = float(previous_result) * multiplier
-            tolerated_latency = float(previous_result) + accepted_tolerance
+            if benchmark_name != "osu_bibw":
+                # Use a tolerance of 10us for 2 digits values.
+                # For 3+ digits values use a 20% tolerance, except for the higher-variance latency benchmark.
+                if len(previous_result) <= 2:
+                    accepted_tolerance = 10
+                else:
+                    multiplier = 0.3 if benchmark_name == "osu_latency" else 0.2
+                    accepted_tolerance = float(previous_result) * multiplier
+                tolerated_value = float(previous_result) + accepted_tolerance
 
-            message = (
-                f"{mpi_version} - {benchmark_name} - packet size {packet_size}: "
-                f"tolerated: {tolerated_latency}, current: {latency}"
-            )
-            if int(latency) > tolerated_latency:
-                failures = failures + 1
-                logging.error(message)
-            else:
-                logging.info(message)
+                message = (
+                    f"{mpi_version} - {benchmark_name} - packet size {packet_size}: "
+                    f"tolerated: {tolerated_value}, current: {value}"
+                )
 
+                # Invert condition when benchmark_name is osu_bibw
+                if int(value) > tolerated_value:
+                    failures = failures + 1
+                    logging.error(message)
+                else:
+                    logging.info(message)
+            else:
+                # Invert logic becasue osu_bibw is in MB/s
+                if benchmark_name == "osu_bibw":
+                    tolerated_value = float(previous_result) - (float(previous_result) * 0.2)
+
+                message = (
+                    f"{mpi_version} - {benchmark_name} - packet size {packet_size}: "
+                    f"tolerated: {tolerated_value}, current: {value}"
+                )
+
+                # Invert condition when benchmark_name is osu_bibw
+                if int(value) < tolerated_value:
+                    failures = failures + 1
+                    logging.error(message)
+                else:
+                    logging.info(message)
     return failures
 
 
