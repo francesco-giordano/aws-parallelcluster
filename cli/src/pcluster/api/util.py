@@ -186,7 +186,7 @@ def _assert_node_version():
         )
         LOGGER.debug("Found Node.js version (%s)", node_version_string)
     except Exception:
-        LOGGER.debug("Unable to determine current Node.js version from node")
+        LOGGER.debug("Unable to determine current Node.js version from node") # nosec
         try:
             # A nosec comment is appended to the following line in order to disable the B607 and B603 checks.
             # [B607:start_process_with_partial_path] Is suppressed because location of executable is retrieved from env
