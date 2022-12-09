@@ -181,3 +181,30 @@ jobs:
         with:
           severity: error
           ignore_names: user_data.sh
+  security-annotation-check:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repo
+      - uses: actions/checkout@v3.0.2
+        with:
+          fetch-depth: 0 # needed to checkout all branches for this Action to work
+
+      # Check the PR diff using the current branch and the base branch of the PR
+      - uses: GrantBirki/git-diff-action@vX.X.X
+        id: git-diff-action
+      - name: echo json diff
+        env:
+          DIFF: ${{ steps.git-diff-action.outputs.json-diff }}
+        run: echo $DIFF
+
+      # Print the diff in JSON format
+      - name: echo json diff
+        env:
+          DIFF: ${{ steps.git-diff-action.outputs.json-diff }}
+        run: echo $DIFF
+
+      # Print the diff in raw git format
+      - name: echo raw diff
+        env:
+          DIFF: ${{ steps.git-diff-action.outputs.raw-diff }}
+        run: echo $DIFF
