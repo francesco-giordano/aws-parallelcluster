@@ -21,6 +21,7 @@ CHANGELOG
   - Libfabric-aws: `libfabric-aws-1.16.1`
   - Rdma-core: `rdma-core-43.0-2`
   - Open MPI: `openmpi40-aws-4.1.4-3`
+- Upgrade Slurm to version 22.05.6.
 
 3.3.1
 -----
@@ -68,6 +69,7 @@ CHANGELOG
 - Upgrade EFA installer to version 1.18.0.
 - Upgrade NICE DCV to version 2022.1-13300.
 - Allow for suppressing the `SingleSubnetValidator` for `Queues`.
+- Remove usage of prolog/epilog Slurm configuration when `UseEc2Hostnames` is set to `true`.  
 
 **BUG FIXES**
 - Fix validation of `filters` parameter in `ListClusterLogStreams` command to fail when incorrect filters are passed.
