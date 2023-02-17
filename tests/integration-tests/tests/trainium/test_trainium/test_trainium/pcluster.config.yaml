@@ -9,11 +9,11 @@ HeadNode:
   Iam:
     # Policy to access to Trainium beta repository info
     AdditionalIamPolicies:
-      - Policy: arn:aws:iam::447714826191:policy/TrainiumPreviewPolicy
+      - Policy: arn:aws:iam::327582932671:policy/TrainiumPreviewPolicy
     S3Access:
       - BucketName: {{ bucket_name }}
       # Needed to download neuronx packages and neff file --> FIXME to be removed once packages are public available
-      - BucketName: aws-parallelcluster-beta
+      - BucketName: aws-parallelcluster-beta-giordafr
 Scheduling:
   Scheduler: slurm
   SlurmQueues:
@@ -36,12 +36,12 @@ Scheduling:
       Iam:
         # Policy to access to Trainium beta repository info
         AdditionalIamPolicies:
-          - Policy: arn:aws:iam::447714826191:policy/TrainiumPreviewPolicy
+          - Policy: arn:aws:iam::327582932671:policy/TrainiumPreviewPolicy
         S3Access:
           # Needed to download post install script
           - BucketName: {{ bucket_name }}
           # Needed to download neuronx packages and neff file --> FIXME to be removed once packages are public available
-          - BucketName: aws-parallelcluster-beta
+          - BucketName: aws-parallelcluster-beta-giordafr
     - Name: queue-trn2
       ComputeResources:
         - Name: compute-resource-trn2
@@ -57,9 +57,9 @@ Scheduling:
       Iam:
         # Policy to access to Trainium beta repository info
         AdditionalIamPolicies:
-          - Policy: arn:aws:iam::447714826191:policy/TrainiumPreviewPolicy
+          - Policy: arn:aws:iam::327582932671:policy/TrainiumPreviewPolicy
         S3Access:
           # Needed to download post install script
           - BucketName: {{ bucket_name }}
           # Needed to download neuronx packages and neff file --> FIXME to be removed once packages are public available
-          - BucketName: aws-parallelcluster-beta
+          - BucketName: aws-parallelcluster-beta-giordafr

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Private Repository Access
-# I manually created a TrainiumPreviewRepository secret and TrainiumPreviewPolicy on 447714826191 account to permit access to Secret below
+# I manually created a TrainiumPreviewRepository secret and TrainiumPreviewPolicy on 327582932671 account to permit access to Secret below
 # {
 #    "Version": "2012-10-17",
 #    "Statement": [
@@ -14,7 +14,7 @@
 #                "secretsmanager:ListSecretVersionIds"
 #            ],
 #            "Resource": [
-#                "arn:aws:secretsmanager:us-east-1:447714826191:secret:TrainiumPreviewRepository-<RANDOM-STRING>"
+#                "arn:aws:secretsmanager:us-east-1:327582932671:secret:TrainiumPreviewRepository-<RANDOM-STRING>"
 #            ]
 #        },
 #        {
@@ -24,11 +24,11 @@
 #        }
 #    ]
 #}
-REPO_USER=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:447714826191:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.repository_user')
-REPO_SECRET=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:447714826191:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.repository_password')
-REPO_SUFFIX=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:447714826191:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.repository_suffix')
+REPO_USER=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:327582932671:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.repository_user')
+REPO_SECRET=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:327582932671:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.repository_password')
+REPO_SUFFIX=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:327582932671:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.repository_suffix')
 
-TEMPORARY_ARTIFACTS_BUCKET_PATH=s3://aws-parallelcluster-beta/neuron/
+TEMPORARY_ARTIFACTS_BUCKET_PATH=s3://aws-parallelcluster-beta-giordafr/neuron/
 
 
 _ubuntu_installation() {
@@ -43,7 +43,7 @@ EOF
   wget -qO - https://${REPO_USER}:${REPO_SECRET}@apt.${REPO_SUFFIX}/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB | sudo apt-key add -
 
   # Install packages from S3 --> FIXME they should be installed from configured repository
-  DEBS=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:447714826191:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.debs')
+  DEBS=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:327582932671:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.debs')
   for DEB in $DEBS
   do
     sudo dpkg -i $DEB
@@ -79,7 +79,7 @@ EOF
   sudo rpm --import https://${REPO_USER}:${REPO_SECRET}@yum.${REPO_SUFFIX}/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB
 
   # Install packages from S3 --> FIXME they should be installed from configured repository
-  RPMS=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:447714826191:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.rpms')
+  RPMS=$(aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:327582932671:secret:TrainiumPreviewRepository --region us-east-1 --query 'SecretString' --output text | jq -r '.rpms')
   for RPM in $RPMS
   do
     sudo rpm -i $RPM

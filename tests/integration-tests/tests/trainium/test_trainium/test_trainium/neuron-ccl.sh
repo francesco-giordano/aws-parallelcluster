@@ -9,7 +9,7 @@ cat <<'EOF' >submission-script.sh
 set -x
 
 # FIXME remove this repo once packages are public available
-TEMPORARY_ARTIFACTS_BUCKET_PATH=s3://aws-parallelcluster-beta/neuron/
+TEMPORARY_ARTIFACTS_BUCKET_PATH=s3://aws-parallelcluster-beta-giordafr/neuron/
 
 # Print available Neuron packages
 OS="$(grep "^ID=" /etc/os-release | cut -d"=" -f 2 | xargs)"
