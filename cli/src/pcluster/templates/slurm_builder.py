@@ -285,6 +285,9 @@ class SlurmConstruct(Construct):
             handler_func="cleanup_resources",
         ).lambda_func
 
+        if cleanup_route53_lambda_execution_role:
+            cleanup_route53_lambda.add_depends_on(cleanup_route53_lambda_execution_role)
+
         self.cleanup_route53_custom_resource = CfnCustomResource(
             self.stack_scope,
             "CleanupRoute53CustomResource",

@@ -434,6 +434,8 @@ class ClusterCdkStack:
             else self.config.iam.roles.lambda_functions_role,
             handler_func="cleanup_resources",
         ).lambda_func
+        if cleanup_resources_lambda_role:
+            cleanup_resources_lambda.add_depends_on(cleanup_resources_lambda_role)
 
         CustomResource(
             self.stack,

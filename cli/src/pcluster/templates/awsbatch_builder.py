@@ -619,7 +619,7 @@ class AwsBatchConstruct(Construct):
                 has_vpc_config=self.config.lambda_functions_vpc_config,
             )
 
-        return PclusterLambdaConstruct(
+        manage_docker_images_lambda = PclusterLambdaConstruct(
             scope=self.stack_scope,
             id="ManageDockerImagesFunctionConstruct",
             function_id="ManageDockerImages",
@@ -631,6 +631,11 @@ class AwsBatchConstruct(Construct):
             handler_func="manage_docker_images",
             timeout=60,
         ).lambda_func
+
+        if manage_docker_images_lambda_execution_role:
+            manage_docker_images_lambda.add_depends_on(manage_docker_images_lambda_execution_role)
+
+        return manage_docker_images_lambda
 
     def _add_code_build_notification_rule(self):
         code_build_notification_rule = events.CfnRule(
@@ -695,7 +700,7 @@ class AwsBatchConstruct(Construct):
             else self.config.iam.roles.lambda_functions_role,
             handler_func="send_build_notification",
             timeout=60,
-        ).lambda_func
+        ).lambda_func.add_depends_on(build_notification_lambda_execution_role)
 
     def _add_manage_docker_images_custom_resource(self):
         return CfnResource(
