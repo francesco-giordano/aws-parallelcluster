@@ -6,7 +6,7 @@
 # encrypted_ephemeral = true is ignored
 Region: '{{ region }}'
 Image:
-  Os: centos7
+  Os: alinux2023
 Tags:
   - Key: key
     Value: value
@@ -38,7 +38,7 @@ SharedStorage:
     FsxLustreSettings:
       StorageCapacity: 1200
 HeadNode:
-  InstanceType: t2.micro
+  InstanceType: t3.micro
   Networking:
     SubnetId: subnet-12345678
   Ssh:

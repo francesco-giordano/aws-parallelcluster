@@ -13,33 +13,45 @@ from collections import namedtuple
 import pytest
 from assertpy import assert_that
 
-from pcluster.aws.aws_resources import ImageInfo, InstanceTypeInfo
+from pcluster.aws.aws_resources import (
+    CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY,
+    CapacityReservationInfo,
+    ImageInfo,
+    InstanceTypeInfo,
+)
 from pcluster.aws.common import AWSClientError
-from pcluster.config.cluster_config import CapacityReservationTarget, CapacityType, PlacementGroup
+from pcluster.config.cluster_config import CapacityReservationTarget, PlacementGroup
+from pcluster.config.common import CapacityType
+from pcluster.validators.common import FailureLevel
 from pcluster.validators.ec2_validators import (
     AmiOsCompatibleValidator,
+    CapacityBlockHealthStatusValidator,
     CapacityReservationResourceGroupValidator,
+    CapacityReservationSizeValidator,
     CapacityReservationValidator,
     CapacityTypeValidator,
     InstanceTypeAcceleratorManufacturerValidator,
     InstanceTypeBaseAMICompatibleValidator,
     InstanceTypeMemoryInfoValidator,
+    InstanceTypeOSCompatibleValidator,
     InstanceTypePlacementGroupValidator,
     InstanceTypeValidator,
     KeyPairValidator,
     PlacementGroupCapacityReservationValidator,
+    PlacementGroupCapacityTypeValidator,
     PlacementGroupNamingValidator,
+    UltraserverCapacityBlockSizeValidator,
 )
 from tests.pcluster.aws.dummy_aws_api import mock_aws_api
-from tests.pcluster.validators.utils import assert_failure_messages
+from tests.pcluster.validators.utils import assert_failure_level, assert_failure_messages
 
 
 @pytest.mark.parametrize(
-    "instance_type, expected_message", [("t2.micro", None), ("c4.xlarge", None), ("c5.xlarge", "is not supported")]
+    "instance_type, expected_message", [("t3.micro", None), ("c4.xlarge", None), ("c5.xlarge", "is not supported")]
 )
 def test_instance_type_validator(mocker, instance_type, expected_message):
     mock_aws_api(mocker)
-    mocker.patch("pcluster.aws.ec2.Ec2Client.list_instance_types", return_value=["t2.micro", "c4.xlarge"])
+    mocker.patch("pcluster.aws.ec2.Ec2Client.list_instance_types", return_value=["t3.micro", "c4.xlarge"])
 
     actual_failures = InstanceTypeValidator().execute(instance_type)
     assert_failure_messages(actual_failures, expected_message)
@@ -49,9 +61,9 @@ def test_instance_type_validator(mocker, instance_type, expected_message):
     "instance_type, instance_type_data, expected_message",
     [
         (
-            "t2.medium",
+            "t3.medium",
             {
-                "InstanceType": "t2.medium",
+                "InstanceType": "t3.medium",
                 "CurrentGeneration": True,
                 "FreeTierEligible": False,
                 "SupportedUsageClasses": ["on-demand", "spot"],
@@ -104,9 +116,9 @@ def test_instance_type_validator(mocker, instance_type, expected_message):
             None,
         ),
         (
-            "t2.medium",
+            "t3.medium",
             {
-                "InstanceType": "t2.medium",
+                "InstanceType": "t3.medium",
                 "CurrentGeneration": True,
                 "FreeTierEligible": False,
                 "SupportedUsageClasses": ["on-demand", "spot"],
@@ -155,12 +167,12 @@ def test_instance_type_validator(mocker, instance_type, expected_message):
                 "AutoRecoverySupported": True,
                 "SupportedBootModes": ["legacy-bios"],
             },
-            "EC2 does not provide memory information for instance type 't2.medium'.",
+            "EC2 does not provide memory information for instance type 't3.medium'.",
         ),
         (
-            "t2.medium",
+            "t3.medium",
             {
-                "InstanceType": "t2.medium",
+                "InstanceType": "t3.medium",
                 "CurrentGeneration": True,
                 "FreeTierEligible": False,
                 "SupportedUsageClasses": ["on-demand", "spot"],
@@ -210,13 +222,13 @@ def test_instance_type_validator(mocker, instance_type, expected_message):
                 "AutoRecoverySupported": True,
                 "SupportedBootModes": ["legacy-bios"],
             },
-            "EC2 does not provide memory information for instance type 't2.medium'.",
+            "EC2 does not provide memory information for instance type 't3.medium'.",
         ),
     ],
 )
 def test_instance_type_memory_info_validator(mocker, instance_type, instance_type_data, expected_message):
     mock_aws_api(mocker)
-    mocker.patch("pcluster.aws.ec2.Ec2Client.list_instance_types", return_value=["t2.medium"])
+    mocker.patch("pcluster.aws.ec2.Ec2Client.list_instance_types", return_value=["t3.medium"])
 
     actual_failures = InstanceTypeMemoryInfoValidator().execute(instance_type, instance_type_data)
     assert_failure_messages(actual_failures, expected_message)
@@ -233,6 +245,7 @@ def test_instance_type_memory_info_validator(mocker, instance_type, instance_typ
             {
                 "ImageId": "ami-0185634c5a8a37250",
                 "Architecture": "x86_64",
+                "Description": "AWS ParallelCluster AMI",
                 "BlockDeviceMappings": [
                     {
                         "DeviceName": "/dev/xvda",
@@ -259,6 +272,7 @@ def test_instance_type_memory_info_validator(mocker, instance_type, instance_typ
             {
                 "ImageId": "ami-0185634c5a8a37250",
                 "Architecture": "x86_64",
+                "Description": "AWS ParallelCluster AMI",
                 "BlockDeviceMappings": [
                     {
                         "DeviceName": "/dev/xvda",
@@ -292,6 +306,7 @@ def test_instance_type_memory_info_validator(mocker, instance_type, instance_typ
             {
                 "ImageId": "ami-0185634c5a8a37250",
                 "Architecture": "x86_64",
+                "Description": "AWS ParallelCluster AMI",
                 "BlockDeviceMappings": [
                     {
                         "DeviceName": "/dev/xvda",
@@ -308,6 +323,84 @@ def test_instance_type_memory_info_validator(mocker, instance_type, instance_typ
             None,
             ["m6g.xlarge", "c5.xlarge"],
             [],
+        ),
+        (  # Test Nvidia OpenRM with AWS ParallelCluster AMI
+            "p3.2xlarge",
+            "ami-0185634c5a8a37250",
+            "The instance type 'p3.2xlarge' is not supported by NVIDIA OpenRM drivers. "
+            "OpenRM can only be used on any Turing or later GPU architectures. "
+            "Please consider building a custom AMI with closed source NVIDIA drivers "
+            "and then suppress this validator or using a different instance type.",
+            {
+                "ImageId": "ami-0185634c5a8a37250",
+                "Architecture": "x86_64",
+                "Description": "AWS ParallelCluster AMI",
+                "BlockDeviceMappings": [
+                    {
+                        "DeviceName": "/dev/xvda",
+                        "Ebs": {
+                            "DeleteOnTermination": True,
+                            "SnapshotId": "snap-0a20b6671bc5e3ead",
+                            "VolumeSize": 25,
+                            "VolumeType": "gp2",
+                            "Encrypted": False,
+                        },
+                    }
+                ],
+            },
+            None,
+            ["p3.2xlarge", "c5.xlarge"],
+            ["x86_64"],
+        ),
+        (  # Test Nvidia OpenRM with custom AMI with AMI description
+            "p3.2xlarge",
+            "ami-0185634c5a8a37250",
+            None,
+            {
+                "ImageId": "ami-0185634c5a8a37250",
+                "Architecture": "x86_64",
+                "Description": "Custom AMI",
+                "BlockDeviceMappings": [
+                    {
+                        "DeviceName": "/dev/xvda",
+                        "Ebs": {
+                            "DeleteOnTermination": True,
+                            "SnapshotId": "snap-0a20b6671bc5e3ead",
+                            "VolumeSize": 25,
+                            "VolumeType": "gp2",
+                            "Encrypted": False,
+                        },
+                    }
+                ],
+            },
+            None,
+            ["p3.2xlarge", "c5.xlarge"],
+            ["x86_64"],
+        ),
+        (  # Test Nvidia OpenRM with custom AMI without AMI description
+            "p3.2xlarge",
+            "ami-0185634c5a8a37250",
+            None,
+            {
+                "ImageId": "ami-0185634c5a8a37250",
+                "Architecture": "x86_64",
+                "Description": None,
+                "BlockDeviceMappings": [
+                    {
+                        "DeviceName": "/dev/xvda",
+                        "Ebs": {
+                            "DeleteOnTermination": True,
+                            "SnapshotId": "snap-0a20b6671bc5e3ead",
+                            "VolumeSize": 25,
+                            "VolumeType": "gp2",
+                            "Encrypted": False,
+                        },
+                    }
+                ],
+            },
+            None,
+            ["p3.2xlarge", "c5.xlarge"],
+            ["x86_64"],
         ),
     ],
 )
@@ -333,38 +426,155 @@ def test_instance_type_base_ami_compatible_validator(
 
 
 @pytest.mark.parametrize(
-    "key_pair, side_effect, expected_message",
+    "instance_type, os, expected_message",
     [
-        ("key-name", None, None),
-        (None, None, "If you do not specify a key pair"),
-        ("c5.xlarge", AWSClientError(function_name="describe_key_pair", message="does not exist"), "does not exist"),
+        (
+            "c5.xlarge",
+            "rhel9",
+            None,
+        ),
+        (
+            "t3.micro",
+            "rhel9",
+            "It is not recommended to use instance type t3.micro with rhel9. "
+            "If you want to use rhel9 it is recommended to use an instance type with at least 1.7 GB of memory.",
+        ),
+        (
+            "t3.micro",
+            "alinux2023",
+            None,
+        ),
+        (
+            "t3.nano",
+            "rocky9",
+            "It is not recommended to use instance type t3.nano with rocky9. "
+            "If you want to use rocky9 it is recommended to use an instance type with at least 1.7 GB of memory.",
+        ),
+        (
+            "p6e-gb200.36xlarge",
+            "rocky8",
+            "The instance type p6e-gb200.36xlarge is not officially supported with OS rocky8. "
+            "Please use one of the following OS",
+        ),
+        (
+            "p6e-gb200.36xlarge",
+            "rocky9",
+            None,
+        ),
+        (
+            "p6-b300.WHATEVER_SIZE",
+            "alinux2023",
+            None,
+        ),
     ],
 )
-def test_key_pair_validator(mocker, key_pair, side_effect, expected_message):
+def test_instance_type_os_compatible_validator(instance_type, os, expected_message):
+    actual_failures = InstanceTypeOSCompatibleValidator().execute(instance_type=instance_type, os=os)
+    assert_failure_messages(actual_failures, expected_message)
+
+
+GoodKeyPairsDict = {"KeyPairs": [{"KeyType": "ed25519"}]}
+BadKeyPairsDict = {"KeyPairs": [{"KeyType": "rsa"}]}
+
+
+@pytest.mark.parametrize(
+    "key_pair, ec2_return, os, side_effect, expected_message",
+    [
+        ("key-name", GoodKeyPairsDict, None, None, None),
+        (None, None, None, None, "If you do not specify a key pair"),
+        (
+            "c5.xlarge",
+            None,
+            None,
+            AWSClientError(function_name="describe_key_pair", message="does not exist"),
+            "does not exist",
+        ),
+        ("key-name", GoodKeyPairsDict, "ubuntu2204", None, None),
+        (
+            "key-name",
+            BadKeyPairsDict,
+            "ubuntu2204",
+            None,
+            "ubuntu2204 does not support RSA keys. Please generate and use an ed25519 key",
+        ),
+        ("key-name", GoodKeyPairsDict, "ubuntu2404", None, None),
+        (
+            "key-name",
+            BadKeyPairsDict,
+            "ubuntu2404",
+            None,
+            "ubuntu2404 does not support RSA keys. Please generate and use an ed25519 key",
+        ),
+        ("key-name", GoodKeyPairsDict, "rhel8", None, None),
+        ("key-name", BadKeyPairsDict, "rhel8", None, None),
+        ("key-name", GoodKeyPairsDict, "alinux2023", None, None),
+        ("key-name", BadKeyPairsDict, "alinux2023", None, None),
+    ],
+)
+def test_key_pair_validator(mocker, key_pair, ec2_return, os, side_effect, expected_message):
     mock_aws_api(mocker)
-    mocker.patch("pcluster.aws.ec2.Ec2Client.describe_key_pair", return_value=key_pair, side_effect=side_effect)
-    actual_failures = KeyPairValidator().execute(key_name=key_pair)
+    mocker.patch("pcluster.aws.ec2.Ec2Client.describe_key_pair", return_value=ec2_return, side_effect=side_effect)
+    actual_failures = KeyPairValidator().execute(key_name=key_pair, os=os)
     assert_failure_messages(actual_failures, expected_message)
 
 
 @pytest.mark.parametrize(
-    "capacity_type, supported_usage_classes, expected_message",
+    "capacity_type, supported_usage_classes, capacity_reservation_id, expected_message",
     [
-        (CapacityType.ONDEMAND, ["ondemand", "spot"], None),
-        (CapacityType.SPOT, ["ondemand", "spot"], None),
-        (CapacityType.ONDEMAND, ["ondemand"], None),
-        (CapacityType.SPOT, ["spot"], None),
-        (CapacityType.SPOT, [], "Could not check support for usage class 'spot' with instance type 'instance-type'"),
+        (CapacityType.ONDEMAND, ["ondemand", "spot", "capacity-block"], None, None),
+        (CapacityType.CAPACITY_BLOCK, ["ondemand", "spot", "capacity-block"], "cr-123456", None),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            ["ondemand", "spot", "capacity-block"],
+            None,
+            "Capacity Reservation id is required when using CAPACITY_BLOCK as capacity type",
+        ),
+        (CapacityType.SPOT, ["ondemand", "spot", "capacity-block"], None, None),
+        (CapacityType.ONDEMAND, ["ondemand"], None, None),
+        (CapacityType.SPOT, ["spot"], None, None),
+        (CapacityType.CAPACITY_BLOCK, ["capacity-block"], "cr-123456", None),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            ["capacity-block"],
+            None,
+            "Capacity Reservation id is required when using CAPACITY_BLOCK as capacity type",
+        ),
+        (
+            CapacityType.SPOT,
+            [],
+            None,
+            "Could not check support for usage class 'spot' with instance type 'instance-type'",
+        ),
         (
             CapacityType.ONDEMAND,
             [],
+            None,
             "Could not check support for usage class 'ondemand' with instance type 'instance-type'",
         ),
-        (CapacityType.SPOT, ["ondemand"], "Usage type 'spot' not supported with instance type 'instance-type'"),
-        (CapacityType.ONDEMAND, ["spot"], "Usage type 'ondemand' not supported with instance type 'instance-type'"),
+        (CapacityType.SPOT, ["ondemand"], None, "Usage type 'spot' not supported with instance type 'instance-type'"),
+        (
+            CapacityType.ONDEMAND,
+            ["spot"],
+            None,
+            "Usage type 'ondemand' not supported with instance type 'instance-type'",
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            ["ondemand"],
+            None,
+            "Usage type 'capacity-block' not supported with instance type 'instance-type'",
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            ["spot"],
+            None,
+            "Usage type 'capacity-block' not supported with instance type 'instance-type'",
+        ),
     ],
 )
-def test_capacity_type_validator(mocker, capacity_type, supported_usage_classes, expected_message):
+def test_capacity_type_validator(
+    mocker, capacity_type, supported_usage_classes, capacity_reservation_id, expected_message
+):
     mock_aws_api(mocker)
     mocker.patch(
         "pcluster.aws.ec2.Ec2Client.get_instance_type_info",
@@ -372,25 +582,32 @@ def test_capacity_type_validator(mocker, capacity_type, supported_usage_classes,
             {"InstanceType": "instance-type", "SupportedUsageClasses": supported_usage_classes}
         ),
     )
-    actual_failures = CapacityTypeValidator().execute(capacity_type=capacity_type, instance_type="instance-type")
+    actual_failures = CapacityTypeValidator().execute(
+        capacity_type=capacity_type, instance_type="instance-type", capacity_reservation_id=capacity_reservation_id
+    )
     assert_failure_messages(actual_failures, expected_message)
 
 
 @pytest.mark.parametrize(
     "image_id, os, ami_info, expected_message",
     [
-        ("ami-000000000000", "alinux2", ImageInfo({"Tags": [{"Key": "parallelcluster:os", "Value": "alinux2"}]}), None),
+        (
+            "ami-000000000000",
+            "alinux2023",
+            ImageInfo({"Tags": [{"Key": "parallelcluster:os", "Value": "alinux2023"}]}),
+            None,
+        ),
         (
             "ami-111111111111",
-            "alinux2",
-            ImageInfo({"Tags": [{"Key": "parallelcluster:os", "Value": "ubuntu1804"}]}),
-            "The OS of node AMI ami-111111111111 is ubuntu1804, it is not compatible with cluster OS alinux2.",
+            "alinux2023",
+            ImageInfo({"Tags": [{"Key": "parallelcluster:os", "Value": "ubuntu2404"}]}),
+            "The OS of node AMI ami-111111111111 is ubuntu2404, it is not compatible with cluster OS alinux2023.",
         ),
         (
             "ami-222222222222",
-            "alinux2",
+            "alinux2023",
             ImageInfo({"Tags": {}}),
-            "Could not check node AMI ami-222222222222 OS and cluster OS alinux2 compatibility, "
+            "Could not check node AMI ami-222222222222 OS and cluster OS alinux2023 compatibility, "
             "please make sure they are compatible before cluster creation and update operations.",
         ),
     ],
@@ -520,83 +737,402 @@ def test_placement_group_validator(
 
 
 @pytest.mark.parametrize(
-    "capacity_reservation_instance_type, capacity_reservation_availability_zone, "
-    "instance_type, subnet_availability_zone, expected_message",
+    (
+        "capacity_reservation_info",
+        "instance_types",
+        "is_flexible",
+        "subnet_availability_zone",
+        "capacity_type",
+        "os",
+        "expected_messages",
+    ),
     [
-        ("c5.xlarge", "us-east-1a", "c5.xlarge", "us-east-1a", None),
+        (
+            CapacityReservationInfo(
+                {"InstanceType": "c5.xlarge", "AvailabilityZone": "us-east-1a", "InstancePlatform": "Linux/UNIX"}
+            ),
+            ["c5.xlarge"],
+            False,
+            "us-east-1a",
+            None,
+            "alinux2023",
+            [],
+        ),
         # Wrong instance type
         (
-            "m5.xlarge",
+            CapacityReservationInfo(
+                {"InstanceType": "m5.xlarge", "AvailabilityZone": "us-east-1a", "InstancePlatform": "Linux/UNIX"}
+            ),
+            ["c5.xlarge"],
+            False,
             "us-east-1a",
-            "c5.xlarge",
-            "us-east-1a",
-            "Capacity reservation .* must have the same instance type as c5.xlarge.",
+            CapacityType.ONDEMAND,
+            "alinux2023",
+            ["Capacity reservation .* must have the same instance type as c5.xlarge."],
         ),
         # Wrong availability zone
         (
-            "c5.xlarge",
-            "us-east-1b",
-            "c5.xlarge",
+            CapacityReservationInfo(
+                {"InstanceType": "c5.xlarge", "AvailabilityZone": "us-east-1b", "InstancePlatform": "Ubuntu Pro Linux"}
+            ),
+            ["c5.xlarge"],
+            False,
             "us-east-1a",
-            "Capacity reservation .* must use the same availability zone as subnet",
+            CapacityType.SPOT,
+            "ubuntu2404",
+            [
+                "Capacity reservation .* has platform Ubuntu Pro Linux, which is not compatible with "
+                + "the cluster OS ubuntu2404. Please use a reservation with platform Linux/UNIX.",
+                "Capacity reservation .* must use the same availability zone as subnet",
+            ],
         ),
         # Both instance type and availability zone are wrong
         (
-            "m5.xlarge",
-            "us-east-1b",
-            "c5.xlarge",
+            CapacityReservationInfo(
+                {"InstanceType": "m5.xlarge", "AvailabilityZone": "us-east-1b", "InstancePlatform": "Ubuntu Pro"}
+            ),
+            ["c5.xlarge"],
+            False,
             "us-east-1a",
-            "Capacity reservation .* must have the same instance type as c5.xlarge.",
+            CapacityType.ONDEMAND,
+            "ubuntu2204",
+            [
+                "Capacity reservation .* must have the same instance type as c5.xlarge.",
+                "Capacity reservation .* must use the same availability zone as subnet",
+            ],
         ),
         (
-            "m5.xlarge",
-            "us-east-1b",
-            "c5.xlarge",
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "m5.xlarge",
+                    "AvailabilityZone": "us-east-1b",
+                    "InstancePlatform": "Red Hat Enterprise Linux",
+                }
+            ),
+            ["c5.xlarge"],
+            False,
             "us-east-1a",
-            "Capacity reservation .* must use the same availability zone as subnet",
+            CapacityType.SPOT,
+            "ubuntu2404",
+            [
+                "Capacity reservation .* has platform Red Hat Enterprise Linux, which is not "
+                + "compatible with the cluster OS ubuntu2404. Please use a reservation with platform Linux/UNIX.",
+                "Capacity reservation .* must use the same availability zone as subnet",
+            ],
         ),
+        # empty instance type, this should not happen because instance type is automatically retrieved when usinc cr-id
         (
-            "m5.xlarge",
-            "us-east-1b",
+            CapacityReservationInfo(
+                {"InstanceType": "m5.xlarge", "AvailabilityZone": "us-east-1b", "InstancePlatform": "Linux/UNIX"}
+            ),
             None,
+            False,
             "us-east-1a",
-            "The CapacityReservationId parameter can only be used with the InstanceType parameter.",
+            CapacityType.ONDEMAND,
+            "alinux2023",
+            [
+                "Unexpected failure. InstanceType parameter cannot be empty when using CapacityReservationId",
+                "Capacity reservation .* must use the same availability zone as subnet",
+            ],
+        ),
+        # empty instance type, this should not happen because instance type is automatically retrieved when usinc cr-id
+        (
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "m5.xlarge",
+                    "AvailabilityZone": "us-east-1b",
+                    "InstancePlatform": "Red Hat Enterprise Linux",
+                }
+            ),
+            "",
+            False,
+            "us-east-1a",
+            CapacityType.SPOT,
+            "rocky9",
+            [
+                "Unexpected failure. InstanceType parameter cannot be empty when using CapacityReservationId",
+                "Capacity reservation .* must use the same availability zone as subnet",
+            ],
+        ),
+        # wrong capacity type
+        (
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                    "InstancePlatform": "Red Hat Enterprise Linux",
+                }
+            ),
+            ["c5.xlarge"],
+            False,
+            "us-east-1a",
+            CapacityType.CAPACITY_BLOCK,
+            "rocky8",
+            [
+                "Capacity reservation cr-123 is not a Capacity Block reservation. "
+                "It cannot be used when specifying CapacityType: CAPACITY_BLOCK."
+            ],
         ),
         (
-            "m5.xlarge",
-            "us-east-1b",
-            "",
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                    "ReservationType": "capacity-block",
+                    "InstancePlatform": "Linux/UNIX",
+                }
+            ),
+            ["c5.xlarge"],
+            False,
             "us-east-1a",
-            "The CapacityReservationId parameter can only be used with the InstanceType parameter.",
+            CapacityType.ONDEMAND,
+            "ubuntu2204",
+            [],  # Do not check Ondemand capacity type
+        ),
+        (
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                    "ReservationType": "ondemand",
+                    "InstancePlatform": "Linux/UNIX",
+                }
+            ),
+            ["c5.xlarge"],
+            False,
+            "us-east-1a",
+            CapacityType.CAPACITY_BLOCK,
+            "alinux2023",
+            [
+                "Capacity reservation cr-123 is not a Capacity Block reservation. "
+                "It cannot be used when specifying CapacityType: CAPACITY_BLOCK."
+            ],
+        ),
+        # right capacity type
+        (
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                    "ReservationType": "ondemand",
+                    "InstancePlatform": "Linux/UNIX",
+                }
+            ),
+            ["c5.xlarge"],
+            False,
+            "us-east-1a",
+            CapacityType.ONDEMAND,
+            "alinux2023",
+            [],
+        ),
+        (
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                    "ReservationType": "capacity-block",
+                    "InstancePlatform": "Linux/UNIX",
+                }
+            ),
+            ["c5.xlarge"],
+            False,
+            "us-east-1a",
+            CapacityType.CAPACITY_BLOCK,
+            "alinux2023",
+            [],
+        ),
+        (
+            CapacityReservationInfo(
+                {"InstanceType": "c5.xlarge", "AvailabilityZone": "us-east-1a", "InstancePlatform": "SUSE Linux"}
+            ),
+            ["c5.xlarge"],
+            False,
+            "us-east-1a",
+            CapacityType.ONDEMAND,
+            "alinux2023",
+            [
+                "Capacity reservation .* has platform SUSE Linux, which is not compatible"
+                + " with the cluster OS alinux2023. Please use a reservation with platform Linux/UNIX."
+            ],
+        ),
+        # Flexible instance type, with a single instance and capacity_reservation_id
+        (
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                    "InstancePlatform": "Linux/UNIX with HA",
+                }
+            ),
+            ["c5.xlarge"],
+            True,
+            "us-east-1a",
+            None,
+            "alinux2023",
+            [
+                "Capacity reservation .* has platform Linux/UNIX with HA, which is not compatible "
+                + "with the cluster OS alinux2023. Please use a reservation with platform Linux/UNIX.",
+                "CapacityReservationId parameter cannot be used with Instances parameter.",
+            ],
+        ),
+        # Flexible instance type with multiple instance types and capacity_reservation_id
+        (
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                    "ReservationType": "ondemand",
+                    "InstancePlatform": "Ubuntu Pro",
+                }
+            ),
+            ["c5.xlarge", "m5.2xlarge"],
+            True,
+            "us-east-1a",
+            CapacityType.ONDEMAND,
+            "ubuntu2204",
+            [
+                "CapacityReservationId parameter cannot be used with Instances parameter.",
+            ],
         ),
     ],
 )
 def test_capacity_reservation_validator(
     mocker,
-    capacity_reservation_instance_type,
-    capacity_reservation_availability_zone,
-    instance_type,
+    capacity_reservation_info,
+    instance_types,
     subnet_availability_zone,
-    expected_message,
+    is_flexible,
+    capacity_type,
+    os,
+    expected_messages,
 ):
     mock_aws_api(mocker)
-    mocker.patch(
-        "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
-        return_value=[
-            {
-                "InstanceType": capacity_reservation_instance_type,
-                "AvailabilityZone": capacity_reservation_availability_zone,
-            }
-        ],
-    )
-    mocker.patch(
-        "pcluster.aws.ec2.Ec2Client.get_subnet_avail_zone",
-        return_value=subnet_availability_zone,
-    )
+    mocker.patch("pcluster.aws.ec2.Ec2Client.describe_capacity_reservations", return_value=[capacity_reservation_info])
+    mocker.patch("pcluster.aws.ec2.Ec2Client.get_subnet_avail_zone", return_value=subnet_availability_zone)
     actual_failures = CapacityReservationValidator().execute(
-        capacity_reservation_id="cr-123", instance_type=instance_type, subnet="subnet-123"
+        capacity_reservation_id="cr-123",
+        instance_types=instance_types,
+        is_flexible=is_flexible,
+        subnet="subnet-123",
+        capacity_type=capacity_type,
+        os=os,
     )
-    assert_failure_messages(actual_failures, expected_message)
+    assert_failure_messages(actual_failures, expected_messages)
+
+
+@pytest.mark.parametrize(
+    "capacity_reservation_info, num_of_instances, expected_messages",
+    [
+        (CapacityReservationInfo({"TotalInstanceCount": 1}), 1, []),
+        (CapacityReservationInfo({"TotalInstanceCount": 2}), 1, []),
+        (
+            CapacityReservationInfo(
+                {
+                    "TotalInstanceCount": 0,
+                    "Tags": [
+                        {"Key": CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, "Value": "1"},
+                    ],
+                }
+            ),
+            1,
+            [],
+        ),
+        (
+            CapacityReservationInfo(
+                {
+                    "Tags": [
+                        {"Key": CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, "Value": "1"},
+                    ],
+                }
+            ),
+            1,
+            [],
+        ),
+        (
+            CapacityReservationInfo({}),
+            1,
+            ["Number of instances .* cr-123: 1 is exceeding .* instances count .* for the Capacity Reservation: 0"],
+        ),
+        (
+            CapacityReservationInfo({"TotalInstanceCount": 1}),
+            2,
+            ["Number of instances .* cr-123: 2 is exceeding .* instances count .* for the Capacity Reservation: 1"],
+        ),
+        (
+            CapacityReservationInfo({"Tags": []}),
+            1,
+            ["Number of instances .* cr-123: 1 is exceeding .* instances count .* for the Capacity Reservation: 0"],
+        ),
+        (
+            CapacityReservationInfo(
+                {
+                    "TotalInstanceCount": 0,
+                    "Tags": [
+                        {"Key": CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, "Value": "1"},
+                    ],
+                }
+            ),
+            2,
+            ["Number of instances .* cr-123: 2 is exceeding .* instances count .* for the Capacity Reservation: 1"],
+        ),
+        # Corner cases, incrementalRequestedQuantity with strange values, should not happen:
+        (
+            CapacityReservationInfo(
+                {
+                    "TotalInstanceCount": 1,
+                    "Tags": [  # this should not happen
+                        {"Key": CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, "Value": "0"},
+                    ],
+                }
+            ),
+            1,
+            [],
+        ),
+        (
+            CapacityReservationInfo(
+                {
+                    "TotalInstanceCount": 1,
+                    "Tags": [  # this should not happen
+                        {"Key": CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, "Value": "0"},
+                    ],
+                }
+            ),
+            2,
+            ["Number of instances .* cr-123: 2 is exceeding .* instances count .* for the Capacity Reservation: 1"],
+        ),
+        (
+            CapacityReservationInfo(
+                {
+                    "TotalInstanceCount": 1,
+                    "Tags": [  # this should not happen
+                        {"Key": CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, "Value": "0"},
+                    ],
+                }
+            ),
+            2,
+            ["Number of instances .* cr-123: 2 is exceeding .* instances count .* for the Capacity Reservation: 1"],
+        ),
+        (
+            CapacityReservationInfo(
+                {
+                    "TotalInstanceCount": 0,
+                    "Tags": [  # this should not happen
+                        {"Key": CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, "Value": ""},
+                    ],
+                }
+            ),
+            2,
+            ["Number of instances .* cr-123: 2 is exceeding .* instances count .* for the Capacity Reservation: 0"],
+        ),
+    ],
+)
+def test_capacity_reservation_size_validator(mocker, capacity_reservation_info, num_of_instances, expected_messages):
+    mock_aws_api(mocker)
+    mocker.patch("pcluster.aws.ec2.Ec2Client.describe_capacity_reservations", return_value=[capacity_reservation_info])
+    actual_failures = CapacityReservationSizeValidator().execute(
+        capacity_reservation_id="cr-123", num_of_instances=num_of_instances
+    )
+    assert_failure_messages(actual_failures, expected_messages)
 
 
 mock_good_config = {"GroupConfiguration": {"Configuration": [{"Type": "AWS::EC2::CapacityReservationPool"}]}}
@@ -774,15 +1310,19 @@ def test_capacity_reservation_resource_group_validator(
     )
     mocker.patch(
         "pcluster.aws.resource_groups.ResourceGroupsClient.get_group_configuration",
-        side_effect=AWSClientError("mock-func", "mock-error")
-        if group_configuration == "AWSClientError"
-        else lambda group: group_configuration,
+        side_effect=(
+            AWSClientError("mock-func", "mock-error")
+            if group_configuration == "AWSClientError"
+            else lambda group: group_configuration
+        ),
     )
 
     mocker.patch(
         "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
         side_effect=lambda capacity_reservation_ids: [
-            {"CapacityReservationId": cr.id, "InstanceType": cr.instance_type, "AvailabilityZone": cr.az}
+            CapacityReservationInfo(
+                {"CapacityReservationId": cr.id, "InstanceType": cr.instance_type, "AvailabilityZone": cr.az}
+            )
             for cr in capacity_reservations_in_resource_group
         ],
     )
@@ -800,40 +1340,59 @@ def test_capacity_reservation_resource_group_validator(
     assert_failure_messages(actual_failures, expected_message)
 
 
-mock_odcrs = [
-    {
-        "CapacityReservationId": "cr-123",
-        "InstanceType": "mock-type",
-        "AvailabilityZone": "mock-zone",
-    },
-    {
-        "CapacityReservationId": "cr-321",
-        "InstanceType": "mock-type",
-        "AvailabilityZone": "mock-zone",
-        "PlacementGroupArn": "mock-acct/mock-arn",
-    },
-    {
-        "CapacityReservationId": "cr-456",
-        "InstanceType": "mock-type-2",
-        "AvailabilityZone": "mock-zone",
-        "PlacementGroupArn": "mock-acct/mock-arn",
-    },
+mock_capacity_reservations = [
+    CapacityReservationInfo(
+        {
+            "CapacityReservationId": "cr-123",
+            "InstanceType": "mock-type",
+            "AvailabilityZone": "mock-zone",
+        }
+    ),
+    CapacityReservationInfo(
+        {
+            "CapacityReservationId": "cr-321",
+            "InstanceType": "mock-type",
+            "AvailabilityZone": "mock-zone",
+            "PlacementGroupArn": "mock-acct/mock-arn",
+        }
+    ),
+    CapacityReservationInfo(
+        {
+            "CapacityReservationId": "cr-456",
+            "InstanceType": "mock-type-2",
+            "AvailabilityZone": "mock-zone",
+            "PlacementGroupArn": "mock-acct/mock-arn",
+        }
+    ),
+    CapacityReservationInfo(
+        {
+            "CapacityReservationId": "cr-789",
+            "InstanceType": "mock-type-2",
+            "AvailabilityZone": "mock-zone",
+        }
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    "placement_group, odcr, subnets, instance_types, odcr_list, "
-    "multi_az_enabled, subnet_id_az_mapping, expected_message",
+    "placement_group, odcr, subnets, instance_types, capacity_reservations, " "multi_az_enabled, expected_message",
     [
-        (None, None, "mock-subnet-1", ["mock-type"], mock_odcrs[:2], False, {"mock-subnet-1": "us-east-1"}, None),
+        (
+            None,
+            None,
+            "mock-subnet-1",
+            ["mock-type"],
+            mock_capacity_reservations[:2],
+            False,
+            None,
+        ),
         (
             None,
             CapacityReservationTarget(capacity_reservation_id="cr-123"),
             ["mock-subnet-1"],
             ["mock-type"],
-            mock_odcrs[:2],
+            mock_capacity_reservations[:2],
             False,
-            {"mock-subnet-1": "us-east-1"},
             None,
         ),
         (
@@ -841,9 +1400,17 @@ mock_odcrs = [
             CapacityReservationTarget(capacity_reservation_resource_group_arn="cr-123"),
             ["mock-subnet-1"],
             ["mock-type", "mock-type-2"],
-            mock_odcrs[:3],
+            mock_capacity_reservations[:3],
             False,
-            {"mock-subnet-1": "us-east-1"},
+            None,
+        ),
+        (
+            None,
+            CapacityReservationTarget(capacity_reservation_resource_group_arn="cr-123"),
+            ["mock-subnet-1"],
+            ["mock-type", "mock-type-2"],
+            mock_capacity_reservations[:4],
+            False,
             None,
         ),
         (
@@ -851,21 +1418,17 @@ mock_odcrs = [
             CapacityReservationTarget(capacity_reservation_id="cr-123"),
             ["mock-subnet-1"],
             ["mock-type", "mock-type-2"],
-            mock_odcrs[:2],
+            mock_capacity_reservations[:2],
             False,
-            {"mock-subnet-1": "us-east-1"},
-            "There are no open or targeted ODCRs that match the instance_type 'mock-type-2' in 'us-east-1' and "
-            "no placement group provided. Please either provide a placement group or add an ODCR that does not target "
-            "a placement group and targets the instance type.",
+            None,
         ),
         (
             "mock-placement",
             CapacityReservationTarget(capacity_reservation_id="cr-123"),
             ["mock-subnet-2"],
             ["mock-type"],
-            mock_odcrs[:2],
+            mock_capacity_reservations[:2],
             False,
-            {"mock-subnet-1": "us-east-1"},
             "When using an open or targeted capacity reservation with an unrelated placement group, "
             "insufficient capacity errors may occur due to placement constraints outside of the "
             "reservation even if the capacity reservation has remaining capacity. Please consider either "
@@ -877,9 +1440,8 @@ mock_odcrs = [
             CapacityReservationTarget(capacity_reservation_id="cr-123"),
             ["mock-subnet-3"],
             ["mock-type"],
-            mock_odcrs[1:2],
+            mock_capacity_reservations[1:2],
             False,
-            {"mock-subnet-1": "us-east-1"},
             "The placement group provided 'test' targets the 'mock-type' instance type but there "
             "are no ODCRs included in the resource group that target that instance type.",
         ),
@@ -888,9 +1450,8 @@ mock_odcrs = [
             CapacityReservationTarget(capacity_reservation_id="cr-123"),
             ["mock-subnet-3"],
             ["mock-type"],
-            mock_odcrs[1:2],
+            mock_capacity_reservations[1:2],
             False,
-            {"mock-subnet-1": "us-east-1"},
             "The placement group provided 'test-2' targets the 'mock-type' instance type but there "
             "are no ODCRs included in the resource group that target that instance type.",
         ),
@@ -899,9 +1460,8 @@ mock_odcrs = [
             CapacityReservationTarget(capacity_reservation_resource_group_arn="cr-123"),
             ["mock-subnet-1", "mock-subnet-2"],
             ["mock-type", "mock-type-2"],
-            mock_odcrs[:3],
+            mock_capacity_reservations[:3],
             True,
-            {"mock-subnet-1": "us-east-1"},
             None,
         ),
         (
@@ -909,9 +1469,8 @@ mock_odcrs = [
             CapacityReservationTarget(capacity_reservation_resource_group_arn="cr-123"),
             ["mock-subnet-1", "mock-subnet-2"],
             ["mock-type"],
-            mock_odcrs[:3],
+            mock_capacity_reservations[:3],
             True,
-            {"mock-subnet-1": "us-east-1"},
             None,
         ),
     ],
@@ -922,30 +1481,83 @@ def test_placement_group_capacity_reservation_validator(
     odcr,
     subnets,
     instance_types,
-    odcr_list,
+    capacity_reservations,
     multi_az_enabled,
-    subnet_id_az_mapping,
     expected_message,
 ):
     mock_aws_api(mocker)
     desired_availability_zone = "mock-zone"
     mocker.patch(
         "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
-        side_effect=lambda capacity_reservation_ids: odcr_list,
+        side_effect=lambda capacity_reservation_ids: capacity_reservations,
     )
-    mocker.patch(
-        "pcluster.aws.ec2.Ec2Client.get_subnet_avail_zone",
-        return_value=desired_availability_zone,
-    )
+    mocker.patch("pcluster.aws.ec2.Ec2Client.get_subnet_avail_zone", return_value=desired_availability_zone)
     actual_failure = PlacementGroupCapacityReservationValidator().execute(
         placement_group=placement_group,
         odcr=odcr,
         subnet=subnets[0],
         instance_types=instance_types,
         multi_az_enabled=multi_az_enabled,
-        subnet_id_az_mapping=subnet_id_az_mapping,
     )
     assert_failure_messages(actual_failure, expected_message)
+
+
+@pytest.mark.parametrize(
+    "capacity_type, placement_group_enabled, expected_failure_level, expected_message",
+    [
+        (
+            CapacityType.ONDEMAND,
+            True,
+            None,
+            None,
+        ),
+        (
+            CapacityType.ONDEMAND,
+            False,
+            None,
+            None,
+        ),
+        (
+            CapacityType.SPOT,
+            True,
+            None,
+            None,
+        ),
+        (
+            CapacityType.SPOT,
+            False,
+            None,
+            None,
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            True,
+            FailureLevel.WARNING,
+            "When using a capacity block reservation, a placement group constraint should not be set "
+            "as insufficient capacity errors may occur due to placement constraints outside of the "
+            "reservation even if the capacity reservation has remaining capacity. "
+            "Please remove the placement group for the compute resource.",
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            False,
+            None,
+            None,
+        ),
+    ],
+)
+def test_placement_group_capacity_type_validator(
+    capacity_type,
+    placement_group_enabled,
+    expected_failure_level,
+    expected_message,
+):
+    actual_failures = PlacementGroupCapacityTypeValidator().execute(
+        capacity_type=capacity_type,
+        placement_group_enabled=placement_group_enabled,
+    )
+    assert_failure_level(actual_failures, expected_failure_level)
+    assert_failure_messages(actual_failures, expected_message)
 
 
 @pytest.mark.parametrize(
@@ -1006,9 +1618,9 @@ def test_placement_group_capacity_reservation_validator(
             "make sure to use a custom AMI",
         ),
         (
-            "t2.medium",
+            "t3.medium",
             {
-                "InstanceType": "t2.medium",
+                "InstanceType": "t3.medium",
             },
             None,
             "",
@@ -1121,5 +1733,271 @@ def test_instance_type_placement_group_validator(
 
     actual_failures = InstanceTypePlacementGroupValidator().execute(
         instance_type, instance_type_data, placement_group_enabled
+    )
+    assert_failure_messages(actual_failures, expected_message)
+
+
+@pytest.mark.parametrize(
+    "capacity_reservation_ids, describe_block_response, describe_block_side_effect, describe_reservation_response, "
+    "expected_message, expected_level",
+    [
+        # Healthy capacity blocks
+        (
+            ["cr-123"],
+            [
+                {
+                    "CapacityBlockId": "cbr-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-123",
+                        },
+                    ],
+                },
+            ],
+            None,
+            [CapacityReservationInfo({"State": "active", "TotalInstanceCount": 2, "AvailableInstanceCount": 2})],
+            None,
+            None,
+        ),
+        # Unhealthy capacity block - impaired interconnect
+        (
+            ["cr-123"],
+            [
+                {
+                    "CapacityBlockId": "cbr-123",
+                    "InterconnectStatus": "impaired",
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-123",
+                        },
+                    ],
+                },
+            ],
+            None,
+            [CapacityReservationInfo({"State": "active", "TotalInstanceCount": 2, "AvailableInstanceCount": 2})],
+            "One or more capacity blocks are not healthy or have insufficient capacity: "
+            "cr-123\\[InterconnectStatus=impaired\\]. "
+            "Please ensure each capacity block is healthy and all reserved capacities are available.",
+            FailureLevel.ERROR,
+        ),
+        # Unhealthy capacity block - insufficient data
+        (
+            ["cr-456"],
+            [
+                {
+                    "CapacityBlockId": "cbr-456",
+                    "InterconnectStatus": "insufficient-data",
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-456",
+                        },
+                    ],
+                },
+            ],
+            None,
+            [CapacityReservationInfo({"State": "active", "TotalInstanceCount": 2, "AvailableInstanceCount": 2})],
+            "One or more capacity blocks are not healthy or have insufficient capacity: "
+            "cr-456\\[InterconnectStatus=insufficient-data\\]. "
+            "Please ensure each capacity block is healthy and all reserved capacities are available.",
+            FailureLevel.ERROR,
+        ),
+        # Unhealthy capacity block - unavailable capacity
+        (
+            ["cr-789"],
+            [
+                {
+                    "CapacityBlockId": "cbr-789",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-789",
+                        },
+                    ],
+                },
+            ],
+            None,
+            [CapacityReservationInfo({"State": "active", "TotalInstanceCount": 2, "AvailableInstanceCount": 1})],
+            "One or more capacity blocks are not healthy or have insufficient capacity: "
+            "cr-789\\[TotalInstanceCount=2, AvailableInstanceCount=1\\]. "
+            "Please ensure each capacity block is healthy and all reserved capacities are available.",
+            FailureLevel.ERROR,
+        ),
+        # Scheduled capacity block (inactive state) - CRID not found in capacity block status
+        (
+            ["cr-scheduled"],
+            [],  # Empty list means CRID not found in capacity block status
+            None,
+            [CapacityReservationInfo({"State": "scheduled"})],
+            "Cannot verify health status for inactive capacity blocks: cr-scheduled.",
+            FailureLevel.WARNING,
+        ),
+        # Payment-pending capacity block (inactive state) - CRID not found in capacity block status
+        (
+            ["cr-pending"],
+            [],  # Empty list means CRID not found in capacity block status
+            None,
+            [CapacityReservationInfo({"State": "payment-pending"})],
+            "Cannot verify health status for inactive capacity blocks: cr-pending.",
+            FailureLevel.WARNING,
+        ),
+        # API error for non-inactive capacity block - CRID not found in capacity block status
+        (
+            ["cr-error"],
+            [],  # Empty list means CRID not found in capacity block status
+            None,
+            [CapacityReservationInfo({"State": "active"})],
+            "Unable to retrieve status for Capacity Block cr-error. "
+            "Please verify the Capacity Block ID is valid and accessible.",
+            FailureLevel.ERROR,
+        ),
+        # describe_capacity_block_status API failure
+        (
+            ["cr-api-fail"],
+            None,
+            AWSClientError(function_name="describe_capacity_block_status", message="API failure"),
+            None,
+            "Unable to retrieve capacity block statuses.",
+            FailureLevel.ERROR,
+        ),
+    ],
+)
+def test_capacity_block_health_status_validator(
+    mocker,
+    capacity_reservation_ids,
+    describe_block_response,
+    describe_block_side_effect,
+    describe_reservation_response,
+    expected_message,
+    expected_level,
+):
+    mock_aws_api(mocker)
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.describe_capacity_block_status",
+        return_value=describe_block_response,
+        side_effect=describe_block_side_effect,
+    )
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
+        return_value=describe_reservation_response,
+    )
+
+    # Mock get_needed_ultraserver_capacity_block_statuses to return the expected statuses
+    mocker.patch(
+        "pcluster.validators.ec2_validators.get_needed_ultraserver_capacity_block_statuses",
+        return_value=describe_block_response or [],
+    )
+
+    # Mock get_missed_capacity_block_ids to return the CRIDs when describe_block_response is empty
+    def mock_get_missed_capacity_block_ids(statuses, cr_ids):
+        if not statuses:  # If statuses is empty, all CRIDs are missed
+            return cr_ids
+        return []  # Otherwise no CRIDs are missed
+
+    mocker.patch(
+        "pcluster.validators.ec2_validators.get_missed_capacity_block_ids",
+        side_effect=mock_get_missed_capacity_block_ids,
+    )
+
+    actual_failures = CapacityBlockHealthStatusValidator().execute(capacity_reservation_ids)
+    assert_failure_messages(actual_failures, expected_message)
+    if expected_level:
+        assert_failure_level(actual_failures, expected_level)
+
+
+@pytest.mark.parametrize(
+    "cluster_ultraserver_capacity_block_dict, describe_block_response, expected_message",
+    [
+        # Valid capacity block sizes
+        (
+            {"p6e-gb200": ["cr-123"]},
+            [
+                {
+                    "CapacityBlockId": "cbr-123",
+                    "TotalCapacity": 9,
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-123",
+                            "TotalCapacity": 9,
+                        }
+                    ],
+                },
+            ],
+            None,
+        ),
+        # Invalid capacity block size
+        (
+            {"p6e-gb200": ["cr-456"]},
+            [
+                {
+                    "CapacityBlockId": "cbr-456",
+                    "TotalCapacity": 16,
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-456",
+                            "TotalCapacity": 16,
+                        }
+                    ],
+                },
+            ],
+            "The following capacity blocks have invalid block sizes: cbr-456 \\(size: 16, allowed: \\[9, 18\\]\\).",
+        ),
+        # Multiple capacity blocks with mixed validity
+        (
+            {"p6e-gb200": ["cr-123", "cr-456"]},
+            [
+                {
+                    "CapacityBlockId": "cbr-123",
+                    "TotalCapacity": 18,
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-123",
+                            "TotalCapacity": 18,
+                        }
+                    ],
+                },
+                {
+                    "CapacityBlockId": "cbr-456",
+                    "TotalCapacity": 16,
+                    "CapacityReservationStatuses": [
+                        {
+                            "CapacityReservationId": "cr-456",
+                            "TotalCapacity": 16,
+                        }
+                    ],
+                },
+            ],
+            "The following capacity blocks have invalid block sizes: cbr-456 \\(size: 16, allowed: \\[9, 18\\]\\).",
+        ),
+        # Empty capacity block dict
+        (
+            {},
+            [],
+            None,
+        ),
+        # No capacity reservation IDs for ultraserver prefix
+        (
+            {"p6e-gb200": []},
+            [],
+            None,
+        ),
+    ],
+)
+def test_ultraserver_capacity_block_size_validator(
+    mocker, cluster_ultraserver_capacity_block_dict, describe_block_response, expected_message
+):
+
+    mock_aws_api(mocker)
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.describe_capacity_block_status",
+        return_value=describe_block_response,
+    )
+    mocker.patch(
+        "pcluster.validators.ec2_validators.get_needed_ultraserver_capacity_block_statuses",
+        return_value=describe_block_response,
+    )
+
+    actual_failures = UltraserverCapacityBlockSizeValidator().execute(
+        cluster_ultraserver_capacity_block_dict=cluster_ultraserver_capacity_block_dict
     )
     assert_failure_messages(actual_failures, expected_message)

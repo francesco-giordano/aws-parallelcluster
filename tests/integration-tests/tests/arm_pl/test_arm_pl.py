@@ -19,18 +19,23 @@ from remote_command_executor import RemoteCommandExecutor
 
 @pytest.mark.usefixtures("region", "instance", "scheduler")
 def test_arm_pl(os, pcluster_config_reader, clusters_factory, test_datadir):
-    """Test Arm Performance Library"""
+    """
+    Test Arm Performance Library and GCC are correctly installed, the version and try to use them.
+
+    Important: This test is not executed because the code has been moved into a Kitchen test for ARM PL chef resource.
+    See: aws-parallelcluster-platform/test/controls/arm_pl_spec.rb
+    """
     cluster_config = pcluster_config_reader()
     cluster = clusters_factory(cluster_config)
     remote_command_executor = RemoteCommandExecutor(cluster)
 
     # arm performance library version and gcc version
-    armpl_version = "21.0.0"
-    gcc_version = "9.3"
+    armpl_version = "23.10.0"
+    gcc_version = "11.3" if os in ["ubuntu2204", "alinux2023", "redhat9", "rocky9"] else "9.3"
 
     # loading module armpl/{armpl_version} will load module armpl/gcc-{gcc_version}
     # and armpl/{armpl_version}_gcc-{gcc_vesion}  sequentially
-    armpl_module_general_name = f"armpl/{armpl_version}"
+    armpl_module_general_name = f"armpl/{armpl_version[:-2]}" if os in ["alinux2023"] else f"armpl/{armpl_version}"
     armpl_module_name = f"armpl/{armpl_version}_gcc-{gcc_version}"
     gcc_module_name = f"armpl/gcc-{gcc_version}"
     _test_armpl_examples(
@@ -54,7 +59,8 @@ def _test_armpl_examples(
     gcc_version,
 ):
     armpl_major_minor_version = armpl_version[0:-2]
-
+    if os in ["alinux2023"]:
+        armpl_version = armpl_major_minor_version
     # Test arm performance library examples to check arm performance library is available in cluster
     logging.info("Test arm performance library examples")
 
@@ -73,17 +79,15 @@ def _test_armpl_examples(
     assert_that(eula_path_result).contains("license_agreement.txt")
     assert_that(eula_path_result).contains("third_party_licenses.txt")
 
-    # On centos7 we need to use binutils v2.30 for proper architecture detection
-    scl_centos7 = "scl enable devtoolset-8" if os == "centos7" else ""
-
-    # Assert pass the example tests
-    remote_command_executor.run_remote_command(
-        f"sudo chmod 777 /opt/arm/armpl/{armpl_version}/armpl_{armpl_major_minor_version}_gcc-{gcc_version}/examples"
+    armpl_base_dir = (
+        f"/opt/arm/armpl/{armpl_version}/armpl_{armpl_version}_gcc-{gcc_version}"
+        if os == "ubuntu2204"
+        else f"/opt/arm/armpl/{armpl_version}/armpl_{armpl_major_minor_version}_gcc-{gcc_version}"
     )
+    # Assert pass the example tests
+    remote_command_executor.run_remote_command(f"sudo chmod 777 {armpl_base_dir}/examples")
     test_result = remote_command_executor.run_remote_command(
-        f"module load {armpl_module_general_name} && "
-        f"cd /opt/arm/armpl/{armpl_version}/"
-        f"armpl_{armpl_major_minor_version}_gcc-{gcc_version}/examples && make clean && {scl_centos7} make"
+        f"module load {armpl_module_general_name} && " f"cd {armpl_base_dir}/examples && make clean && make"
     ).stdout.lower()
     assert_that(test_result).contains("testing: no example difference files were generated")
     assert_that(test_result).contains("test passed ok")

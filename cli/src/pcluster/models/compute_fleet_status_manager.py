@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from boto3.dynamodb.conditions import Attr
-from pkg_resources import packaging
+from packaging import version as packaging_version
 
 from pcluster.aws.aws_api import AWSApi
 from pcluster.aws.common import AWSClientError
@@ -33,8 +33,6 @@ class ComputeFleetStatus(Enum):
     STARTING = "STARTING"  # clustermgtd is handling the start request.
     STOP_REQUESTED = "STOP_REQUESTED"  # A request to stop the fleet has been submitted.
     START_REQUESTED = "START_REQUESTED"  # A request to start the fleet has been submitted.
-    ENABLED = "ENABLED"  # AWS Batch only. The compute environment is enabled
-    DISABLED = "DISABLED"  # AWS Batch only. The compute environment is disabled
     UNKNOWN = "UNKNOWN"  # Cannot determine fleet status
     # PROTECTED indicates that some partitions have consistent bootstrap failures. Affected partitions are inactive.
     PROTECTED = "PROTECTED"
@@ -144,9 +142,9 @@ class ComputeFleetStatusManager(metaclass=ABCMeta):
         pass
 
     @staticmethod
-    def get_manager(cluster_name, version, scheduler):
+    def get_manager(cluster_name, version):
         """Return compute fleet status manager based on version and plugin."""
-        if packaging.version.parse(version) < packaging.version.parse("3.2.0a0") and scheduler != "plugin":
+        if packaging_version.parse(version) < packaging_version.parse("3.2.0a0"):
             return PlainTextComputeFleetStatusManager(cluster_name)
         else:
             return JsonComputeFleetStatusManager(cluster_name)

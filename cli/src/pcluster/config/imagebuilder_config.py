@@ -13,26 +13,29 @@
 # These objects are obtained from the configuration file through a conversion based on the Schema classes.
 #
 
+import json
 from typing import List
 
 from pcluster.aws.common import get_region
 from pcluster.config.common import (
     AdditionalIamPolicy,
+    BaseDeploymentSettings,
     BaseDevSettings,
     BaseTag,
-    DeploymentSettings,
     ExtraChefAttributes,
     Imds,
     Resource,
 )
 from pcluster.imagebuilder_utils import ROOT_VOLUME_TYPE
 from pcluster.validators.common import ValidatorContext
+from pcluster.validators.dev_settings_validators import CliAttributeOverridesValidator
 from pcluster.validators.ebs_validators import EbsVolumeTypeSizeValidator
 from pcluster.validators.ec2_validators import InstanceTypeBaseAMICompatibleValidator
 from pcluster.validators.iam_validators import IamPolicyValidator, InstanceProfileValidator, RoleValidator
 from pcluster.validators.imagebuilder_validators import (
     AMIVolumeSizeValidator,
     ComponentsValidator,
+    InstanceTypeSoftwareValidator,
     SecurityGroupsAndSubnetValidator,
 )
 from pcluster.validators.kms_validators import KmsKeyIdEncryptedValidator, KmsKeyValidator
@@ -143,6 +146,41 @@ class UpdateOsPackages(Resource):
         self.enabled = enabled
 
 
+class LustreClient(Resource):
+    """Represent the LustreClient configuration for the ImageBuilder."""
+
+    def __init__(
+        self,
+        enabled: bool = None,
+    ):
+        super().__init__()
+        self.enabled = Resource.init_param(enabled, default=True)
+
+
+class NvidiaSoftware(Resource):
+    """Represent the NvidiaSoftware configuration for the ImageBuilder."""
+
+    def __init__(
+        self,
+        enabled: bool = None,
+    ):
+        super().__init__()
+        self.enabled = Resource.init_param(enabled, default=False)
+
+
+class Installation(Resource):
+    """Represent the installation configuration for the ImageBuilder."""
+
+    def __init__(
+        self,
+        lustre_client: LustreClient = None,
+        nvidia_software: NvidiaSoftware = None,
+    ):
+        super().__init__()
+        self.lustre_client = lustre_client or LustreClient()
+        self.nvidia_software = nvidia_software or NvidiaSoftware()
+
+
 class Build(Resource):
     """Represent the build configuration for the ImageBuilder."""
 
@@ -157,6 +195,7 @@ class Build(Resource):
         components: List[Component] = None,
         update_os_packages: UpdateOsPackages = None,
         imds: Imds = None,
+        installation: Installation = None,
     ):
         super().__init__()
         self.instance_type = Resource.init_param(instance_type)
@@ -167,13 +206,19 @@ class Build(Resource):
         self.security_group_ids = security_group_ids
         self.components = components
         self.update_os_packages = update_os_packages
-        self.imds = imds or Imds(implied="v1.0")
+        self.imds = imds or Imds(implied="v2.0")
+        self.installation = installation or Installation()
 
     def _register_validators(self, context: ValidatorContext = None):  # noqa: D102 #pylint: disable=unused-argument
         self._register_validator(
             InstanceTypeBaseAMICompatibleValidator,
             instance_type=self.instance_type,
             image=self.parent_image,
+        )
+        self._register_validator(
+            InstanceTypeSoftwareValidator,
+            instance_type=self.instance_type,
+            nvidia=self.installation.nvidia_software.enabled,
         )
         self._register_validator(
             ComponentsValidator,
@@ -197,6 +242,9 @@ class ImagebuilderDevSettings(BaseDevSettings):
         distribution_configuration: DistributionConfiguration = None,
         terminate_instance_on_failure: bool = None,
         disable_validate_and_test: bool = None,
+        cli_attribute_overrides: str = None,
+        disable_kernel_update: bool = None,
+        slurm_patches_s3_archive: str = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -204,6 +252,45 @@ class ImagebuilderDevSettings(BaseDevSettings):
         self.distribution_configuration = distribution_configuration
         self.terminate_instance_on_failure = Resource.init_param(terminate_instance_on_failure, default=True)
         self.disable_validate_and_test = Resource.init_param(disable_validate_and_test, default=True)
+        # JSON string of CLI-side build-image overrides (e.g. cinc_version,
+        # cinc_installer_url), unfurled by the accessors below. Mirrors
+        # Cookbook.ExtraChefAttributes: freeform JSON, well-formedness only.
+        self.cli_attribute_overrides = Resource.init_param(cli_attribute_overrides, default="")
+        self.disable_kernel_update = Resource.init_param(disable_kernel_update, default=False)
+        self.slurm_patches_s3_archive = Resource.init_param(slurm_patches_s3_archive, default="")
+
+    def _cli_attribute_override(self, key):
+        """Unfurl a single value from the cli_attribute_overrides JSON blob."""
+        if not self.cli_attribute_overrides:
+            return ""
+        return json.loads(self.cli_attribute_overrides).get(key, "")
+
+    @property
+    def cinc_installer_url(self):
+        """CINC installer URL override (from cli_attribute_overrides)."""
+        return self._cli_attribute_override("cinc_installer_url")
+
+    @property
+    def cinc_version(self):
+        """CINC client version override (from cli_attribute_overrides)."""
+        return self._cli_attribute_override("cinc_version")
+
+    def _register_validators(self, context: ValidatorContext = None):
+        super()._register_validators(context)
+        if self.cli_attribute_overrides:
+            self._register_validator(
+                CliAttributeOverridesValidator, cli_attribute_overrides=self.cli_attribute_overrides
+            )
+
+
+class ImagebuilderDeploymentSettings(BaseDeploymentSettings):
+    """Represent the deployment settings for the ImageBuilder."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def _register_validators(self, context: ValidatorContext = None):
+        super()._register_validators(context)
 
 
 # ---------------------- ImageBuilder ---------------------- #
@@ -220,7 +307,7 @@ class ImageBuilderConfig(Resource):
         config_region: str = None,
         custom_s3_bucket: str = None,
         source_config: str = None,
-        deployment_settings: DeploymentSettings = None,
+        deployment_settings: ImagebuilderDeploymentSettings = None,
     ):
         super().__init__()
         self.image = image
@@ -266,25 +353,30 @@ class ImageBuilderConfig(Resource):
 class ImageBuilderExtraChefAttributes(ExtraChefAttributes):
     """Extra Attributes for ImageBuilder Chef Client."""
 
-    def __init__(self, dev_settings: ImagebuilderDevSettings):
-        super().__init__(dev_settings)
+    def __init__(self, config: ImageBuilderConfig):
+        super().__init__(config.dev_settings)
         self.region = None
         self.nvidia = None
+        self.lustre = None
         self.is_official_ami_build = None
         self.custom_node_package = None
-        self.custom_awsbatchcli_package = None
         self.base_os = None
-        self._set_default(dev_settings)
+        self.disable_kernel_update = None
+        self.slurm_patches_s3_archive = None
+        self._set_default(config)
 
-    def _set_default(self, dev_settings: ImagebuilderDevSettings):
-        self.region = "{{ build.AWSRegion.outputs.stdout }}"
-        self.nvidia = {"enabled": "no"}
+    def _set_default(self, config: ImageBuilderConfig):
+        dev_settings = config.dev_settings
+        self.region = get_region()
+        self.nvidia = {"enabled": "yes"} if config.build.installation.nvidia_software.enabled else {"enabled": "no"}
+        self.lustre = {"enabled": "yes"} if config.build.installation.lustre_client.enabled else {"enabled": "no"}
         self.is_official_ami_build = "false"
         self.custom_node_package = dev_settings.node_package if dev_settings and dev_settings.node_package else ""
-        self.custom_awsbatchcli_package = (
-            dev_settings.aws_batch_cli_package if dev_settings and dev_settings.aws_batch_cli_package else ""
+        self.slurm_patches_s3_archive = (
+            dev_settings.slurm_patches_s3_archive if dev_settings and dev_settings.slurm_patches_s3_archive else ""
         )
         self.base_os = "{{ build.OperatingSystemName.outputs.stdout }}"
+        self.disable_kernel_update = "true" if dev_settings and dev_settings.disable_kernel_update else "false"
         for key, value in self.__dict__.items():
             if not key.startswith("_") and key not in self._cluster_attributes:
                 self._cluster_attributes.update({key: value})

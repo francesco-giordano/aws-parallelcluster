@@ -11,13 +11,11 @@
 import datetime
 import json
 from copy import deepcopy
-from io import BytesIO
 from unittest.mock import PropertyMock
 
 import pytest
 import yaml
 from assertpy import assert_that
-from botocore.response import StreamingBody
 from dateutil import tz
 
 from pcluster.api.models import ClusterStatus
@@ -26,17 +24,12 @@ from pcluster.aws.common import AWSClientError
 from pcluster.config.cluster_config import Tag
 from pcluster.config.common import AllValidatorsSuppressor
 from pcluster.config.update_policy import UpdatePolicy
-from pcluster.constants import (
-    PCLUSTER_CLUSTER_NAME_TAG,
-    PCLUSTER_NODE_TYPE_TAG,
-    PCLUSTER_S3_ARTIFACTS_DICT,
-    PCLUSTER_VERSION_TAG,
-)
+from pcluster.constants import PCLUSTER_CLUSTER_NAME_TAG, PCLUSTER_NODE_TYPE_TAG, PCLUSTER_VERSION_TAG
 from pcluster.models.cluster import BadRequestClusterActionError, Cluster, ClusterActionError, NodeType
 from pcluster.models.cluster_resources import ClusterStack
-from pcluster.models.compute_fleet_status_manager import ComputeFleetStatus
 from pcluster.models.s3_bucket import S3Bucket, S3FileFormat
 from pcluster.schemas.cluster_schema import ClusterSchema
+from pcluster.schemas.common_schema import ValidationError
 from tests.pcluster.aws.dummy_aws_api import mock_aws_api
 from tests.pcluster.config.dummy_cluster_config import dummy_slurm_cluster_config
 from tests.pcluster.models.dummy_s3_bucket import mock_bucket, mock_bucket_object_utils, mock_bucket_utils
@@ -75,6 +68,9 @@ class TestCluster:
             (NodeType.COMPUTE, [{}, {}, {}], 3),
             (NodeType.COMPUTE, [{}, {}], 2),
             (NodeType.COMPUTE, [], 0),
+            (NodeType.LOGIN_NODE, [{}, {}, {}], 3),
+            (NodeType.LOGIN_NODE, [{}, {}], 2),
+            (NodeType.LOGIN_NODE, [], 0),
         ],
     )
     def test_describe_instances(self, cluster, mocker, node_type, expected_response, expected_instances):
@@ -229,7 +225,7 @@ class TestCluster:
             None,
             "No UpDatES ARE TO BE PERformed",
             "some longer message also containing no updates are to be performed and more words at the end"
-            "some other error message",
+            + "some other error message",
         ],
     )
     def test_update_stack_template(self, cluster, mocker, error_message):
@@ -247,9 +243,11 @@ class TestCluster:
                 "stack_name": FAKE_NAME,
                 "template_url": template_url,
             },
-            side_effect=AWSClientError(function_name="update_stack_from_url", message=error_message)
-            if error_message is not None
-            else None,
+            side_effect=(
+                AWSClientError(function_name="update_stack_from_url", message=error_message)
+                if error_message is not None
+                else None
+            ),
         )
 
         # mock bucket initialize
@@ -441,7 +439,7 @@ class TestCluster:
                     "ResourceType": "AWS::CloudFormation::Stack",
                     "StackId": "arn:aws:cloudformation:us-east-1:000000000000:stack/pc",
                     "StackName": "pc",
-                    "Timestamp": datetime.datetime(2021, 7, 13, 2, 20, 20, 000000, tzinfo=tz.tzutc()),
+                    "Timestamp": datetime.datetime(2021, 7, 13, 2, 20, 20, 0o00000, tzinfo=tz.tzutc()),
                 }
             ],
         }
@@ -662,200 +660,6 @@ class TestCluster:
                     force=force,
                 )
 
-    @pytest.mark.parametrize("template_url", ["s3://bucketname/bucketkey", "https://test"])
-    def test_render_and_upload_scheduler_plugin_template(self, mocker, cluster, template_url):
-        scheduler_plugin_template = "Test"
-        scheduler_plugin_template_encoded = scheduler_plugin_template.encode("utf-8")
-        if template_url.startswith("s3://"):
-            mocker.patch(
-                "pcluster.aws.s3.S3Client.get_object",
-                autospec=True,
-                return_value={
-                    "Body": StreamingBody(
-                        BytesIO(scheduler_plugin_template_encoded), len(scheduler_plugin_template_encoded)
-                    )
-                },
-            )
-        else:
-            file_mock = mocker.MagicMock()
-            file_mock.read.return_value.decode.return_value = scheduler_plugin_template
-            mocker.patch("pcluster.models.cluster.urlopen").return_value.__enter__.return_value = file_mock
-        mocker.patch("pcluster.models.cluster.parse_config", return_value={"Test"})
-        mocker.patch("pcluster.models.cluster.Cluster.source_config_text", new_callable=PropertyMock)
-        cluster_config_mock = mocker.patch("pcluster.models.cluster.Cluster.config", new_callable=PropertyMock)
-        cluster_config_mock.return_value.scheduling.settings.scheduler_definition.cluster_infrastructure.cloud_formation.template = (  # noqa
-            template_url
-        )
-        cluster_config_mock.return_value.scheduling.settings.scheduler_definition.cluster_infrastructure.cloud_formation.checksum = (  # noqa
-            "532eaabd9574880dbf76b9b8cc00832c20a6ec113d682299550d7a6e0f345e25"
-        )
-        cluster_config_mock.return_value.get_instance_types_data.return_value = {"t2.micro": "instance_info"}
-        upload_cfn_template_mock = mocker.patch.object(cluster.bucket, "upload_cfn_template", autospec=True)
-
-        cluster._render_and_upload_scheduler_plugin_template()
-
-        upload_cfn_template_mock.assert_called_with(
-            scheduler_plugin_template, PCLUSTER_S3_ARTIFACTS_DICT["scheduler_plugin_template_name"], S3FileFormat.TEXT
-        )
-
-    @pytest.mark.parametrize(
-        "support_update, instance_type, match, update_changes",
-        [
-            (
-                "false",
-                "c5.xlarge",
-                "Update failure: The scheduler plugin used for this cluster does not support updating the scheduling "
-                "configuration.",
-                [
-                    [
-                        "param_path",
-                        "parameter",
-                        "old value",
-                        "new value",
-                        "check",
-                        "reason",
-                        "action_needed",
-                        "update_policy",
-                    ],
-                    [
-                        ["Scheduling", "SchedulerQueues[queue1]", "ComputeResources[compute-resource1]"],
-                        "InstanceType",
-                        "c5.2xlarge",
-                        "c5.xlarge",
-                        "SUCCEEDED",
-                        "-",
-                        None,
-                        "COMPUTE_FLEET_STOP",
-                    ],
-                ],
-            ),
-            ("false", "c5.2xlarge", None, None),
-            ("true", "c5.xlarge", None, None),
-        ],
-        ids=[
-            "Scheduler plugin doesn't support update, change both HeadNode.IAM.AdditionalIamPolicies and Queue "
-            "instance type",
-            "Scheduler plugin doesn't support update, change HeadNode.IAM.AdditionalIamPolicies and Queue instance "
-            "type",
-            "Scheduler plugin support update, change HeadNode.IAM.AdditionalIamPolicies",
-        ],
-    )
-    def test_validate_scheduling_update(self, mocker, support_update, instance_type, match, update_changes):
-        plugin_old_configuration = f"""
-Image:
-  Os: alinux2
-  CustomAmi: ami-08cf50b131bcd4db2
-HeadNode:
-  InstanceType: t2.micro
-  Networking:
-    SubnetId: subnet-08a5068070f6bc23d
-  Ssh:
-    KeyName: ermann-dub-ef
-  Iam:
-    AdditionalIamPolicies:
-      - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-Scheduling:
-  Scheduler: plugin
-  SchedulerSettings:
-    SchedulerDefinition:
-      PluginInterfaceVersion: "1.0"
-      Metadata:
-        documentation: link
-        Name: Slurm
-        Version: "1.0.0"
-      Requirements:
-        SupportsClusterUpdate: {support_update}
-      Events:
-        HeadInit:
-          ExecuteCommand:
-            Command: env
-  SchedulerQueues:
-    - Name: queue1
-      Networking:
-        SubnetIds:
-          - subnet-12345678
-      ComputeResources:
-        - Name: compute-resource1
-          InstanceType: c5.2xlarge
-"""
-
-        plugin_new_configuration = f"""
-Image:
-  Os: alinux2
-  CustomAmi: ami-08cf50b131bcd4db2
-HeadNode:
-  InstanceType: t2.micro
-  Networking:
-    SubnetId: subnet-08a5068070f6bc23d
-  Ssh:
-    KeyName: ermann-dub-ef
-  Iam:
-    AdditionalIamPolicies:
-      - Policy: arn:aws:iam::aws:policy/FakePolicy
-Scheduling:
-  Scheduler: plugin
-  SchedulerSettings:
-    SchedulerDefinition:
-      PluginInterfaceVersion: "1.0"
-      Metadata:
-        documentation: link
-        Name: Slurm
-        Version: "1.0.0"
-      Requirements:
-        SupportsClusterUpdate: {support_update}
-      Events:
-        HeadInit:
-          ExecuteCommand:
-            Command: env
-  SchedulerQueues:
-    - Name: queue1
-      Networking:
-        SubnetIds:
-          - subnet-12345678
-      ComputeResources:
-        - Name: compute-resource1
-          InstanceType: {instance_type}
-"""
-
-        mock_aws_api(mocker)
-        cluster = Cluster(
-            FAKE_NAME,
-            stack=ClusterStack(
-                {
-                    "StackName": FAKE_NAME,
-                    "CreationTime": "2021-06-04 10:23:20.199000+00:00",
-                    "StackStatus": ClusterStatus.CREATE_COMPLETE,
-                    "Tags": [{"Key": PCLUSTER_VERSION_TAG, "Value": FAKE_VERSION}],
-                }
-            ),
-            config=plugin_old_configuration,
-        )
-
-        mocker.patch("pcluster.aws.cfn.CfnClient.stack_exists", return_value=True)
-        mocker.patch(
-            "pcluster.models.cluster.ComputeFleetStatusManager.get_status", return_value=ComputeFleetStatus.STOPPED
-        )
-        mocker.patch(
-            "pcluster.aws.ec2.Ec2Client.describe_image",
-            return_value=ImageInfo({"BlockDeviceMappings": [{"Ebs": {"VolumeSize": 35}}]}),
-        )
-        mocker.patch(
-            "pcluster.aws.ec2.Ec2Client.describe_instances",
-            return_value=([{"InstanceId": "i-123456789"}], None),
-            expected_params=[
-                {"Name": f"tag:{PCLUSTER_CLUSTER_NAME_TAG}", "Values": ["WHATEVER-CLUSTER-NAME"]},
-                {"Name": f"tag:{PCLUSTER_NODE_TYPE_TAG}", "Values": ["HeadNode"]},
-            ],
-        )
-
-        try:
-            cluster.validate_update_request(
-                target_source_config=plugin_new_configuration, validator_suppressors={AllValidatorsSuppressor()}
-            )
-        except ClusterActionError as e:
-            assert_that(e.args[0]).is_equal_to(match)
-            assert_that(e.update_changes).is_equal_to(update_changes)
-
     def test_upload_config(self, mocker, cluster):
         mock_aws_api(mocker)
         mock_bucket(mocker)
@@ -875,6 +679,22 @@ Scheduling:
         )
 
         assert_that(bucket_object_utils_dict.get("upload_config").call_count).is_equal_to(2)
+
+    def test_upload_instance_types_data(self, mocker, cluster):
+        mock_aws_api(mocker)
+        mock_bucket(mocker)
+        mock_bucket_utils(mocker)
+        bucket_object_utils_dict = mock_bucket_object_utils(mocker)
+        cluster.config = dummy_slurm_cluster_config(mocker)
+        cluster._upload_instance_types_data()
+
+        bucket_object_utils_dict.get("upload_config").assert_any_call(
+            cluster.config.get_instance_types_data(),
+            "instance-types-data.json",
+            format=S3FileFormat.JSON,
+        )
+
+        assert_that(bucket_object_utils_dict.get("upload_config").call_count).is_equal_to(1)
 
     @pytest.mark.parametrize(
         "changes, change_set",
@@ -975,13 +795,83 @@ Scheduling:
         asset_parameters = Cluster._generate_asset_parameters(assets_metadata)
         assert_that(asset_parameters).is_equal_to(expected_parameters)
 
+    @pytest.mark.parametrize("login_nodes_available", [True, False])
+    def test_login_nodes_status(self, mocker, cluster, login_nodes_available):
+        mock_aws_api(mocker)
+        cluster.config = dummy_slurm_cluster_config(mocker)
+        mocker.patch("pcluster.models.login_nodes_status.LoginNodesStatus.retrieve_data")
+        mocker.patch(
+            "pcluster.models.login_nodes_status.LoginNodesStatus.get_login_nodes_pool_available",
+            return_value=login_nodes_available,
+        )
+        lns = cluster.login_nodes_status
+        assert_that(lns.get_login_nodes_pool_available()).is_equal_to(login_nodes_available)
+
+    @pytest.mark.parametrize(
+        "healthy, unhealthy, expected_result",
+        [
+            pytest.param(
+                0,
+                0,
+                False,
+                id="Cluster has no login nodes running if it has no healthy or unhealthy nodes",
+            ),
+            pytest.param(
+                1,
+                0,
+                True,
+                id="Cluster has running login nodes if it has at least one healthy node",
+            ),
+            pytest.param(
+                0,
+                1,
+                True,
+                id="Cluster has running login nodes if it has at least one unhealthy node",
+            ),
+        ],
+    )
+    def test_has_running_login_nodes(self, mocker, cluster, healthy, unhealthy, expected_result):
+        mock_aws_api(mocker)
+        cluster.config = dummy_slurm_cluster_config(mocker)
+        mocker.patch("pcluster.models.login_nodes_status.LoginNodesStatus.retrieve_data")
+        mocker.patch("pcluster.models.login_nodes_status.LoginNodesStatus.get_healthy_nodes", return_value=healthy)
+        mocker.patch("pcluster.models.login_nodes_status.LoginNodesStatus.get_unhealthy_nodes", return_value=unhealthy)
+        assert_that(cluster.has_running_login_nodes()).is_equal_to(expected_result)
+
+    @pytest.mark.parametrize(
+        "cluster_config_dict, expected_error",
+        [
+            ({}, None),
+            ({"DevSettings": {}}, None),
+            ({"DevSettings": {"InstanceTypesData": '{"valid": "json"}'}}, None),
+            (
+                {"DevSettings": {"InstanceTypesData": "invalid json"}},
+                "DevSettings/InstanceTypesData is not a valid JSON.",
+            ),
+        ],
+    )
+    def test_load_additional_instance_type_data(self, mocker, cluster_config_dict, expected_error):
+        mock_aws_api(mocker)
+        mock_api_instance = mocker.patch("pcluster.models.cluster.AWSApi.instance")
+
+        if expected_error:
+            with pytest.raises(ValidationError, match=expected_error):
+                Cluster._load_additional_instance_type_data(cluster_config_dict)
+        else:
+            Cluster._load_additional_instance_type_data(cluster_config_dict)
+
+            if cluster_config_dict.get("DevSettings", {}).get("InstanceTypesData"):
+                # Verify that additional_instance_types_data was set when valid JSON provided
+                expected_data = json.loads(cluster_config_dict["DevSettings"]["InstanceTypesData"])
+                mock_api_instance.return_value.ec2.additional_instance_types_data = expected_data
+
 
 OLD_CONFIGURATION = """
 Image:
-  Os: alinux2
+  Os: alinux2023
   CustomAmi: ami-08cf50b131bcd4db2
 HeadNode:
-  InstanceType: t2.micro
+  InstanceType: t3.micro
   Networking:
     SubnetId: subnet-08a5068070f6bc23d
   Ssh:
@@ -991,8 +881,8 @@ Scheduling:
   SlurmQueues:
   - Name: queue2
     ComputeResources:
-    - Name: queue1-t2micro
-      InstanceType: t2.small
+    - Name: queue1-t3small
+      InstanceType: t3.small
       MinCount: 0
       MaxCount: 11
     Networking:

@@ -17,15 +17,47 @@ import pytest
 from assertpy import assert_that
 from cfn_stacks_factory import CfnVpcStack
 from remote_command_executor import RemoteCommandExecutor
+from retrying import retry
+from time_utils import minutes, seconds
 from utils import get_arn_partition, get_compute_nodes_instance_ips
 
 from tests.common.utils import get_sts_endpoint, reboot_head_node
 from tests.storage.storage_common import (
     assert_subnet_az_relations_from_config,
+    test_directory_correctly_shared_between_ln_and_hn,
     test_efs_correctly_mounted,
     verify_directory_correctly_shared,
     write_file_into_efs,
 )
+
+
+@pytest.mark.usefixtures("os", "scheduler", "instance")
+def test_efs_use_login_nodes(
+    region, scheduler, pcluster_config_reader, clusters_factory, vpc_stack, scheduler_commands_factory
+):
+    """
+    Test when using LoginNodes section.
+
+    The efs correctly mounted on LoginNodes and compute.
+    """
+    if scheduler != "slurm":
+        pytest.skip(f"Skipping test because scheduler: {scheduler} is not supported for login nodes. Please use Slurm.")
+
+    mount_dir = "efs_mount_dir"
+    cluster_config = pcluster_config_reader(mount_dir=mount_dir)
+    cluster = clusters_factory(cluster_config)
+    remote_command_executor_head_node = RemoteCommandExecutor(cluster)
+
+    mount_dir = "/" + mount_dir
+    scheduler_commands = scheduler_commands_factory(remote_command_executor_head_node)
+    test_efs_correctly_mounted(remote_command_executor_head_node, mount_dir)
+    _test_efs_correctly_shared(remote_command_executor_head_node, mount_dir, scheduler_commands)
+
+    remote_command_executor_login_node = RemoteCommandExecutor(cluster, use_login_node=True)
+    _test_efs_correctly_shared(remote_command_executor_login_node, mount_dir, scheduler_commands)
+    test_directory_correctly_shared_between_ln_and_hn(
+        remote_command_executor_head_node, remote_command_executor_login_node, mount_dir
+    )
 
 
 @pytest.mark.usefixtures("os", "scheduler", "instance")
@@ -84,7 +116,6 @@ def test_multiple_efs(
     key_name,
     cfn_stacks_factory,
     scheduler_commands_factory,
-    run_benchmarks,
 ):
     """
     Test when efs_fs_id is provided in the config file, the existing efs can be correctly mounted.
@@ -94,41 +125,36 @@ def test_multiple_efs(
     # Names of files that will be written from separate instance. The test checks the cluster nodes can access them.
     existing_efs_filenames = []
     existing_efs_mount_dirs = []
-    iam_authorizations = [False, False, True] if scheduler != "awsbatch" else 3 * [False]
-    encryption_in_transits = [False, True, True] if scheduler != "awsbatch" else 3 * [False]
-    if request.config.getoption("benchmarks") and os == "alinux2":
-        # Only create more EFS when benchmarks are specified. Limiting OS to reduce cost of too many file systems
-        num_existing_efs = 20
-    else:
-        num_existing_efs = 3
+    iam_authorizations = [False, False, True]
+    encryption_in_transits = [False, True, True]
+    num_existing_efs = 3
     # create an additional EFS with file system policy to prevent anonymous access
     existing_efs_ids = efs_stack_factory(num_existing_efs)
-    if scheduler != "awsbatch":
-        account_id = (
-            boto3.client("sts", region_name=region, endpoint_url=get_sts_endpoint(region))
-            .get_caller_identity()
-            .get("Account")
-        )
-        policy = {
-            "Version": "2012-10-17",
-            "Id": "efs-policy-wizard-2b0679e4-cbf2-4cb7-a9d0-2f3bb4a6f911",
-            "Statement": [
-                {
-                    "Sid": "efs-block-not-iam-in-account",
-                    "Effect": "Deny",
-                    "Principal": {"AWS": "*"},
-                    "Action": [
-                        "elasticfilesystem:ClientMount",
-                        "elasticfilesystem:ClientRootAccess",
-                        "elasticfilesystem:ClientWrite",
-                    ],
-                    "Resource": f"arn:{get_arn_partition(region)}:elasticfilesystem:{region}:{account_id}:"
-                    f"file-system/{existing_efs_ids[-1]}",
-                    "Condition": {"StringNotLike": {"aws:PrincipalAccount": account_id}},
-                }
-            ],
-        }
-        boto3.client("efs").put_file_system_policy(FileSystemId=existing_efs_ids[-1], Policy=json.dumps(policy))
+    account_id = (
+        boto3.client("sts", region_name=region, endpoint_url=get_sts_endpoint(region))
+        .get_caller_identity()
+        .get("Account")
+    )
+    policy = {
+        "Version": "2012-10-17",
+        "Id": "efs-policy-wizard-2b0679e4-cbf2-4cb7-a9d0-2f3bb4a6f911",
+        "Statement": [
+            {
+                "Sid": "efs-block-not-iam-in-account",
+                "Effect": "Deny",
+                "Principal": {"AWS": "*"},
+                "Action": [
+                    "elasticfilesystem:ClientMount",
+                    "elasticfilesystem:ClientRootAccess",
+                    "elasticfilesystem:ClientWrite",
+                ],
+                "Resource": f"arn:{get_arn_partition(region)}:elasticfilesystem:{region}:{account_id}:"
+                f"file-system/{existing_efs_ids[-1]}",
+                "Condition": {"StringNotLike": {"aws:PrincipalAccount": account_id}},
+            }
+        ],
+    }
+    boto3.client("efs").put_file_system_policy(FileSystemId=existing_efs_ids[-1], Policy=json.dumps(policy))
     efs_mount_target_stack_factory(existing_efs_ids)
     existing_efs_filenames.extend(
         write_file_into_efs(
@@ -138,7 +164,7 @@ def test_multiple_efs(
     for i in range(num_existing_efs):
         existing_efs_mount_dirs.append(f"/existing_efs_mount_dir_{i}")
 
-    new_efs_mount_dirs = ["/shared"]  # OSU benchmark relies on /shared directory
+    new_efs_mount_dirs = ["/shared"]
 
     _assert_subnet_az_relations(region, vpc_stack, expected_in_same_az=False)
     # change cluster configuration file to test different tls and iam settings to EFS.
@@ -165,17 +191,136 @@ def test_multiple_efs(
         all_mount_dirs, remote_command_executor, scheduler_commands, iam_authorizations, encryption_in_transits
     )
 
-    if scheduler == "slurm":  # Only Slurm supports compute nodes reboot
-        remote_command_executor, scheduler_commands = _check_efs_after_nodes_reboot(
-            all_mount_dirs,
-            cluster,
-            remote_command_executor,
-            scheduler_commands_factory,
-            iam_authorizations,
-            encryption_in_transits,
-        )
+    _check_efs_after_nodes_reboot(
+        all_mount_dirs,
+        cluster,
+        remote_command_executor,
+        scheduler_commands_factory,
+        iam_authorizations,
+        encryption_in_transits,
+    )
 
-    run_benchmarks(remote_command_executor, scheduler_commands)
+
+@pytest.mark.usefixtures("instance")
+def test_efs_access_point(
+    os,
+    region,
+    scheduler,
+    efs_stack_factory,
+    efs_mount_target_stack_factory,
+    efs_access_point_stack_factory,
+    pcluster_config_reader,
+    clusters_factory,
+    vpc_stack,
+    request,
+    key_name,
+    cfn_stacks_factory,
+    scheduler_commands_factory,
+):
+    """
+    Test when efs_fs_id is provided in the config file, the existing efs can be correctly mounted.
+
+    To verify the efs is the existing efs, the test expects a file with random ran inside the efs mounted
+    """
+    # Names of files that will be written from separate instance. The test checks the cluster nodes can access them.
+    # create additional EFS filesystems with file system policies to prevent anonymous access
+    efs_filesystem_ids = efs_stack_factory(num=2)
+    # Create mount targets for both EFS filesystems
+    efs_mount_target_stack_factory(efs_filesystem_ids)
+    tls = True
+    iam = False
+    # Create access points for both EFS filesystems
+    access_point_ids = []
+    for efs_fs_id in efs_filesystem_ids:
+        access_point_ids.extend(efs_access_point_stack_factory(efs_fs_id=efs_fs_id))
+    account_id = (
+        boto3.client("sts", region_name=region, endpoint_url=get_sts_endpoint(region))
+        .get_caller_identity()
+        .get("Account")
+    )
+    policy = _get_efs_ap_policy(region, account_id, efs_filesystem_ids[0], access_point_ids[0])
+    policy_2 = _get_efs_ap_policy(region, account_id, efs_filesystem_ids[1], access_point_ids[1])
+    boto3.client("efs").put_file_system_policy(FileSystemId=efs_filesystem_ids[0], Policy=json.dumps(policy))
+    boto3.client("efs").put_file_system_policy(FileSystemId=efs_filesystem_ids[1], Policy=json.dumps(policy_2))
+
+    mount_dir = "efs_mount_dir"
+    cluster_config = pcluster_config_reader(
+        mount_dir=mount_dir, efs_filesystem_id=efs_filesystem_ids[0], access_point_id=access_point_ids[0]
+    )
+    cluster = clusters_factory(cluster_config)
+    remote_command_executor = RemoteCommandExecutor(cluster)
+
+    mount_dir_test = "/" + mount_dir
+    test_efs_correctly_mounted(remote_command_executor, mount_dir_test, tls, iam, access_point_ids[0])
+
+    scheduler_commands = scheduler_commands_factory(remote_command_executor)
+    _test_efs_correctly_shared(remote_command_executor, mount_dir_test, scheduler_commands)
+
+    # Update cluster to add storage with a live update.
+    # In particular, we add an extra EFS with an Access Point
+    mount_dir_2 = "efs_mount_dir_2"
+    logging.info("Updating the cluster to mount an EFS via AP with live update")
+    update_cluster_config = pcluster_config_reader(
+        config_file="pcluster.config.update.yaml",
+        output_file="pcluster.config.update_add_external_efs.yaml",
+        mount_dir=mount_dir,
+        efs_filesystem_id=efs_filesystem_ids[0],
+        access_point_id=access_point_ids[0],
+        mount_dir_2=mount_dir_2,
+        efs_filesystem_id_2=efs_filesystem_ids[1],
+        access_point_id_2=access_point_ids[1],
+    )
+
+    cluster.update(update_cluster_config)
+
+    mount_dir_2_test = "/" + mount_dir_2
+    test_efs_correctly_mounted(remote_command_executor, mount_dir_2_test, tls, iam, access_point_ids[1])
+
+    scheduler_commands = scheduler_commands_factory(remote_command_executor)
+    _test_efs_correctly_shared(remote_command_executor, mount_dir_2_test, scheduler_commands)
+
+
+def _get_efs_ap_policy(region, account_id, efs_fs_id, ap_id):
+    return {
+        "Version": "2012-10-17",
+        "Id": "efs-policy-denying-access-for-direct-efs-access",
+        "Statement": [
+            {
+                "Sid": "efs-block-not-access-point-in-account",
+                "Effect": "Deny",
+                "Principal": {"AWS": "*"},
+                "Action": [
+                    "elasticfilesystem:ClientMount",
+                    "elasticfilesystem:ClientRootAccess",
+                    "elasticfilesystem:ClientWrite",
+                ],
+                "Resource": [
+                    f"arn:{get_arn_partition(region)}:elasticfilesystem:{region}:{account_id}:file-system/{efs_fs_id}",
+                ],
+                "Condition": {
+                    "StringNotLike": {
+                        "elasticfilesystem:AccessPointArn": [
+                            f"arn:{get_arn_partition(region)}:"
+                            f"elasticfilesystem:{region}:{account_id}:access-point/{ap_id}",
+                        ]
+                    }
+                },
+            },
+            {
+                "Sid": "efs-allow-accesspoint-in-account",
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Action": [
+                    "elasticfilesystem:ClientMount",
+                    "elasticfilesystem:ClientRootAccess",
+                    "elasticfilesystem:ClientWrite",
+                ],
+                "Resource": [
+                    f"arn:{get_arn_partition(region)}:elasticfilesystem:{region}:{account_id}:file-system/{efs_fs_id}",
+                ],
+            },
+        ],
+    }
 
 
 def _check_efs_after_nodes_reboot(
@@ -207,12 +352,22 @@ def _check_efs_correctly_mounted_and_shared(
     all_mount_dirs, remote_command_executor, scheduler_commands, iam_authorizations, encryption_in_transits
 ):
     for i, mount_dir in enumerate(all_mount_dirs):
-        test_efs_correctly_mounted(
-            remote_command_executor,
-            mount_dir,
-            encryption_in_transits[i],
-            iam_authorizations[i],
-        )
+        if iam_authorizations[i]:
+            # An EFS with IAM authorization can be transiently slower to mount because the mount depends on
+            # IAM policy evaluation. As such, we retry the assertion to prevent flaky test failures.
+            retry(wait_fixed=seconds(10), stop_max_delay=minutes(3))(test_efs_correctly_mounted)(
+                remote_command_executor,
+                mount_dir,
+                encryption_in_transits[i],
+                iam_authorizations[i],
+            )
+        else:
+            test_efs_correctly_mounted(
+                remote_command_executor,
+                mount_dir,
+                encryption_in_transits[i],
+                iam_authorizations[i],
+            )
         _test_efs_correctly_shared(remote_command_executor, mount_dir, scheduler_commands)
 
 

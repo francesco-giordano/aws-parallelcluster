@@ -1,0 +1,136 @@
+Image:
+  Os: {{ os }}
+HeadNode:
+  SharedStorageType: {{ shared_headnode_storage_type }}
+  InstanceType: {{ head_node_instance_type }}
+  Networking:
+    SubnetId: {{ public_subnet_id }}
+  Ssh:
+    KeyName: {{ key_name }}
+  Iam:
+    S3Access:
+      - BucketName: {{ bucket_name }}
+LoginNodes:
+  Pools:
+{% for i in range(login_nodes_pools_count) %}
+    - Name: login-{{ i + 1 }}
+      InstanceType: {{ instance }}
+      Count: {{ login_nodes_count }}
+      Networking:
+        SubnetIds:
+          - {{ public_subnet_id }}
+      GracetimePeriod: 3
+{% endfor %}
+Scheduling:
+  {% if queue_update_strategy %}
+  SlurmSettings:
+    QueueUpdateStrategy: {{ queue_update_strategy }}
+  {% endif %}
+  Scheduler: slurm
+  SlurmQueues:
+{% for i in range(queue_count) %}
+    - Name: queue{{ i + 1 }}
+      Iam:
+        S3Access:
+          - BucketName: {{ bucket_name }}
+      ComputeResources:
+        - Name: queue{{ i + 1 }}-i1
+          Instances:
+            {% for instance_type in flexible_instance_types %}
+            - InstanceType: {{ instance_type }}
+            {% endfor %}
+          MinCount: {{ static_compute_min_count }}
+          MaxCount: {{ static_compute_max_count }}
+      Networking:
+        SubnetIds:
+          - {{ private_subnet_id }}
+{% endfor %}
+SharedStorage:
+{% if new_raid_mount_dir %}
+  - MountDir: {{ new_raid_mount_dir }}
+    StorageType: Ebs
+    Name: manage-raid
+    EbsSettings:
+      VolumeType: io1
+      Size: 15
+      Iops: 750
+      Encrypted: false
+      Raid:
+        Type: 0
+        NumberOfVolumes: 5
+      DeletionPolicy: {{ new_raid_deletion_policy }}
+{% endif %}
+{% if new_ebs_mount_dir %}
+  - MountDir: {{ new_ebs_mount_dir }}
+    Name: /manage-ebs
+    StorageType: Ebs
+    EbsSettings:
+      VolumeType: gp3
+      DeletionPolicy: {{ new_ebs_deletion_policy }}
+{% endif %}
+{% if existing_ebs_mount_dir %}
+  - MountDir: {{ existing_ebs_mount_dir }}
+    Name: existing_ebs
+    StorageType: Ebs
+    EbsSettings:
+      VolumeType: gp2
+      VolumeId: {{ volume_id }}
+{% endif %}
+{% if new_efs_mount_dir %}
+  - MountDir: {{ new_efs_mount_dir }}
+    Name: manage-efs
+    StorageType: Efs
+    EfsSettings:
+      Encrypted: true
+      PerformanceMode: maxIO
+      ThroughputMode: provisioned
+      ProvisionedThroughput: 20
+      DeletionPolicy: {{ new_efs_deletion_policy }}
+{% endif %}
+{% if existing_efs_mount_dir %}
+  - MountDir: {{ existing_efs_mount_dir }}
+    Name: existing_efs
+    StorageType: Efs
+    EfsSettings:
+      FileSystemId: {{ existing_efs_id }}
+{% endif %}
+{% if new_lustre_mount_dir %}
+  - MountDir: {{ new_lustre_mount_dir }}
+    Name: manage-fsx
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 1200
+      ImportPath: s3://{{ bucket_name }}
+      ExportPath: s3://{{ bucket_name }}/export_dir
+      DeploymentType: PERSISTENT_1
+      PerUnitStorageThroughput: 50
+      DeletionPolicy: {{ new_lustre_deletion_policy }}
+{% endif %}
+{% if fsx_lustre_mount_dir %}
+  - MountDir: {{ fsx_lustre_mount_dir }}
+    Name: existingfsx
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      FileSystemId: {{ existing_fsx_lustre_fs_id }}
+{% endif %}
+{% if fsx_open_zfs_mount_dir %}
+  - MountDir: {{ fsx_open_zfs_mount_dir }}
+    Name: existingopenzfs
+    StorageType: FsxOpenZfs
+    FsxOpenZfsSettings:
+      VolumeId: {{ fsx_open_zfs_volume_id }}
+{% endif %}
+{% if fsx_ontap_mount_dir %}
+  - MountDir: {{ fsx_ontap_mount_dir }}
+    Name: existingontap
+    StorageType: FsxOntap
+    FsxOntapSettings:
+      VolumeId: {{ fsx_ontap_volume_id }}
+{% endif %}
+{% if file_cache_mount_dir %}
+  - MountDir: {{ file_cache_mount_dir }}
+    Name: existingfilecache
+    StorageType: FileCache
+    FileCacheSettings:
+      FileCacheId: {{ existing_file_cache_id }}
+{% endif %}

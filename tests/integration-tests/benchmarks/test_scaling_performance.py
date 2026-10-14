@@ -47,7 +47,7 @@ def test_scaling_performance(
     scheduler_commands = scheduler_commands_factory(remote_command_executor)
 
     logging.info("Starting benchmark with following parameters: %s", benchmark_params)
-    start_time = datetime.datetime.utcnow()
+    start_time = datetime.datetime.now(datetime.timezone.utc)
     kwargs = {"nodes": benchmark_params["scaling_target"]}
     result = scheduler_commands.submit_command("sleep {0}".format(benchmark_params["job_duration"]), **kwargs)
     scheduler_commands.assert_job_submitted(result.stdout)
@@ -60,8 +60,9 @@ def test_scaling_performance(
 
     logging.info("Benchmark completed. Producing outputs and performing assertions.")
     benchmark_params["total_time"] = "{0}seconds".format(int((end_time - start_time).total_seconds()))
+    title = ", ".join("{0}={1}".format(key, val) for (key, val) in benchmark_params.items())
     produce_benchmark_metrics_report(
-        benchmark_params,
+        title,
         region,
         cluster.cfn_name,
         start_time.replace(tzinfo=datetime.timezone.utc).isoformat(),
@@ -71,4 +72,4 @@ def test_scaling_performance(
     )
     assert_that(max(compute_nodes_time_series)).is_equal_to(benchmark_params["scaling_target"])
     assert_that(compute_nodes_time_series[-1]).is_equal_to(0)
-    assert_no_errors_in_logs(remote_command_executor, scheduler)
+    assert_no_errors_in_logs(remote_command_executor, scheduler, skip_ice=True)

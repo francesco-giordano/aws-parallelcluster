@@ -1,0 +1,193 @@
+#  Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+#  Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance
+#  with the License. A copy of the License is located at http://aws.amazon.com/apache2.0/
+#  or in the "LICENSE.txt" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
+#  OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
+#  limitations under the License.
+
+import logging
+import uuid
+from dataclasses import dataclass, field
+from typing import List
+
+import boto3
+import botocore.exceptions
+
+
+@dataclass
+class PhaseMetadata:
+    """Metadata for a phase of a test"""
+
+    name: str
+    status: str = ""
+    start_time: float = 0.0
+    end_time: float = 0.0
+
+
+@dataclass
+class TestMetadata:
+    """Metadata for a test"""
+
+    name: str
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    region: str = ""
+    os: str = ""
+    feature: str = ""
+    instance_type: str = ""
+    setup_metadata: PhaseMetadata = field(default_factory=lambda: PhaseMetadata(name="setup"))
+    call_metadata: PhaseMetadata = field(default_factory=lambda: PhaseMetadata(name="call"))
+    teardown_metadata: PhaseMetadata = field(default_factory=lambda: PhaseMetadata(name="teardown"))
+    cli_commit: str = ""
+    cookbook_commit: str = ""
+    node_commit: str = ""
+    cluster_stack_name: str = ""
+    cluster_creation_time: float = 0
+    compute_max_launch_time: float = 0
+    compute_min_launch_time: float = 0
+    compute_average_launch_time: float = 0
+    cw_log_group_name: str = ""
+    global_build_number: int = 0
+
+
+@dataclass
+class MetadataTableManager:
+    """Publishes test metadata to the corresponding DynamoDB table"""
+
+    table: str
+    client: boto3.client
+
+    def __init__(self, region, table):
+        self.client = boto3.client("dynamodb", region_name=region)
+        self.table = table
+
+    def create_metadata_table(self) -> bool:
+        """Creates the metadata table in DynamoDB"""
+        try:
+            # Check if the table exists already
+            describe_result = self.client.describe_table(TableName=self.table)
+            logging.debug(f"Table exists: {describe_result}")
+            return True
+        except botocore.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] == "ResourceNotFoundException":
+                logging.info("The metadata table does not exist. Creating it now.")
+            else:
+                raise e
+
+        self.client.create_table(
+            AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
+            TableName=self.table,
+            KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        logging.debug(f"Successfully created metadata table: {self.table}")
+        return True
+
+    def publish_metadata(self, metadata: List[TestMetadata]):
+        """Publishes test metadata to the table"""
+        for datum in metadata:
+            try:
+                self.client.put_item(
+                    TableName=self.table,
+                    Item={
+                        "id": {"S": datum.id if datum.id else "None"},
+                        "name": {"S": datum.name if datum.name else "None"},
+                        "region": {"S": datum.region if datum.region else "None"},
+                        "os": {"S": datum.os if datum.os else "None"},
+                        "feature": {"S": datum.feature if datum.feature else "None"},
+                        "instance_type": {"S": datum.instance_type if datum.instance_type else "None"},
+                        "setup_status": {"S": datum.setup_metadata.status if datum.setup_metadata.status else "None"},
+                        "setup_start_time": {
+                            "N": str(datum.setup_metadata.start_time) if datum.setup_metadata.start_time else "0"
+                        },
+                        "setup_end_time": {
+                            "N": str(datum.setup_metadata.end_time) if datum.setup_metadata.end_time else "0"
+                        },
+                        "call_status": {"S": datum.call_metadata.status if datum.call_metadata.status else "None"},
+                        "call_start_time": {
+                            "N": str(datum.call_metadata.start_time) if datum.call_metadata.start_time else "0"
+                        },
+                        "call_end_time": {
+                            "N": str(datum.call_metadata.end_time) if datum.call_metadata.end_time else "0"
+                        },
+                        "teardown_status": {
+                            "S": datum.teardown_metadata.status if datum.teardown_metadata.status else "None"
+                        },
+                        "teardown_start_time": {
+                            "N": str(datum.teardown_metadata.start_time) if datum.teardown_metadata.start_time else "0"
+                        },
+                        "teardown_end_time": {
+                            "N": str(datum.teardown_metadata.end_time) if datum.teardown_metadata.end_time else "0"
+                        },
+                        "cli_commit": {"S": datum.cli_commit if datum.cli_commit else "None"},
+                        "cookbook_commit": {"S": datum.cookbook_commit if datum.cookbook_commit else "None"},
+                        "node_commit": {"S": datum.node_commit if datum.node_commit else "None"},
+                        "cluster_stack_name": {"S": datum.cluster_stack_name if datum.cluster_stack_name else "None"},
+                        "cluster_creation_time": {
+                            "N": str(datum.cluster_creation_time) if datum.cluster_creation_time else "0"
+                        },
+                        "compute_max_launch_time": {
+                            "N": str(datum.compute_max_launch_time) if datum.compute_max_launch_time else "0"
+                        },
+                        "compute_min_launch_time": {
+                            "N": str(datum.compute_min_launch_time) if datum.compute_min_launch_time else "0"
+                        },
+                        "compute_average_launch_time": {
+                            "N": str(datum.compute_average_launch_time) if datum.compute_average_launch_time else "0"
+                        },
+                        "cw_log_group_name": {"S": datum.cw_log_group_name if datum.cw_log_group_name else "None"},
+                        "global_build_number": {
+                            "N": str(datum.global_build_number) if datum.global_build_number else "0"
+                        },
+                    },
+                )
+            except Exception as e:
+                logging.error(f"Failed to publish {datum} to metadata table with {e}")
+            logging.debug(f"Successfully published {datum} to metadata table: {self.table}")
+
+    def get_metadata(self, ids: List[str]) -> List[TestMetadata]:
+        """Gets the metadata item from the table"""
+        items = []
+        for test_id in ids:
+            response = self.client.get_item(Key={"id": {"S": test_id}}, TableName=self.table)
+            logging.debug(f"Successfully got metadata item from metadata table: {self.table}")
+            if "Item" in response:
+                logging.debug(response["Item"])
+                items.append(
+                    TestMetadata(
+                        id=response["Item"]["id"]["S"],
+                        name=response["Item"]["name"]["S"],
+                        region=response["Item"]["region"]["S"],
+                        os=response["Item"]["os"]["S"],
+                        feature=response["Item"]["feature"]["S"],
+                        instance_type=response["Item"]["instance_type"]["S"],
+                        setup_metadata=PhaseMetadata(
+                            name="setup",
+                            status=response["Item"]["setup_status"]["S"],
+                            start_time=float(response["Item"]["setup_start_time"]["N"]),
+                            end_time=float(response["Item"]["setup_end_time"]["N"]),
+                        ),
+                        call_metadata=PhaseMetadata(
+                            name="call",
+                            status=response["Item"]["call_status"]["S"],
+                            start_time=float(response["Item"]["call_start_time"]["N"]),
+                            end_time=float(response["Item"]["call_end_time"]["N"]),
+                        ),
+                        teardown_metadata=PhaseMetadata(
+                            name="teardown",
+                            status=response["Item"]["teardown_status"]["S"],
+                            start_time=float(response["Item"]["teardown_start_time"]["N"]),
+                            end_time=float(response["Item"]["teardown_end_time"]["N"]),
+                        ),
+                        cli_commit=response["Item"]["cli_commit"]["S"],
+                        cookbook_commit=response["Item"]["cookbook_commit"]["S"],
+                        node_commit=response["Item"]["node_commit"]["S"],
+                        cluster_stack_name=response["Item"]["cluster_stack_name"]["S"],
+                        cw_log_group_name=response["Item"]["cw_log_group_name"]["S"],
+                        global_build_number=int(response["Item"]["global_build_number"]["N"]),
+                    )
+                )
+            else:
+                logging.debug("No metadata item found in the table")
+        logging.info(f"Successfully got items: {items} from metadata table: {self.table}")
+        return items

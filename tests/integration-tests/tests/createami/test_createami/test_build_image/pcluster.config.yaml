@@ -1,0 +1,26 @@
+Image:
+  Os: {{ os }}
+  CustomAmi: {{ custom_ami }}
+HeadNode:
+  InstanceType: {{ instance }}
+  Networking:
+    SubnetId: {{ public_subnet_id }}
+  Ssh:
+    KeyName: {{ key_name }}
+  Imds:
+    Secured: False
+Scheduling:
+  Scheduler: slurm
+  SlurmQueues:
+    - Name: queue1
+      Networking:
+        SubnetIds:
+          {% for private_subnet_id in private_subnet_ids %}
+          - {{ private_subnet_id }}
+          {% endfor %}
+      ComputeResources:
+        - Name: compute-resource1
+          Instances:
+            {% for instance_type in flexible_instance_types %}
+            - InstanceType: {{ instance_type }}
+            {% endfor %}

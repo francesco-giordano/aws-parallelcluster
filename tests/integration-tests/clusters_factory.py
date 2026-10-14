@@ -14,11 +14,16 @@ import json
 import logging
 import re
 import subprocess
+import time
 
 import boto3
 import yaml
+from assertpy import assert_that
+from diagnosis_utils import retrieve_rca_details
 from framework.credential_providers import run_pcluster_command
+from remote_command_executor import RemoteCommandExecutor
 from retrying import retry
+from time_utils import minutes, seconds
 from utils import (
     ClusterCreationError,
     dict_add_nested_key,
@@ -32,6 +37,19 @@ from utils import (
     retry_if_subprocess_error,
 )
 
+from tests.common.utils import (
+    read_remote_file,
+    serialize_by_region,
+    wait_for_no_active_export_tasks,
+)
+
+TAG_CLUSTER_NAME = "parallelcluster:cluster-name"
+TAG_NODE_TYPE = "parallelcluster:node-type"
+TAG_QUEUE_NAME = "parallelcluster:queue-name"
+TAG_COMPUTE_RESOURCE_NAME = "parallelcluster:compute-resource-name"
+
+LAUNCH_TEMPLATES_CONFIG_FILE = "/opt/parallelcluster/shared/launch-templates-config.json"
+
 
 def suppress_and_log_exception(func):
     @functools.wraps(func)
@@ -40,6 +58,7 @@ def suppress_and_log_exception(func):
             return func(*args, **kwargs)
         except Exception as e:
             logging.error("Failed when running function %s. Ignoring exception. Error: %s", func.__name__, e)
+            return None
 
     return wrapper
 
@@ -86,16 +105,16 @@ class Cluster:
         command = ["pcluster", "update-cluster", "--cluster-configuration", config_file, "--cluster-name", self.name]
         # This changes the default behavior of the update-cluster command and makes it wait for the cluster update to
         # finish before returning.
-        if kwargs.pop("wait", True):
+        wait = kwargs.pop("wait", True)
+        if wait:
             command.append("--wait")
         for k, val in kwargs.items():
+            if val is None:
+                continue
             if isinstance(val, (list, tuple)):
                 command.extend([f"--{kebab_case(k)}"] + list(map(str, val)))
             else:
                 command.extend([f"--{kebab_case(k)}", str(val)])
-        # TODO Remove the validator suppression below once the plugin scheduler is officially supported
-        if self.config["Scheduling"]["Scheduler"] == "plugin":
-            command.extend(["--suppress-validators", "type:SchedulerValidator"])
         result = run_pcluster_command(
             command,
             raise_on_error=raise_on_error,
@@ -104,13 +123,15 @@ class Cluster:
         )
         logging.info("update-cluster response: %s", result.stdout)
         response = json.loads(result.stdout)
-        if response.get("cloudFormationStackStatus") != "UPDATE_COMPLETE":
-            error = f"Cluster update failed for {self.name}"
-            if log_error:
-                logging.error(error)
-            if raise_on_error:
-                raise Exception(error)
-        logging.info("Cluster %s updated successfully", self.name)
+        if wait:
+            if response.get("cloudFormationStackStatus") != "UPDATE_COMPLETE":
+                error = f"Cluster update failed for {self.name}"
+                if log_error:
+                    logging.error(error)
+                if raise_on_error:
+                    raise Exception(error)
+            else:
+                logging.info("Cluster %s updated successfully", self.name)
         # Only update config file attribute if update is successful
         self.config_file = config_file
         with open(self.config_file, encoding="utf-8") as conf_file:
@@ -156,33 +177,45 @@ class Cluster:
                 raise
         self.has_been_deleted = True
 
-    def start(self):
+    def start(self, wait_running=False):
         """Run pcluster start and return the result."""
         cmd_args = ["pcluster", "update-compute-fleet", "--cluster-name", self.name, "--status"]
         scheduler = self.config["Scheduling"]["Scheduler"]
         if scheduler == "awsbatch":
             cmd_args.append("ENABLED")
-        else:  # slurm and scheduler plugin case
+        else:  # slurm case
             cmd_args.append("START_REQUESTED")
         try:
             result = run_pcluster_command(cmd_args, log_error=False, custom_cli_credentials=self.custom_cli_credentials)
             logging.info("Cluster {0} started successfully".format(self.name))
+            if wait_running:
+                retry(
+                    wait_fixed=seconds(10),
+                    stop_max_delay=minutes(5),
+                    retry_on_result=lambda describe_result: "RUNNING" != describe_result["status"],
+                )(self.describe_compute_fleet)()
             return result.stdout
         except subprocess.CalledProcessError as e:
             logging.error("Failed starting cluster with error:\n%s\nand output:\n%s", e.stderr, e.stdout)
             raise
 
-    def stop(self):
+    def stop(self, wait_stopped=False):
         """Run pcluster stop and return the result."""
         cmd_args = ["pcluster", "update-compute-fleet", "--cluster-name", self.name, "--status"]
         scheduler = self.config["Scheduling"]["Scheduler"]
         if scheduler == "awsbatch":
             cmd_args.append("DISABLED")
-        else:  # slurm and scheduler plugin case
+        else:  # slurm case
             cmd_args.append("STOP_REQUESTED")
         try:
             result = run_pcluster_command(cmd_args, log_error=False, custom_cli_credentials=self.custom_cli_credentials)
             logging.info("Cluster {0} stopped successfully".format(self.name))
+            if wait_stopped:
+                retry(
+                    wait_fixed=seconds(10),
+                    stop_max_delay=minutes(2),
+                    retry_on_result=lambda describe_result: "STOPPED" != describe_result["status"],
+                )(self.describe_compute_fleet)()
             return result.stdout
         except subprocess.CalledProcessError as e:
             logging.error("Failed stopping cluster with error:\n%s\nand output:\n%s", e.stderr, e.stdout)
@@ -199,6 +232,23 @@ class Cluster:
         except subprocess.CalledProcessError as e:
             logging.error("Failed when getting cluster status with error:\n%s\nand output:\n%s", e.stderr, e.stdout)
             raise
+
+    def wait_cluster_status(self, expected_status, stop_max_delay_minute=15):
+        """Wait for the cluster to reach the desired status."""
+        retry(
+            wait_fixed=seconds(10),
+            stop_max_delay=minutes(stop_max_delay_minute),
+            retry_on_result=lambda result: result["clusterStatus"] != expected_status,
+        )(self.describe_cluster)()
+
+    def wait_cluster_stack_status(self, expected_statuses: list, stop_max_delay_minute: int = 15):
+        """Wait for the cluster stack to reach the desired status."""
+        retry(
+            wait_fixed=seconds(10),
+            stop_max_delay=minutes(stop_max_delay_minute),
+            retry_on_result=lambda result: result["cloudFormationStackStatus"] not in expected_statuses,
+        )(self.describe_cluster)()
+        return self.describe_cluster()["cloudFormationStackStatus"]
 
     def describe_compute_fleet(self):
         """Run pcluster describe-compute-fleet and return the result."""
@@ -222,6 +272,8 @@ class Cluster:
                 node_type = "HeadNode"
             elif node_type == "Compute":
                 node_type = "ComputeNode"
+            elif node_type == "LoginNode":
+                node_type = "LoginNode"
             else:
                 raise ValueError
             cmd_args.extend(["--node-type", node_type])
@@ -236,20 +288,112 @@ class Cluster:
             logging.error("Failed when getting cluster instances with error:\n%s\nand output:\n%s", e.stderr, e.stdout)
             raise
 
+    @retry(wait_fixed=seconds(5), stop_max_delay=minutes(1))
+    def get_compute_nodes(
+        self,
+        queue_name: str = None,
+        compute_resource_name: str = None,
+        state: list = None,
+        expected_num_nodes: int = None,
+    ):
+        """Return the EC2 instance details for compute nodes matching the provided criteria."""
+        state = ["running"] if state is None else state
+        ec2 = boto3.client("ec2", region_name=self.region)
+        filters = [
+            {"Name": f"tag:{TAG_CLUSTER_NAME}", "Values": [self.cfn_name]},
+            {"Name": f"tag:{TAG_NODE_TYPE}", "Values": ["Compute"]},
+            {"Name": "instance-state-name", "Values": state},
+        ]
+
+        if queue_name:
+            filters.append({"Name": f"tag:{TAG_QUEUE_NAME}", "Values": [queue_name]})
+        if compute_resource_name:
+            filters.append({"Name": f"tag:{TAG_COMPUTE_RESOURCE_NAME}", "Values": [compute_resource_name]})
+
+        instances = []
+        for reservation in ec2.describe_instances(Filters=filters).get("Reservations"):
+            instances.extend(reservation.get("Instances", []))
+
+        if expected_num_nodes:
+            assert_that(instances).is_length(expected_num_nodes)
+
+        return instances
+
+    def get_compute_nodes_private_ip(
+        self,
+        queue_name: str = None,
+        compute_resource_name: str = None,
+        state: list = None,
+        expected_num_nodes: int = None,
+    ):
+        """Return the private IP address of compute nodes matching the provided criteria."""
+        instances = self.get_compute_nodes(queue_name, compute_resource_name, state, expected_num_nodes)
+        return [i.get("PrivateIpAddress") for i in instances]
+
+    def get_compute_nodes_launch_template_logical_id(self, queue_name: str, compute_resource_name: str):
+        """Return the launch template logical id of compute nodes matching the provided criteria."""
+        launch_templates_config = json.loads(
+            read_remote_file(RemoteCommandExecutor(self), LAUNCH_TEMPLATES_CONFIG_FILE)
+        )
+        logging.info(f"Read launch template config from {LAUNCH_TEMPLATES_CONFIG_FILE}: {launch_templates_config}")
+        return (
+            launch_templates_config.get("Queues", {})
+            .get(queue_name, {})
+            .get("ComputeResources", {})
+            .get(compute_resource_name, {})
+            .get("LaunchTemplate", {})
+            .get("LogicalId")
+        )
+
     def get_cluster_instance_ids(self, node_type=None, queue_name=None):
         """Run pcluster describe-cluster-instances and collect instance ids."""
         instances = self.describe_cluster_instances(node_type=node_type, queue_name=queue_name)
         return [instance["instanceId"] for instance in instances]
 
-    def export_logs(self, bucket, output_file=None, bucket_prefix=None, filters=None):
+    def describe_login_nodes(self):
+        """List login node instances."""
+        return self.describe_cluster_instances(node_type="LoginNode")
+
+    def get_login_node_public_ip(self):
+        """Return the public ip address of the first healthy login node if exists."""
+        return self._get_login_node_ip(private=False)
+
+    def get_login_node_private_ip(self):
+        """Return the private ip address of the first healthy login node if exists."""
+        return self._get_login_node_ip(private=True)
+
+    def _get_login_node_ip(self, private=False):
+        key = "publicIpAddress"
+        if private:
+            key = "privateIpAddress"
+
+        login_nodes = self.describe_login_nodes()
+        for node in login_nodes:
+            if "running" == node["state"] and key in node:
+                return node[key]
+
+        return None
+
+    @retry(
+        wait_random_min=seconds(10),
+        wait_random_max=seconds(20),
+        stop_max_delay=minutes(10),
+        retry_on_exception=lambda e: "Resource limit exceeded" in str(e.stderr),
+    )
+    # Only one active CloudWatch Logs export task is allowed per region.
+    @serialize_by_region("export-logs")
+    def export_logs(self, bucket=None, output_file=None, bucket_prefix=None, filters=None):
         """Run pcluster export-cluster-logs and return the result."""
-        cmd_args = ["pcluster", "export-cluster-logs", "--cluster-name", self.name, "--bucket", bucket]
+        cmd_args = ["pcluster", "export-cluster-logs", "--cluster-name", self.name]
+        if bucket:
+            cmd_args += ["--bucket", bucket]
         if output_file:
             cmd_args += ["--output-file", output_file]
         if bucket_prefix:
             cmd_args += ["--bucket-prefix", bucket_prefix]
         if filters:
             cmd_args += ["--filters", filters]
+        wait_for_no_active_export_tasks(self.region)
         try:
             result = run_pcluster_command(cmd_args, log_error=False, custom_cli_credentials=self.custom_cli_credentials)
             response = json.loads(result.stdout)
@@ -317,6 +461,12 @@ class Cluster:
             raise
 
     @property
+    def has_login_nodes(self):
+        """Return True if the cluster as a LoginNode pool."""
+        info = self.describe_cluster()
+        return "loginNodes" in info.keys()
+
+    @property
     def cfn_name(self):
         """Return the name of the CloudFormation stack associated to the cluster."""
         return self.name
@@ -332,6 +482,14 @@ class Cluster:
         ]
         instance = ec2.describe_instances(Filters=filters).get("Reservations")[0].get("Instances")[0]
         return instance.get("PublicIpAddress") if instance.get("PublicIpAddress") else instance.get("PrivateIpAddress")
+
+    @property
+    def head_node_public_ip(self):
+        """Return the public ip of the cluster head node, or None if it does not have one."""
+        ec2 = boto3.client("ec2", region_name=self.region)
+        reservations = ec2.describe_instances(InstanceIds=[self.head_node_instance_id]).get("Reservations")
+        instance = reservations[0].get("Instances")[0]
+        return instance.get("PublicIpAddress")
 
     @property
     def head_node_instance_id(self):
@@ -415,7 +573,7 @@ class ClustersFactory:
         self.__created_clusters = {}
         self._delete_logs_on_success = delete_logs_on_success
 
-    def create_cluster(self, cluster, log_error=True, raise_on_error=True, **kwargs):
+    def create_cluster(self, cluster, request, log_error=True, raise_on_error=True, **kwargs):
         """
         Create a cluster with a given config.
         :param cluster: cluster to create.
@@ -431,6 +589,7 @@ class ClustersFactory:
         logging.info("Creating cluster {0} with config {1}".format(name, cluster.config_file))
         command, wait = self._build_command(cluster, kwargs)
         try:
+            start_time = time.time()
             result = run_pcluster_command(
                 command,
                 timeout=7200,
@@ -449,9 +608,28 @@ class ClustersFactory:
                         # in the case where the stack has been deleted.
                         stack_id = response.get("cloudformationStackArn")
                         events = get_cfn_events(stack_name=stack_id, region=cluster.region)
-                        raise ClusterCreationError(error, stack_events=events, cluster_details=response)
+
+                        # Only attempt RCA if head node exists
+                        rca_details = None
+                        try:
+                            _ = cluster.head_node_ip
+                            rca_details = retrieve_rca_details(cluster)
+                        except Exception as e:
+                            logging.warning("Skipping RCA, head node not accessible: %s", e)
+
+                        raise ClusterCreationError(
+                            error,
+                            stack_events=events,
+                            cluster_details=response,
+                            rca_details=rca_details,
+                        )
                 else:
                     logging.info("Cluster {0} created successfully".format(name))
+                    end_time = time.time()
+                    request.node.user_properties.append(("cluster_creation_time", end_time - start_time))
+                    request.node.user_properties.append(
+                        ("cw_log_group_name", cluster.cfn_resources.get("CloudWatchLogGroup"))
+                    )
                     cluster.mark_as_created()
             else:
                 if raise_on_error and result.returncode:
@@ -486,15 +664,6 @@ class ClustersFactory:
         wait = kwargs.pop("wait", True)
         if wait:
             command.append("--wait")
-
-        # TODO Remove the validator suppression below once the plugin scheduler is officially supported
-        if cluster.config["Scheduling"]["Scheduler"] == "plugin":
-            validators_list = ["type:SchedulerValidator"]
-            # concatenate validators
-            validator = kwargs.get("suppress_validators")
-            if validator:
-                validators_list.append(validator)
-            kwargs["suppress_validators"] = validators_list
 
         for k, val in kwargs.items():
             if isinstance(val, (list, tuple)):

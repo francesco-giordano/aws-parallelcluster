@@ -36,54 +36,56 @@ that lists all the available options:
 
 ```
 python -m test_runner --help
-usage: test_runner.py [-h] --key-name KEY_NAME --key-path KEY_PATH [-n PARALLELISM] [--sequential] [--credential CREDENTIAL] [--use-default-iam-credentials] [--retry-on-failures] [--tests-root-dir TESTS_ROOT_DIR] [-c TESTS_CONFIG]
-                      [-i [INSTANCES [INSTANCES ...]]] [-o [OSS [OSS ...]]] [-s [SCHEDULERS [SCHEDULERS ...]]] [-r [REGIONS [REGIONS ...]]] [-f FEATURES [FEATURES ...]] [--show-output]
-                      [--reports {html,junitxml,json,cw} [{html,junitxml,json,cw} ...]] [--cw-region CW_REGION] [--cw-namespace CW_NAMESPACE] [--cw-timestamp-day-start] [--output-dir OUTPUT_DIR] [--custom-node-url CUSTOM_NODE_URL]
-                      [--custom-cookbook-url CUSTOM_COOKBOOK_URL] [--createami-custom-cookbook-url CREATEAMI_CUSTOM_COOKBOOK_URL] [--createami-custom-node-url CREATEAMI_CUSTOM_NODE_URL] [--custom-awsbatchcli-url CUSTOM_AWSBATCHCLI_URL]
-                      [--pre-install PRE_INSTALL] [--post-install POST_INSTALL] [--instance-types-data INSTANCE_TYPES_DATA] [--custom-ami CUSTOM_AMI] [--pcluster-git-ref PCLUSTER_GIT_REF] [--cookbook-git-ref COOKBOOK_GIT_REF]
-                      [--node-git-ref NODE_GIT_REF] [--ami-owner AMI_OWNER] [--benchmarks] [--benchmarks-target-capacity BENCHMARKS_TARGET_CAPACITY] [--benchmarks-max-time BENCHMARKS_MAX_TIME]
-                      [--api-definition-s3-uri API_DEFINITION_S3_URI] [--api-infrastructure-s3-uri API_INFRASTRUCTURE_S3_URI] [--api-uri API_URI] [--policies-uri POLICIES_URI] [--vpc-stack VPC_STACK] [--cluster CLUSTER] [--lambda-layer-source LAMBDA_LAYER_SOURCE]
-                      [--no-delete] [--delete-logs-on-success] [--stackname-suffix STACKNAME_SUFFIX] [--dry-run] [--directory-stack-name DIRECTORY_STACK_NAME] [--ldaps-nlb-stack-name LDAPS_NLB_STACK_NAME] [--external-shared-storage-stack-name SHARED_STORAGE_STACK_NAME]
+usage: test_runner.py [-h] --key-name KEY_NAME --key-path KEY_PATH [-n PARALLELISM] [--sequential] [--credential CREDENTIAL] [--use-default-iam-credentials] [--retry-on-failures] [--tests-root-dir TESTS_ROOT_DIR] [--global-build-number GLOBAL_BUILD_NUMBER] [-c TESTS_CONFIG] [-i [INSTANCES ...]]
+                      [-o [OSS ...]] [-s [SCHEDULERS ...]] [-r [REGIONS ...]] [-f FEATURES [FEATURES ...]] [--show-output] [--reports {html,junitxml,json,cw} [{html,junitxml,json,cw} ...]] [--cw-region CW_REGION] [--cw-namespace CW_NAMESPACE] [--cw-timestamp-day-start] [--output-dir OUTPUT_DIR]
+                      [--custom-node-url CUSTOM_NODE_URL] [--custom-cookbook-url CUSTOM_COOKBOOK_URL] [--createami-custom-cookbook-url CREATEAMI_CUSTOM_COOKBOOK_URL] [--createami-custom-node-url CREATEAMI_CUSTOM_NODE_URL] [--custom-awsbatchcli-url CUSTOM_AWSBATCHCLI_URL]
+                      [--pcluster-installer-path PCLUSTER_INSTALLER_PATH] [--pre-install PRE_INSTALL] [--post-install POST_INSTALL] [--instance-types-data INSTANCE_TYPES_DATA] [--custom-ami CUSTOM_AMI] [--pcluster-git-ref PCLUSTER_GIT_REF] [--cookbook-git-ref COOKBOOK_GIT_REF]
+                      [--node-git-ref NODE_GIT_REF] [--ami-owner AMI_OWNER] [--available-amis-oss-x86 [AVAILABLE_AMIS_OSS_X86 ...]] [--available-amis-oss-arm [AVAILABLE_AMIS_OSS_ARM ...]] [--benchmarks] [--benchmarks-target-capacity BENCHMARKS_TARGET_CAPACITY] [--benchmarks-max-time BENCHMARKS_MAX_TIME]
+                      [--scaling-test-config SCALING_TEST_CONFIG] [--cluster-custom-resource-service-token CLUSTER_CUSTOM_RESOURCE_SERVICE_TOKEN] [--resource-bucket RESOURCE_BUCKET] [--lambda-layer-source LAMBDA_LAYER_SOURCE] [--api-definition-s3-uri API_DEFINITION_S3_URI]
+                      [--api-infrastructure-s3-uri API_INFRASTRUCTURE_S3_URI] [--api-uri API_URI] [--policies-uri POLICIES_URI] [--vpc-stack VPC_STACK] [--cluster CLUSTER] [--no-delete] [--delete-logs-on-success] [--stackname-suffix STACKNAME_SUFFIX] [--dry-run]
+                      [--iam-user-role-stack-name IAM_USER_ROLE_STACK_NAME] [--directory-stack-name DIRECTORY_STACK_NAME] [--slurm-database-stack-name SLURM_DATABASE_STACK_NAME] [--slurm-dbd-stack-name SLURM_DBD_STACK_NAME] [--munge-key-secret-arn MUNGE_KEY_SECRET_ARN]
+                      [--external-shared-storage-stack-name EXTERNAL_SHARED_STORAGE_STACK_NAME] [--bucket-name BUCKET_NAME] [--custom-security-groups-stack-name CUSTOM_SECURITY_GROUPS_STACK_NAME] [--force-run-instances] [--force-elastic-ip] [--retain-ad-stack] [--proxy-stack PROXY_STACK]
+                      [--build-image-roles-stack BUILD_IMAGE_ROLES_STACK] [--api-stack API_STACK] [--retain-on-failure N] 
 
 Run integration tests suite.
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   --key-name KEY_NAME   Key to use for EC2 instances (default: None)
   --key-path KEY_PATH   Path to the key to use for SSH connections (default: None)
-  -n PARALLELISM, --parallelism PARALLELISM
+  -n, --parallelism PARALLELISM
                         Tests parallelism for every region. (default: None)
   --sequential          Run tests in a single process. When not specified tests will spawn a process for each region under test. (default: False)
   --credential CREDENTIAL
-                        STS credential to assume when running tests in a specific region.Credentials need to be in the format <region>,<endpoint>,<ARN>,<externalId> and can be specified multiple times. <region> represents the region
-                        credentials are used for, <endpoint> is the sts endpoint to contact in order to assume credentials, <account-id> is the id of the account where the role to assume is defined, <externalId> is the id to use when
-                        assuming the role. (e.g. ap-east-1,https://sts.us-east-1.amazonaws.com,arn:aws:iam::<account-id>:role/role-to-assume,externalId) (default: None)
+                        STS credential to assume when running tests in a specific region.Credentials need to be in the format <region>,<endpoint>,<ARN>,<externalId> and can be specified multiple times. <region> represents the region credentials are used for, <endpoint> is the sts endpoint to contact in
+                        order to assume credentials, <account-id> is the id of the account where the role to assume is defined, <externalId> is the id to use when assuming the role. (e.g. ap-east-1,https://sts.us-east-1.amazonaws.com,arn:aws:iam::<account-id>:role/role-to-assume,externalId) (default: None)
   --use-default-iam-credentials
                         Use the default IAM creds to run pcluster CLI commands. Skips the creation of pcluster CLI IAM role. (default: False)
   --retry-on-failures   Retry once more the failed tests after a delay of 60 seconds. (default: False)
   --tests-root-dir TESTS_ROOT_DIR
                         Root dir where integration tests are defined (default: ./tests)
+  --global-build-number GLOBAL_BUILD_NUMBER
+                        The build number passed from the testing pipelines (default: 0)
 
 Test dimensions:
-  -c TESTS_CONFIG, --tests-config TESTS_CONFIG
-                        Config file that specifies the tests to run and the dimensions to enable for each test. Note that when a config file is used the following flags are ignored: instances, regions, oss, schedulers. Refer to the docs
-                        for further details on the config format: https://github.com/aws/aws-parallelcluster/blob/develop/tests/integration-tests/README.md (default: None)
-  -i [INSTANCES [INSTANCES ...]], --instances [INSTANCES [INSTANCES ...]]
+  -c, --tests-config TESTS_CONFIG
+                        Config file that specifies the tests to run and the dimensions to enable for each test. Note that when a config file is used the following flags are ignored: instances, regions, oss, schedulers. Refer to the docs for further details on the config format: https://github.com/aws/aws-parallelcluster/blob/develop/tests/integration-tests/README.md (default: None)
+  -i, --instances [INSTANCES ...]
                         AWS instances under test. Ignored when tests-config is used. (default: [])
-  -o [OSS [OSS ...]], --oss [OSS [OSS ...]]
-                        OSs under test. Ignored when tests-config is used. (default: [])
-  -s [SCHEDULERS [SCHEDULERS ...]], --schedulers [SCHEDULERS [SCHEDULERS ...]]
+  -o, --oss [OSS ...]   OSs under test. Ignored when tests-config is used. (default: [])
+  -s, --schedulers [SCHEDULERS ...]
                         Schedulers under test. Ignored when tests-config is used. (default: [])
-  -r [REGIONS [REGIONS ...]], --regions [REGIONS [REGIONS ...]]
+  -r, --regions [REGIONS ...]
                         AWS regions where tests are executed. Ignored when tests-config is used. (default: [])
-  -f FEATURES [FEATURES ...], --features FEATURES [FEATURES ...]
+  -f, --features FEATURES [FEATURES ...]
                         Run only tests for the listed features. Prepending the not keyword to the feature name causes the feature to be excluded. (default: )
 
 Test reports:
   --show-output         Do not redirect tests stdout to file. Not recommended when running in multiple regions. (default: None)
+  --generate-historical-report
+                        Generate historical report for launch time and performance (default: False)
   --reports {html,junitxml,json,cw} [{html,junitxml,json,cw} ...]
-                        create tests report files. junitxml creates a junit-xml style report file. html creates an html style report file. json creates a summary with details for each dimensions. cw publishes tests metrics into
-                        CloudWatch (default: [])
+                        create tests report files. junitxml creates a junit-xml style report file. html creates an html style report file. json creates a summary with details for each dimensions. cw publishes tests metrics into CloudWatch (default: [])
   --cw-region CW_REGION
                         Region where to publish CloudWatch metrics (default: us-east-1)
   --cw-namespace CW_NAMESPACE
@@ -104,6 +106,8 @@ Custom packages and templates:
                         URL to a custom node package for the createami command. (default: None)
   --custom-awsbatchcli-url CUSTOM_AWSBATCHCLI_URL
                         URL to a custom awsbatch cli package. (default: None)
+  --pcluster-installer-path PCLUSTER_INSTALLER_PATH
+                        Path to ParallelCluster installer. (default: None)
   --pre-install PRE_INSTALL
                         URL to a pre install script (default: None)
   --post-install POST_INSTALL
@@ -122,15 +126,27 @@ AMI selection parameters:
                         Git ref of the custom node package used to build the AMI. (default: None)
   --ami-owner AMI_OWNER
                         Override the owner value when fetching AMIs to use with cluster. By default pcluster uses amazon. (default: None)
+  --available-amis-oss-x86 [AVAILABLE_AMIS_OSS_X86 ...]
+                        (optional) set to available x86 AMIs OSes in the account. If not specified, all supported OSes will be used. (default: [])
+  --available-amis-oss-arm [AVAILABLE_AMIS_OSS_ARM ...]
+                        (optional) set to available ARM AMIs OSes in the account. If not specified, all supported OSes will be used. (default: [])
 
 Benchmarks:
-  --benchmarks          Run benchmarks tests. Benchmarks tests will be run together with functionality tests. (default: False)
+  --benchmarks          run benchmarks tests. This disables the execution of all tests defined under the tests directory. (default: False)
+  --benchmarks-target-capacity BENCHMARKS_TARGET_CAPACITY
+                        set the target capacity for benchmarks tests (default: 200)
+  --benchmarks-max-time BENCHMARKS_MAX_TIME
+                        set the max waiting time in minutes for benchmarks tests (default: 30)
+
+Scaling stress test options:
+  --scaling-test-config SCALING_TEST_CONFIG
+                        config file with scaling test parameters (default: None)
 
 CloudFormation / Custom Resource options:
   --cluster-custom-resource-service-token CLUSTER_CUSTOM_RESOURCE_SERVICE_TOKEN
                         ServiceToken (ARN) Cluster CloudFormation custom resource provider (default: None)
   --resource-bucket RESOURCE_BUCKET
-                        Name of bucket to use to to retrieve standard hosted resources like CloudFormation templates. {region} can be used to parametrize this value, and the bucket name will be formatted with the region where the test will be run (default: None)
+                        Name of bucket to use to to retrieve standard hosted resources like CloudFormation templates. (default: None)
   --lambda-layer-source LAMBDA_LAYER_SOURCE
                         S3 URI of lambda layer to copy instead of building. (default: None)
 
@@ -147,25 +163,41 @@ Debugging/Development options:
   --vpc-stack VPC_STACK
                         Name of an existing vpc stack. (default: None)
   --cluster CLUSTER     Use an existing cluster instead of creating one. (default: None)
-  --iam-user-role-stack-name
-                        Name of an existing IAM user role stack. (default: None)
-  --directory-stack-name
-                        Name of CFN stack providing AD domain to be used for testing AD integration feature. (default: None)
-  --ldaps-nlb-stack-name
-                        Name of CFN stack providing NLB to enable use of LDAPS with a Simple AD directory when testing AD integration feature. (default: None)
-
   --no-delete           Don't delete stacks after tests are complete. (default: False)
+  --retain-on-failure N Retain cluster, VPC, IAM, and S3 bucket stacks for up to N failing tests
+                        (0=disabled, max 5). (default: 0)
   --delete-logs-on-success
                         delete CloudWatch logs when a test succeeds (default: False)
   --stackname-suffix STACKNAME_SUFFIX
                         set a suffix in the integration tests stack names (default: )
   --dry-run             Only show the list of tests that would run with specified options. (default: False)
+  --iam-user-role-stack-name IAM_USER_ROLE_STACK_NAME
+                        Name of an existing IAM user role stack. (default: None)
   --directory-stack-name DIRECTORY_STACK_NAME
                         Name of CFN stack providing AD domain to be used for testing AD integration feature. (default: None)
-  --ldaps-nlb-stack-name LDAPS_NLB_STACK_NAME
-                        Name of CFN stack providing NLB to enable use of LDAPS with a Simple AD directory when testing AD integration feature. (default: None)
-  --external-shared-storage-stack-name 
-                        Name of an existing external shared storage stack. (default: None)
+  --slurm-database-stack-name SLURM_DATABASE_STACK_NAME
+                        Name of CFN stack providing database stack to be used for testing Slurm accounting feature. (default: None)
+  --slurm-dbd-stack-name SLURM_DBD_STACK_NAME
+                        Name of CFN stack providing external Slurm dbd stack to be used for testing Slurm accounting feature. (default: None)
+  --munge-key-secret-arn MUNGE_KEY_SECRET_ARN
+                        ARN of the secret containing the munge key to be used for testing Slurm accounting feature. (default: None)
+  --external-shared-storage-stack-name EXTERNAL_SHARED_STORAGE_STACK_NAME
+                        Name of existing external shared storage stack. (default: None)
+  --bucket-name BUCKET_NAME
+                        Name of existing bucket. (default: None)
+  --custom-security-groups-stack-name CUSTOM_SECURITY_GROUPS_STACK_NAME
+                        Name of existing custom security groups stack. (default: None)
+  --force-run-instances
+                        Force the usage of EC2 run-instances boto3 API instead of create-fleet for compute fleet scaling up.Note: If there are multiple instances in the list, only the first will be used. (default: False)
+  --force-elastic-ip    Force the usage of Elastic IP for Multi network interface EC2 instances (default: False)
+  --retain-ad-stack     Retain AD stack and corresponding VPC stack. (default: False)
+  --proxy-stack PROXY_STACK
+                        Name of CFN stack providing a Proxy environment. (default: None)
+  --build-image-roles-stack BUILD_IMAGE_ROLES_STACK
+                        Name of CFN stack providing build image permissions. (default: None)
+  --api-stack API_STACK
+                        Name of CFN stack providing the ParallelCluster API infrastructure. (default: None)
+
 ```
 
 Here is an example of tests submission:
@@ -211,13 +243,6 @@ Here is an example of a tests suite definition file:
 {%- import 'common.jinja2' as common -%}
 ---
 test-suites:
-  cfn-init:
-    test_cfn_init.py::test_replace_compute_on_failure:
-      dimensions:
-        - regions: ["eu-central-1"]
-          instances: {{ common.INSTANCES_DEFAULT_X86 }}
-          oss: {{ common.OSS_ONE_PER_DISTRO }}
-          schedulers: ["slurm", "awsbatch"]
   cli_commands:
     test_cli_commands.py::test_hit_cli_commands:
       dimensions:
@@ -234,11 +259,11 @@ test-suites:
   cloudwatch_logging:
     test_cloudwatch_logging.py::test_cloudwatch_logging:
       dimensions:
-        # 1) run the test for all of the schedulers with alinux2
+        # 1) run the test for all of the schedulers with alinux2023
         - regions: ["ca-central-1"]
           instances: {{ common.INSTANCES_DEFAULT_X86 }}
-          oss: ["alinux2"]
-          schedulers: {{ common.SCHEDULERS_ALL }}
+          oss: ["alinux2023"]
+          schedulers: ["slurm"]
         # 2) run the test for all of the OSes with slurm
         - regions: ["ap-east-1"]
           instances: {{ common.INSTANCES_DEFAULT_X86 }}
@@ -247,7 +272,7 @@ test-suites:
         # 3) run the test for a single scheduler-OS combination on an ARM instance
         - regions: ["eu-west-1"]
           instances: {{ common.INSTANCES_DEFAULT_ARM }}
-          oss: ["alinux2"]
+          oss: ["alinux2023"]
           schedulers: ["slurm"]
 ```
 
@@ -258,12 +283,12 @@ of the selected test function which consist in the combination of all defined di
 cloudwatch_logging suite defined above will produce the following parametrization:
 
 ```
-cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ap-east-1-c5.xlarge-alinux2-slurm]
+cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ap-east-1-c5.xlarge-alinux2023-slurm]
 cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ap-east-1-c5.xlarge-centos7-slurm]
 cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ap-east-1-c5.xlarge-ubuntu1804-slurm]
-cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ca-central-1-c5.xlarge-alinux2-awsbatch]
-cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ca-central-1-c5.xlarge-alinux2-slurm]
-cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[eu-west-1-m6g.xlarge-alinux2-slurm]
+cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ca-central-1-c5.xlarge-alinux2023-awsbatch]
+cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[ca-central-1-c5.xlarge-alinux2023-slurm]
+cloudwatch_logging/test_cloudwatch_logging.py::test_cloudwatch_logging[eu-west-1-m6g.xlarge-alinux2023-slurm]
 ```
 
 Jinja directives can be used to simplify the declaration of the tests suites.
@@ -291,6 +316,61 @@ To do so you can specify a ZoneId in the regions dimension. So for example if yo
 the test will be executed in
 * `eu-west-1` using the AZ with ZoneId `euw1-az1` (ZoneId is consistent across accounts)
 * `eu-central-1` using a random AZ available in the region
+
+#### OS Rotation
+The framework includes automatic OS rotation to ensure that all supported operating systems are tested regularly:
+
+- The framework calculates a rotation index daily, and assign values to the jinja variables upon test running
+- Tests can be constrained to specific available AMIs using the `--available-amis-oss-x86` and `--available-amis-oss-arm` parameters
+- It can be customized to filter OS choices based on feature compatibility (e.g., DCV, Lustre, Batch scheduler support)
+
+Use Jinja variables in test configs with the pattern:
+```
+      dimensions:
+        - oss: [ {{ OS_X86_3 }} ]
+```
+
+#### Instance Type Rotation
+
+Similar to OS rotation, the framework also rotates instance types for dynamic testing:
+
+- Instance types are automatically discovered and rotated for major regions (us-east-1, us-west-2, eu-west-1)
+- Excludes legacy instance types (m1, m2, t1, etc.) for better test reliability
+
+Use Jinja variables in test configs with the pattern:
+```
+      dimensions:
+        - instances: [{{ US_EAST_1_INSTANCE_TYPE_0 }}.xlarge]
+```
+
+#### Capacity Reservation Management
+
+The framework includes automatic capacity reservation management for tests that require specific instance types with guaranteed capacity. This feature:
+
+- Automatically detects capacity reservation requirements in test configuration files using Jinja variables
+- Creates or modifies existing EC2 capacity reservations as needed
+- Supports placement groups and time-limited reservations
+- Supports several instance types in the same availability zone using `__` separator. For example, you can reserve 100 c5.xlarge for compute nodes and 1 c5n.18xlarge for the head node.
+- Falls back to default availability zones if reservations cannot be created
+
+Use Jinja variables in test configs with the pattern:
+```
+      dimensions:
+        - regions: [{{ INSTANCE_TYPE_CAPACITY_RESERVATION_COUNT_INSTANCES_HOURS_HOURS_[YESPG|NOPG]_[OS] }}]
+```
+
+For several instance types in the same AZ, use `__` to separate specifications:
+```
+      dimensions:
+        - regions: [{{ c5_xlarge_CAPACITY_RESERVATION_2_INSTANCES_2_HOURS_NOPG_alinux2023__m5_xlarge_CAPACITY_RESERVATION_2_INSTANCES_2_HOURS_NOPG_alinux2023 }}]
+```
+
+Example:
+```
+      # Reserve 2 c5.xlarge instances for 2 hours with placement group
+      dimensions:
+        - regions: []{{ c5_xlarge_CAPACITY_RESERVATION_2_INSTANCES_2_HOURS_YESPG_alinux2023 }}]
+```
 
 #### Using CLI options
 
@@ -336,7 +416,7 @@ tests_outputs
 └── $timestamp.out: directory containing tests reports
     ├── $region_i: directory containing tests reports for a single region
     │         ├── clusters_configs: directory storing all cluster configs used by test
-    │         │         ├── test_awsbatch.py::test_job_submission[c5.xlarge-eu-west-1-alinux2-awsbatch].config
+    │         │         ├── test_awsbatch.py::test_job_submission[c5.xlarge-eu-west-1-alinux2023-awsbatch].config
     │         │         └── ...
     │         ├── pytest.out: stdout of pytest for the given region
     │         ├── results.html: html report for the given region
@@ -370,6 +450,13 @@ metrics. You can use the options `--cw-region` (default `us-east-1`) and `--cw-n
 (default `ParallelCluster/IntegrationTests`) to specify what region and what metric namespace
 you want to use for the published metrics.
 
+### Test Metadata Management
+
+The framework automatically manages test metadata using DynamoDB tables for tracking test execution and results across regions. This system:
+
+- Creates metadata tables automatically in the appropriate reporting region
+- Tracks test execution metadata for analysis and reporting
+
 ### Parallelize Tests Execution
 The following options can be used to control tests parallelism:
 * `--sequential`: by default the tests orchestrator executes a separate parallel process for each region under test.
@@ -388,6 +475,7 @@ use the following options:
 * `--custom-node-url`: URL to a custom node package.
 * `--custom-cookbook-url`: URL to a custom cookbook package.
 * `--createami-custom-cookbook-url`: URL to a custom cookbook package for the createami command.
+* `--createami-custom-node-url`: URL to a custom node package for the createami command.
 * `--custom-template-url`: URL to a custom cfn template.
 * `--custom-awsbatchcli-url`: URL to a custom awsbatch cli package.
 * `--custom-ami`: custom AMI to use for all tests. Note that this custom AMI will be used
@@ -410,6 +498,16 @@ This preserves any stacks created for the test:
 python -m test_runner \
   ...
   --no-delete
+```
+
+Alternatively, use `--retain-on-failure N` to only preserve resources when a test fails.
+This is useful in CI where you want automatic cleanup on success but need the stacks
+available for debugging on failure. Resources are retained for up to N failing tests (max 5):
+
+```bash
+python -m test_runner \
+  ...
+  --retain-on-failure 1
 ```
 
 Then when you have a vpc stack and cluster, reference them when starting a test:
@@ -483,13 +581,13 @@ Here is how to define a simple parametrized test case:
 def test_case_1(region, instance, os, scheduler):
 ```
 This test case will be automatically parametrized and executed for all combination of input dimensions.
-For example, given as input dimensions `--regions "eu-west-1" --instances "c4.xlarge" --oss "alinux2"
+For example, given as input dimensions `--regions "eu-west-1" --instances "c5.xlarge" --oss "alinux2023"
 "ubuntu1804" --scheduler "awsbatch" "slurm"`, the following tests will run:
 ```
-test_case_1[eu-west-1-c4.xlarge-alinux2-awsbatch]
-test_case_1[eu-west-1-c4.xlarge-ubuntu1804-awsbatch]
-test_case_1[eu-west-1-c4.xlarge-alinux2-slurm]
-test_case_1[eu-west-1-c4.xlarge-ubuntu1804-slurm]
+test_case_1[eu-west-1-c5.xlarge-alinux2023-awsbatch]
+test_case_1[eu-west-1-c5.xlarge-ubuntu1804-awsbatch]
+test_case_1[eu-west-1-c5.xlarge-alinux2023-slurm]
+test_case_1[eu-west-1-c5.xlarge-ubuntu1804-slurm]
 ```
 
 If you don't need to reference the parametrized arguments in your test case you can simply replace the
@@ -497,8 +595,8 @@ function arguments with this annotation: `@pytest.mark.usefixtures("region", "os
 
 ```python
 @pytest.mark.regions(["us-east-1", "eu-west-1", "cn-north-1", "us-gov-west-1"])
-@pytest.mark.instances(["c5.xlarge", "t2.large"])
-@pytest.mark.dimensions("*", "*", "alinux2", "awsbatch")
+@pytest.mark.instances(["c5.xlarge", "t3.large"])
+@pytest.mark.dimensions("*", "*", "alinux2023", "awsbatch")
 @pytest.mark.usefixtures("region", "os", "instance", "scheduler")
 def test_case_2():
 ```
@@ -508,7 +606,7 @@ test cases then you can do it in the following way:
 
 ```python
 @pytest.mark.usefixtures("region", "os", "instance", "scheduler")
-@pytest.mark.parametrized("cluster_max_size", [5, 10])
+@pytest.mark.parametrize("cluster_max_size", [5, 10])
 def test_case_2(cluster_max_size):
 ```
 
@@ -534,27 +632,27 @@ The available markers are the following:
 For example, given the following test definition:
 ```python
 @pytest.mark.regions(["us-east-1", "eu-west-1", "cn-north-1", "us-gov-west-1"])
-@pytest.mark.instances(["c5.xlarge", "t2.large"])
-@pytest.mark.dimensions("*", "*", "alinux2", "awsbatch")
+@pytest.mark.instances(["c5.xlarge", "t3.large"])
+@pytest.mark.dimensions("*", "*", "alinux2023", "awsbatch")
 def test_case_1(region, instance, os, scheduler):
 ```
 The test is allowed to run against the following subset of dimensions:
 * region has to be one of `["us-east-1", "eu-west-1", "cn-north-1", "us-gov-west-1"]`
-* instance has to be one of `"c5.xlarge", "t2.large"`
-* os has to be `alinux2`
+* instance has to be one of `"c5.xlarge", "t3.large"`
+* os has to be `alinux2023`
 * scheduler has to be `awsbatch`
 
 While the following test case:
 ```python
 @pytest.mark.skip_regions(["us-east-1", "eu-west-1"])
-@pytest.mark.skip_dimensions("*", "c5.xlarge", "alinux2", "awsbatch")
-@pytest.mark.skip_dimensions("*", "c4.xlarge", "centos7", "slurm")
+@pytest.mark.skip_dimensions("*", "c5.xlarge", "alinux2023", "awsbatch")
+@pytest.mark.skip_dimensions("*", "c5.xlarge", "centos7", "slurm")
 def test_case_2(region, instance, os, scheduler):
 ```
 is allowed to run only if:
 * region is not `["us-east-1", "eu-west-1"]`
-* the triplet (instance, os, scheduler) is not `("c5.xlarge", "alinux2", "awsbatch")` or
-`("c4.xlarge", "centos7", "slurm")`
+* the triplet (instance, os, scheduler) is not `("c5.xlarge", "alinux2023", "awsbatch")` or
+`("c5.xlarge", "ubuntu2204", "slurm")`
 
 #### Default Invalid Dimensions
 
@@ -656,10 +754,10 @@ available in the `pcluster.config.yaml` files:
 * Test dimensions for the specific parametrized test case: `{{ region }}`, `{{ instance }}`, `{{ os }}`,
 `{{ scheduler }}`
 * EC2 key name specified at tests submission time by the user: `{{ key_name }}`
-* Networking related parameters: `{{ public_subnet_id }}`, `{{ public_subnet_ids }}`, 
+* Networking related parameters: `{{ public_subnet_id }}`, `{{ public_subnet_ids }}`,
 `{{ private_subnet_id }}` and `{{ private_subnet_ids }}`, where `{{ public_subnet_ids }}` and `{{ private_subnet_ids }}`
- contain a list of subnets for which the relative index points to subnets in the same AZ, e.g. 
-`{{ public_subnet_ids[2] }}` and `{{ private_subnet_ids[2] }}` will be in the same AZ   
+ contain a list of subnets for which the relative index points to subnets in the same AZ, e.g.
+`{{ public_subnet_ids[2] }}` and `{{ private_subnet_ids[2] }}` will be in the same AZ
 
 Additional parameters can be specified when calling the fixture to retrieve the rendered configuration
 as shown in the example above.
@@ -670,7 +768,7 @@ A VPC and the related subnets are automatically configured at the start of the i
 test. These resources are shared across all the tests and deleted when all tests are completed.
 
 The idea is to create a single VPC per region and have multiple subnets that allow to test different networking setups.
-A pair of subnets (public/private) for each available AZ, plus a subnet with VPC endpoints and no internet access, 
+A pair of subnets (public/private) for each available AZ, plus a subnet with VPC endpoints and no internet access,
 are generated with the following configuration:
 
 ```python
@@ -743,7 +841,7 @@ Scheduling:
       Networking:
         SubnetIds:
           - {{ private_subnet_ids[0] }}
-  ...          
+  ...
     - Name: queue-2
       Networking:
         SubnetIds:
@@ -883,7 +981,7 @@ test-suites:
           schedulers: ["slurm"]
         - regions: ["eu-west-1"]
           instances: {{ common.INSTANCES_DEFAULT_X86 }}
-          oss: ["ubuntu2004"]
+          oss: ["ubuntu2204"]
           schedulers: ["slurm"]
           benchmarks:
             - mpi_variants: ["openmpi"]
@@ -915,7 +1013,7 @@ test-suites:
       dimensions:
         - regions: ["eu-west-1"]
           instances: {{ common.INSTANCES_DEFAULT_X86 }}
-          oss: ["ubuntu2004"]
+          oss: ["ubuntu2204"]
           schedulers: ["slurm"]
           benchmarks:
             - mpi_variants: ["openmpi"]
@@ -950,84 +1048,6 @@ def run_benchmarks(request, mpi_variants, test_datadir, instance, os, region, be
 * `IdentityFile` option in `ssh/config` will trigger a `str has no attribute extend` bug in the `fabric` package.
 Please remove `IdentityFile` option from `ssh/config` before running the testing framework
 
-
-## Testing a scheduler plugin
-
-In order to run tests for a scheduler plugin you need to make sure the plugin is defined in the tests configuration
-file. This is done by including the following object:
-
-```yaml
-scheduler-plugins:
-  plugin_name:
-    scheduler-definition: https://url|s3://url|<path to upload_artifacts.sh script>
-    scheduler-commands: "path.to.module.SchedulerCommandsClass"
-    requires-sudo: true|false
-```
-
-`scheduler-plugin` defines an entry for each scheduler plugin you intend to enable in tests.
-For each scheduler plugin you can specify the following fields:
-* `scheduler-definition`: this can be a S3 or HTTPs URL pointing to the scheduler plugin definition. Alternatively,
-  it can be the path (relative or absolute) to the upload_artifacts.sh script. If the path is relative, it's relative to
-  integration tests suite root folder. The upload_artifacts.sh script is in charge to upload the scheduler-definition
-  into a given bucket, that will be created and passed by the test suite.
-* `scheduler-commands`: this is the path to a Python class implementing the scheduler commands interface
-  defined in `tests.common.schedulers_common.SchedulerCommands`.
-* `requires-sudo`: this needs to be set to true in case the scheduler plugin requires sudo privileges.
-
-Once this is done you can use the specified `plugin_name` as the value for the schedulers dimension.
-For example:
-
-```yaml
-test-suites:
-  scaling:
-    test_scaling.py::test_multiple_jobs_submission:
-      dimensions:
-        - regions: ["eu-west-1"]
-          instances: ["c5.xlarge"]
-          oss: ["alinux2"]
-          schedulers: ["slurm_plugin"]
-scheduler-plugins:
-  slurm_plugin:
-    scheduler-definition: s3://my-bucket/scheduler_plugins/slurm/plugin_definition.yaml
-    scheduler-commands: "tests.common.schedulers_common.SlurmCommands"
-    requires-sudo: true
-```
-
-In order to implement a test that is compatible with a scheduler plugin do the following:
-* Use the `scheduler_commands_factory` fixture to retrieve a scheduler_commands object to interact with the scheduler
-```python
-@pytest.mark.usefixtures("region", "os", "instance")
-def test_multiple_jobs_submission(
-    scheduler, region, pcluster_config_reader, clusters_factory, test_datadir, scheduler_commands_factory
-):
-    scaledown_idletime = 4
-    cluster_config = pcluster_config_reader(scaledown_idletime=scaledown_idletime)
-    cluster = clusters_factory(cluster_config)
-    remote_command_executor = RemoteCommandExecutor(cluster)
-    scheduler_commands = scheduler_commands_factory(remote_command_executor)
-    ...
-```
-* Use `scheduler_prefix` jinja variable to define a generic cluster configuration
-```yaml
-...
-Scheduling:
-  Scheduler: {{ scheduler }}
-  {{ scheduler_prefix }}Settings:
-    {% if scheduler == "plugin" %}
-    CustomSettings:
-      ScaledownIdletime: {{ scaledown_idletime }}
-    {% else %}
-    ScaledownIdletime: {{ scaledown_idletime }}
-    {% endif %}
-  {{ scheduler_prefix }}Queues:
-    - Name: queue-0
-      ComputeResources:
-        - Name: compute-resource-0
-          InstanceType: {{ instance }}
-      Networking:
-        SubnetIds:
-          - {{ public_subnet_id }}
-```
 ## Collect system analysis
 
 In case of performance degradation detected in tests, to speed up the root cause analysis it is useful to have a

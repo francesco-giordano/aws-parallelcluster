@@ -13,24 +13,17 @@ HeadNode:
     Secured: {{ imds_secured }}
 Scheduling:
   Scheduler: {{ scheduler }}
-  {% if scheduler == "awsbatch" %}AwsBatchQueues:{% else %}SlurmQueues:{% endif %}
+  SlurmQueues:
     - Name: queue-0
       Iam:
         S3Access:
           - BucketName: {{ bucket_name }}
       ComputeResources:
         - Name: compute-resource-0
-          {% if scheduler == "awsbatch" %}
-          InstanceTypes:
-            - {{ instance }}
-          MinvCpus: 1
-          DesiredvCpus: 1
-          {% else %}
           Instances:
             - InstanceType: {{ instance }}
           MinCount: 1
           MaxCount: 30
-          {% endif %}
       Networking:
         SubnetIds:
           - {{ private_subnet_id }}
@@ -43,7 +36,7 @@ SharedStorage:
       ImportPath: s3://{{ bucket_name }}
       ExportPath: s3://{{ bucket_name }}/export_dir
       DeploymentType: PERSISTENT_1
-      PerUnitStorageThroughput: 200
+      PerUnitStorageThroughput: 50
   {% for fsx_fs_id in existing_fsx_lustre_fs_ids %}
   - MountDir: {{ fsx_lustre_mount_dirs[loop.index] }} # the index of mount dirs starts from the second item. Because the first is used for the new FSx.
     Name: existingfsx{{ loop.index-1 }}

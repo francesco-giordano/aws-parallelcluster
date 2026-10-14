@@ -2,10 +2,56 @@ Imds:
   ImdsSupport: v2.0
 Region: us-east-1
 Image:
-  Os: centos7
+  Os: alinux2023
   CustomAmi: ami-12345678
+LoginNodes:
+  Pools:
+  - Name: pool1
+    InstanceType: t3.micro
+    Count: 1
+    GracetimePeriod: 10
+    Image:
+      CustomAmi: ami-12345678
+    Networking:
+      SubnetIds:
+      - subnet-12345678
+    Ssh:
+      AllowedIps: 1.2.3.4/32
+    Dcv:
+      Enabled: true
+      Port: 8443
+      AllowedIps: 0.0.0.0/0
+    CustomActions:
+      OnNodeStart:
+        Script: https://test.tgz  # s3:// | https://
+        Args:
+          - arg1
+          - arg2
+      OnNodeConfigured:
+        Script: https://test.tgz  # s3:// | https://
+        Args:
+          - arg1
+          - arg2
+      OnNodeUpdated:
+        Script: https://test.tgz  # s3:// | https://
+        Args:
+          - arg1
+          - arg2
+  - Name: pool2
+    InstanceType: t3.small
+    Count: 1
+    GracetimePeriod: 10
+    Image:
+      CustomAmi: ami-12345678
+    Networking:
+      SubnetIds:
+        - subnet-12345678
+    Ssh:
+      AllowedIps: 1.2.3.4/32
+    Iam:
+      InstanceRole: arn:aws:iam::aws:role/LoginNodeRole
 HeadNode:
-  InstanceType: t2.micro
+  InstanceType: t3.micro
   Networking:
     SubnetId: subnet-12345678
     ElasticIp: true  # true|false|EIP-id
@@ -20,13 +66,14 @@ HeadNode:
     AllowedIps: 1.2.3.4/32
   LocalStorage:
     RootVolume:
-      Size: 40
+      Size: 45
       Encrypted: true
       VolumeType: gp2
       Iops: 100
       DeleteOnTermination: true
     EphemeralVolume:
       MountDir: /test
+  SharedStorageType: Efs  # Ebs
   Dcv:
     Enabled: true
     Port: 8443
@@ -55,6 +102,7 @@ HeadNode:
     CustomAmi: ami-98765432
 Scheduling:
   Scheduler: slurm
+  ScalingStrategy: best-effort
   SlurmSettings:
     ScaledownIdletime: 10
     QueueUpdateStrategy: TERMINATE
@@ -66,6 +114,10 @@ Scheduling:
       Uri: test.databaseserver.com #required
       UserName: test_admin # required
       PasswordSecretArn: arn:aws:secretsmanager:us-east-1:111111111111:secret:Secret-xxxxxxxx-xxxxx  # required
+      DatabaseName: test_database_name
+    ExternalSlurmdbd:
+      Host: test.slurmdbd.host #required
+      Port: 6819
   SlurmQueues:
     - Name: queue1
       CapacityType: ONDEMAND
@@ -136,6 +188,9 @@ Scheduling:
           Efa:
             Enabled: true
             GdrSupport: false
+          LaunchTemplateOverrides:
+            LaunchTemplateId: lt-01234567890abcdef
+            Version: 1
       Iam:
         InstanceProfile: arn:aws:iam::aws:instance-profile/CustomNodeInstanceProfile
       Image:
@@ -167,10 +222,10 @@ SharedStorage:
     FsxLustreSettings:
       StorageCapacity: 3600
       DeploymentType: PERSISTENT_1  # PERSISTENT_1 | PERSISTENT_2 | SCRATCH_1 | SCRATCH_2
-      ImportedFileChunkSize: 1024
+      # ImportedFileChunkSize: 1024 # ImportedFileChunkSize cannot coexist with some of the fields
       DataCompressionType: LZ4
-      ExportPath: s3://bucket/folder
-      ImportPath: s3://bucket
+      # ExportPath: s3://bucket/folder # ExportPath cannot coexist with some of the fields
+      # ImportPath: s3://bucket # ImportPath cannot coexist with some of the fields
       WeeklyMaintenanceStartTime: "1:00:00"
       AutomaticBackupRetentionDays: 0
       CopyTagsToBackups: true
@@ -179,9 +234,34 @@ SharedStorage:
       # BackupId: backup-fedcba98 # BackupId cannot coexist with some of the fields
       KmsKeyId: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
       # FileSystemId: fs-12345678123456789 # FileSystemId cannot coexist with other fields
-      AutoImportPolicy: NEW  # NEW | NEW_CHANGED | NEW_CHANGED_DELETED
+      # AutoImportPolicy: NEW  # NEW | NEW_CHANGED | NEW_CHANGED_DELETED # AutoImportPolicy cannot coexist with some of the fields
       DriveCacheType: READ  # READ
       StorageType: HDD  # HDD | SSD
+      DataRepositoryAssociations:
+        - Name: dra1
+          BatchImportMetaDataOnCreate: false
+          DataRepositoryPath: s3://bucket/folder1
+          FileSystemPath: /one
+          ImportedFileChunkSize: 1024
+          AutoExportPolicy: [ NEW, CHANGED, DELETED ]
+          AutoImportPolicy: [ NEW, CHANGED, DELETED ]
+        - Name: dra2
+          BatchImportMetaDataOnCreate: false
+          DataRepositoryPath: s3://bucket/folder2
+          FileSystemPath: /two
+          ImportedFileChunkSize: 1024
+          AutoImportPolicy: [ NEW, DELETED ]
+        - Name: dra3
+          BatchImportMetaDataOnCreate: false
+          DataRepositoryPath: s3://bucket/folder3
+          FileSystemPath: /three
+          ImportedFileChunkSize: 1024
+          AutoExportPolicy: [ DELETED ]
+        - Name: dra4
+          BatchImportMetaDataOnCreate: false
+          DataRepositoryPath: s3://bucket/folder4
+          FileSystemPath: /four
+          ImportedFileChunkSize: 1024
   - MountDir: /my/mount/point4
     Name: name4
     StorageType: FsxOpenZfs
@@ -207,6 +287,8 @@ Monitoring:
   Dashboards:
     CloudWatch:
       Enabled: false  # true
+  Alarms:
+    Enabled: false  # true
 AdditionalPackages:
   IntelSoftware:
     IntelHpcPlatform: false
@@ -235,7 +317,6 @@ DevSettings:
     ChefCookbook: https://tests/aws-parallelcluster-cookbook-3.0.tgz
     ExtraChefAttributes: |
       {"cluster": {"scheduler_slots": "cores", "slurm_node_reg_mem_percent": 75, "realmemory_to_ec2memory_ratio": 0.95}}
-  AwsBatchCliPackage: s3://test/aws-parallelcluster-batch-3.0.tgz
   NodePackage: s3://test/aws-parallelcluster-node-3.0.tgz
   AmiSearchFilters:
     Tags:
@@ -244,6 +325,11 @@ DevSettings:
     - Key: tag2
       Value: value2
     Owner: self
+    NamePrefix: dlami-
   Timeouts:
     HeadNodeBootstrapTimeout: 1201  # Default 1800 (seconds)
     ComputeNodeBootstrapTimeout: 1001  # Default 1800 (seconds)
+    ComputeInstanceInfoTimeout: 95  # Default 90 (seconds)
+  ComputeStartupTimeMetricEnabled: false
+DeploymentSettings:
+  DisableSudoAccessForDefaultUser: True

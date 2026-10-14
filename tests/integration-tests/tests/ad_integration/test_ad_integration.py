@@ -10,35 +10,35 @@
 # This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
-import datetime
 import io
 import logging
+import os
 import os as os_lib
 import random
 import string
 import time
 import zipfile
-from collections import defaultdict
+from functools import partial
+from pathlib import Path
 
 import boto3
 import pytest
 from assertpy import assert_that
 from cfn_stacks_factory import CfnStack, CfnVpcStack
-from OpenSSL import crypto
-from OpenSSL.crypto import FILETYPE_PEM, TYPE_RSA, X509, dump_certificate, dump_privatekey
-from paramiko import RSAKey
+from framework.fixture_utils import SharedFixture, xdist_session_fixture
+from paramiko import Ed25519Key
 from remote_command_executor import RemoteCommandExecutor
 from retrying import retry
 from time_utils import seconds
-from utils import generate_stack_name, random_alphanumeric, render_jinja_template
+from utils import find_stack_by_tag, generate_stack_name, is_directory_supported, random_alphanumeric
+from xdist import get_xdist_worker_id
 
 from tests.ad_integration.cluster_user import ClusterUser
-from tests.common.osu_common import compile_osu
-from tests.common.utils import get_sts_endpoint, retrieve_latest_ami, run_system_analyzer
-from tests.storage.test_fsx_lustre import create_fsx_ontap, create_fsx_open_zfs
+from tests.common.utils import run_system_analyzer
 
-NUM_USERS_TO_CREATE = 5
+NUM_USERS_TO_CREATE = 1000
 NUM_USERS_TO_TEST = 3
+USER_NAME_PREFIX = "PclusterUser"
 
 
 def get_infra_stack_outputs(stack_name):
@@ -47,6 +47,19 @@ def get_infra_stack_outputs(stack_name):
         entry.get("OutputKey"): entry.get("OutputValue")
         for entry in cfn.describe_stacks(StackName=stack_name)["Stacks"][0]["Outputs"]
     }
+
+
+def get_user_password(secret_arn):
+    client = boto3.client("secretsmanager")
+    return client.get_secret_value(SecretId=secret_arn)["SecretString"]
+
+
+def get_vpc_public_subnet(vpc_id):
+    ec2 = boto3.client("ec2")
+    for entry in ec2.describe_subnets(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["Subnets"]:
+        if entry.get("MapPublicIpOnLaunch"):
+            return {"public_subnet_id": entry.get("SubnetId")}
+    return None
 
 
 def get_infra_stack_parameters(stack_name):
@@ -63,48 +76,49 @@ def _get_ldap_base_search(domain_name):
 
 def get_ad_config_param_vals(
     directory_stack_outputs,
-    nlb_stack_parameters,
-    password_secret_arn,
     ldap_tls_ca_cert,
     directory_type,
     directory_protocol,
     directory_certificate_verification,
 ):
     """Return a dict used to set values for config file parameters."""
-    ldap_search_base = _get_ldap_base_search(directory_stack_outputs.get("DomainName"))
-    domain_short_name = directory_stack_outputs.get("DomainShortName")
-    read_only_username = directory_stack_outputs.get("ReadOnlyUserName")
-
-    if directory_type == "SimpleAD":
-        ldap_default_bind_dn = f"CN={read_only_username},CN=Users,{ldap_search_base}"
-    elif directory_type == "MicrosoftAD":
-        ldap_default_bind_dn = f"CN={read_only_username},OU=Users,OU={domain_short_name},{ldap_search_base}"
-    else:
+    if directory_type not in ("MicrosoftAD", "SimpleAD"):
         raise Exception(f"Unknown directory type: {directory_type}")
 
     if directory_protocol == "ldaps":
-        ldap_uri = nlb_stack_parameters.get("DomainName")
+        ldap_uri = directory_stack_outputs.get("DomainAddrLdaps")
     elif directory_protocol == "ldap":
-        directory_dns_ips = directory_stack_outputs.get("DirectoryDnsIpAddresses")
-        ldap_uri = ",".join(f"ldap://{ip}" for ip in directory_dns_ips.split(","))
+        ldap_uri = directory_stack_outputs.get("DomainAddrLdap")
     else:
         raise Exception(f"Unknown directory protocol: {directory_protocol}")
     return {
         "ldap_uri": ldap_uri,
-        "ldap_search_base": ldap_search_base,
-        "ldap_default_bind_dn": ldap_default_bind_dn,
-        "password_secret_arn": password_secret_arn,
+        "domain_name": directory_stack_outputs.get("DomainName"),
+        "domain_read_only_user": directory_stack_outputs.get("DomainReadOnlyUser"),
+        "password_secret_arn": directory_stack_outputs.get("PasswordSecretArn"),
         "ldap_tls_ca_cert": ldap_tls_ca_cert,
         "directory_protocol": directory_protocol,
         "ldap_tls_req_cert": "never" if directory_certificate_verification is False else "hard",
+        "private_subnet_id": directory_stack_outputs.get("PrivateSubnetIds").split(",")[0],
     }
 
 
-def get_fsx_config_param_vals(fsx_factory, svm_factory):
-    fsx_ontap_fs_id = create_fsx_ontap(fsx_factory, num=1)[0]
-    fsx_ontap_volume_id = svm_factory(fsx_ontap_fs_id)[0]
-    fsx_open_zfs_volume_id = create_fsx_open_zfs(fsx_factory, num=1)[0]
-    return {"fsx_ontap_volume_id": fsx_ontap_volume_id, "fsx_open_zfs_volume_id": fsx_open_zfs_volume_id}
+def setup_directory_certificate(
+    cluster,
+    ldap_tls_ca_cert,
+    certificate_path,
+    directory_certificate_verification,
+):
+    remote_command_executor = RemoteCommandExecutor(cluster)
+    remote_command_executor.run_remote_command(
+        f"sudo cp certificate.crt {ldap_tls_ca_cert} && sudo -i systemctl restart sssd",
+        additional_files=[certificate_path],
+    )
+    if directory_certificate_verification:
+        logging.info("Sleeping 10 minutes to wait for the SSSD agent use the certificate.")
+        time.sleep(600)
+        # TODO: we have to sleep for 10 minutes to wait for the SSSD agent use the newly placed certificate.
+        #  We should look for other methods to let the SSSD agent use the new certificate more quickly
 
 
 def _add_file_to_zip(zip_file, path, arcname):
@@ -119,6 +133,24 @@ def _add_file_to_zip(zip_file, path, arcname):
         zinfo = zipfile.ZipInfo(filename=arcname)
         zinfo.external_attr = 0o644 << 16
         zip_file.writestr(zinfo, input_file.read())
+
+
+def add_tag_to_stack(stack_name, key, value):
+    cfn = boto3.resource("cloudformation")
+    stack = cfn.Stack(stack_name)
+    add_tag = True
+    for tag in stack.tags:
+        if tag.get("Key") == "DO-NOT-DELETE":
+            add_tag = False
+            break
+    if add_tag:
+        stack.update(
+            UsePreviousTemplate=True,
+            Capabilities=["CAPABILITY_IAM"],
+            Tags=[
+                {"Key": key, "Value": value},
+            ],
+        )
 
 
 def zip_dir(path):
@@ -142,40 +174,44 @@ def zip_dir(path):
     return file_out
 
 
-@pytest.fixture(scope="class")
-def store_secret_in_secret_manager(request, cfn_stacks_factory):
-    secret_arns = {}
+def _get_stack_parameters(directory_type, vpc_stack, keypair):
+    private_subnet = vpc_stack.get_private_subnet()
+    private_subnets = vpc_stack.get_all_private_subnets().copy()
+    private_subnets.remove(private_subnet)
 
-    def _store_secret(region, secret_string=None, secret_binary=None):
-        secrets_manager_client = boto3.client("secretsmanager")
-        if secret_string is None and secret_binary is None:
-            logging.error("secret string and scecret binary can not both be empty")
-        secret_name = generate_stack_name("integ-tests-secret", request.config.getoption("stackname_suffix"))
-        if secret_string:
-            secret_arn = secrets_manager_client.create_secret(Name=secret_name, SecretString=secret_string)["ARN"]
-        else:
-            secret_arn = secrets_manager_client.create_secret(Name=secret_name, SecretBinary=secret_binary)["ARN"]
-        if secret_arns.get(region):
-            secret_arns[region].append(secret_arn)
-        else:
-            secret_arns[region] = [secret_arn]
-        return secret_arn
+    # Compact generator (stays under CFN's 4096-char param limit): create NUM_USERS_TO_CREATE users
+    # but only activate the first NUM_USERS_TO_TEST (the ones the test logs in with) to keep the
+    # password-reset step under the custom-resource Lambda timeout.
+    users = f"prefix:{USER_NAME_PREFIX};num:{NUM_USERS_TO_CREATE};active:{NUM_USERS_TO_TEST}"
 
-    yield _store_secret
+    stack_parameters = [
+        {
+            "ParameterKey": "DomainName",
+            "ParameterValue": f"{directory_type.lower()}.{random_alphanumeric(size=10)}.multiuser.pcluster",
+        },
+        {
+            "ParameterKey": "AdminPassword",
+            "ParameterValue": "".join(random.choices(string.ascii_letters + string.digits, k=60)),
+        },
+        {
+            "ParameterKey": "ReadOnlyPassword",
+            "ParameterValue": "".join(random.choices(string.ascii_letters + string.digits, k=60)),
+        },
+        {"ParameterKey": "UserNames", "ParameterValue": users},
+        {
+            "ParameterKey": "UserPassword",
+            "ParameterValue": "".join(random.choices(string.ascii_letters + string.digits, k=60)),
+        },
+        {"ParameterKey": "DirectoryType", "ParameterValue": directory_type},
+        {"ParameterKey": "Vpc", "ParameterValue": vpc_stack.cfn_outputs["VpcId"]},
+        {"ParameterKey": "PrivateSubnetOne", "ParameterValue": private_subnet},
+        {"ParameterKey": "PrivateSubnetTwo", "ParameterValue": private_subnets[0]},
+        {"ParameterKey": "Keypair", "ParameterValue": keypair},
+    ]
+    return stack_parameters
 
-    if request.config.getoption("no_delete"):
-        logging.info("Not deleting stack secrets because --no-delete option was specified")
-    else:
-        for region, secrets in secret_arns.items():
-            secrets_manager_client = boto3.client("secretsmanager", region_name=region)
-            for secret_arn in secrets:
-                logging.info("Deleting secret %s", secret_arn)
-                secrets_manager_client.delete_secret(SecretId=secret_arn)
 
-
-def _create_directory_stack(
-    cfn_stacks_factory, request, directory_type, test_resources_dir, region, vpc_stack: CfnVpcStack
-):
+def _create_directory_stack(cfn_stacks_factory, request, directory_type, region, vpc_stack: CfnVpcStack):
     directory_stack_name = generate_stack_name(
         f"integ-tests-MultiUserInfraStack{directory_type}", request.config.getoption("stackname_suffix")
     )
@@ -183,63 +219,27 @@ def _create_directory_stack(
     if directory_type not in ("MicrosoftAD", "SimpleAD"):
         raise Exception(f"Unknown directory type: {directory_type}")
 
-    directory_stack_template_path = os_lib.path.join(test_resources_dir, "ad_stack.yaml")
-    account_id = (
-        boto3.client("sts", region_name=region, endpoint_url=get_sts_endpoint(region))
-        .get_caller_identity()
-        .get("Account")
-    )
-    ad_admin_password = "".join(random.choices(string.ascii_letters + string.digits, k=60))
-    ad_user_password = "".join(random.choices(string.ascii_letters + string.digits, k=60))
-    ad_domain_name = f"{directory_type.lower()}.{random_alphanumeric(size=10)}.multiuser.pcluster"
-    ad_domain_short_name = "NET"
-    ad_base_search = _get_ldap_base_search(ad_domain_name)
-    if directory_type == "SimpleAD":
-        ad_users_base_search = f"CN=Users,{ad_base_search}"
-    elif directory_type == "MicrosoftAD":
-        ad_users_base_search = f"OU=Users,OU={ad_domain_short_name},{ad_base_search}"
-    else:
-        raise Exception(f"Unknown directory type: {directory_type}")
+    directory_stack_template_path = "../../cloudformation/ad/ad-integration.yaml"
 
-    config_args = {
-        "region": region,
-        "account": account_id,
-        "admin_node_ami_id": retrieve_latest_ami(region, "alinux2"),
-        "admin_node_instance_type": "c5.large",
-        "admin_node_key_name": request.config.getoption("key_name"),
-        "ad_users_base_search": ad_users_base_search,
-        "ad_admin_password": ad_admin_password,
-        "ad_user_password": ad_user_password,
-        "ad_domain_name": ad_domain_name,
-        "ad_domain_short_name": ad_domain_short_name,
-        "default_ec2_domain": "ec2.internal" if region == "us-east-1" else f"{region}.compute.internal",
-        "ad_admin_user": "Administrator" if directory_type == "SimpleAD" else "Admin",
-        "directory_type": directory_type,
-    }
     logging.info("Creating stack %s", directory_stack_name)
-    with open(render_jinja_template(directory_stack_template_path, **config_args)) as directory_stack_template:
-        private_subnet = vpc_stack.get_private_subnet()
-        private_subnets = vpc_stack.get_all_private_subnets().copy()
-        private_subnets.remove(private_subnet)
 
-        params = [
-            {"ParameterKey": "Vpc", "ParameterValue": vpc_stack.cfn_outputs["VpcId"]},
-            {"ParameterKey": "PrivateSubnetOne", "ParameterValue": private_subnet},
-            {
-                "ParameterKey": "PrivateSubnetTwo",
-                "ParameterValue": private_subnets[0],
-            },
-            {"ParameterKey": "PublicSubnetOne", "ParameterValue": vpc_stack.get_public_subnet()},
-        ]
+    with open(directory_stack_template_path) as directory_stack_template:
+        stack_parameters = _get_stack_parameters(directory_type, vpc_stack, request.config.getoption("key_name"))
+        tags = [{"Key": "parallelcluster:integ-tests-ad-stack", "Value": directory_type}]
+        if request.config.getoption("retain_ad_stack"):
+            tags.append({"Key": "DO-NOT-DELETE", "Value": "Retained for integration testing"})
+
         directory_stack = CfnStack(
             name=directory_stack_name,
             region=region,
             template=directory_stack_template.read(),
-            parameters=params,
-            capabilities=["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"],
+            parameters=stack_parameters,
+            capabilities=["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"],
+            tags=tags,
         )
     cfn_stacks_factory.create_stack(directory_stack)
     logging.info("Creation of stack %s complete", directory_stack_name)
+
     return directory_stack
 
 
@@ -250,208 +250,127 @@ def _check_ssm_success(ssm_client, command_id, instance_id):
     ).is_true()
 
 
-def _populate_directory_with_users(directory_stack, num_users_to_create, region):
-    logging.info("Creating %s users in directory service", str(num_users_to_create))
-    ssm_client = boto3.client("ssm", region_name=region)
-    document_name = directory_stack.cfn_resources["UserAddingDocument"]
-    admin_node_instance_id = directory_stack.cfn_resources["AdDomainAdminNode"]
-    directory_id = directory_stack.cfn_resources["Directory"]
-    command_id = ssm_client.send_command(
-        DocumentName=document_name,
-        InstanceIds=[directory_stack.cfn_resources["AdDomainAdminNode"]],
-        MaxErrors="0",
-        TimeoutSeconds=num_users_to_create * 4 + 300,
-        Parameters={"DirectoryId": [directory_id], "NumUsersToCreate": [str(num_users_to_create)]},
-    )["Command"]["CommandId"]
-    _check_ssm_success(ssm_client, command_id, admin_node_instance_id)
-    logging.info("Creation of %s users in directory service completed", str(num_users_to_create))
+@xdist_session_fixture(autouse=True)
+def directory_shared_namespace(request):
+    """
+    Session-scoped, cross-worker shared namespace (a directory path) for per-key SharedFixtures.
+    IMPORTANT: This fixture does NOT create any AD stacks. It only returns a path that all workers can use.
+    Returning a plain string keeps it picklable for SharedFixture.
+    """
+    base_dir = Path(f"{request.config.getoption('output_dir', '')}/tmp/shared_fixtures")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    # Return a simple, picklable value (string path)
+    return str(base_dir)
 
 
-def _create_nlb_stack(
+def _directory_stack_resource_generator(
+    existing_directory_stack_name,
+    directory_type,
+    region,
+    vpc_stack,
     cfn_stacks_factory,
     request,
-    directory_stack,
-    region,
-    test_resources_dir,
-    certificate_arn,
-    certificate_secret_arn,
-    domain_name,
 ):
-    nlb_stack_template_path = os_lib.path.join(test_resources_dir, "NLB_SimpleAD.yaml")
-    nlb_stack_name = generate_stack_name(
-        "integ-tests-MultiUserInfraStackNLB", request.config.getoption("stackname_suffix")
-    )
-    logging.info("Creating stack %s", nlb_stack_name)
-    nlb_stack = None
-    with open(nlb_stack_template_path) as nlb_stack_template:
-        nlb_stack = CfnStack(
-            name=nlb_stack_name,
-            region=region,
-            template=nlb_stack_template.read(),
-            parameters=[
-                {
-                    "ParameterKey": "LDAPSCertificateARN",
-                    "ParameterValue": certificate_arn,
-                },
-                {
-                    "ParameterKey": "VPCId",
-                    "ParameterValue": directory_stack.cfn_outputs["VpcId"],
-                },
-                {
-                    "ParameterKey": "SubnetId1",
-                    "ParameterValue": directory_stack.cfn_outputs["PrivateSubnetIds"].split(",")[0],
-                },
-                {
-                    "ParameterKey": "SubnetId2",
-                    "ParameterValue": directory_stack.cfn_outputs["PrivateSubnetIds"].split(",")[1],
-                },
-                {
-                    "ParameterKey": "SimpleADPriIP",
-                    "ParameterValue": directory_stack.cfn_outputs["DirectoryDnsIpAddresses"].split(",")[0],
-                },
-                {
-                    "ParameterKey": "SimpleADSecIP",
-                    "ParameterValue": directory_stack.cfn_outputs["DirectoryDnsIpAddresses"].split(",")[1],
-                },
-                {
-                    "ParameterKey": "CertificateSecretArn",
-                    "ParameterValue": certificate_secret_arn,
-                },
-                {
-                    "ParameterKey": "DomainName",
-                    "ParameterValue": domain_name,
-                },
-            ],
-        )
-    cfn_stacks_factory.create_stack(nlb_stack)
-    logging.info("Creation of NLB stack %s complete", nlb_stack_name)
-    return nlb_stack
+    """
+    Generator used by SharedFixture to provide a shared value (stack info) and run cleanup.
+    Yields a picklable dict: {"name": <stack_name>, "managed": <bool>}
+    """
+    managed = False
+    if existing_directory_stack_name:
+        name = existing_directory_stack_name
+    else:
+        # Try to reuse an existing tagged stack; if not found, create a new one.
+        stack_prefix = f"integ-tests-MultiUserInfraStack{directory_type}"
+        name = find_stack_by_tag("parallelcluster:integ-tests-ad-stack", region, stack_prefix)
+        if not name:
+            directory_stack = _create_directory_stack(cfn_stacks_factory, request, directory_type, region, vpc_stack)
+            name = directory_stack.name
+            managed = True
 
-
-def _generate_certificate(common_name):
-    key = crypto.PKey()
-    key.generate_key(TYPE_RSA, 2048)
-    crt = X509()
-    crt.get_subject().commonName = common_name
-    crt.get_issuer().commonName = common_name
-    now = datetime.datetime.now()
-    days = datetime.timedelta(days=90)
-    asn1_time_format = "%Y%m%d000000Z"
-    crt.set_notBefore((now - days).strftime(asn1_time_format).encode())
-    crt.set_notAfter((now + days).strftime(asn1_time_format).encode())
-    crt.set_serial_number(random.randrange(1, 99999))
-    crt.set_pubkey(key)
-    crt.sign(key, "sha256")
-    certificate = dump_certificate(FILETYPE_PEM, crt)
-    private_key = dump_privatekey(FILETYPE_PEM, key)
-    certificate_arn = boto3.client("acm").import_certificate(Certificate=certificate, PrivateKey=private_key)[
-        "CertificateArn"
-    ]
-    return certificate_arn, certificate
-
-
-@retry(stop_max_attempt_number=10, wait_exponential_multiplier=2000, wait_exponential_max=30000)
-def _delete_certificate(certificate_arn, region):
-    logging.info("Deleting ACM certificate %s in region %s", certificate_arn, region)
-    boto3.client("acm", region_name=region).delete_certificate(CertificateArn=certificate_arn)
+    try:
+        yield {"name": name, "managed": managed}
+    finally:
+        # Only delete stacks created by this fixture, and only if not retained/no-delete.
+        if managed and not (request.config.getoption("no_delete") or request.config.getoption("retain_ad_stack")):
+            try:
+                cfn_stacks_factory.delete_stack(name, region)
+                logging.info("Deleted directory stack %s in %s", name, region)
+            except Exception as e:
+                logging.warning("Failed deleting directory stack %s: %s", name, e)
 
 
 @pytest.fixture(scope="class")
-def directory_factory(request, cfn_stacks_factory, vpc_stack, store_secret_in_secret_manager):  # noqa: C901
-    # TODO: use external data file and file locking in order to share directories across processes
-    created_directory_stacks = defaultdict(dict)
-    created_certificates = defaultdict(dict)
+def directory_factory(directory_shared_namespace, vpc_stacks_shared, cfn_stacks_factory, request):
+    """
+    Class-scoped factory: build a per-(region, directory_type) SharedFixture and acquire it on call.
+    We purposely track only the last acquire (per worker) and release it once in teardown,
+    based on the current assumption that each worker invokes this factory only once.
+    """
+    base_dir = Path(directory_shared_namespace)  # shared path provided by the session fixture
+    last_shared_fixture = None
 
-    def _directory_factory(
-        existing_directory_stack_name,
-        existing_nlb_stack_name,
-        directory_type,
-        test_resources_dir,
-        region,
-    ):
+    def _factory(existing_directory_stack_name: str, directory_type: str, region: str) -> str:
+        xdist_worker_id = get_xdist_worker_id(request)
+        nodeid = getattr(request.node, "nodeid", "N/A")
+        logging.info(
+            "directory_factory invoked: region=%s, directory_type=%s, existing_provided=%s, worker=%s, nodeid=%s",
+            region,
+            directory_type,
+            bool(existing_directory_stack_name),
+            xdist_worker_id,
+            nodeid,
+        )
+
+        # Use-only path: explicit stack name, no sharing/cleanup.
         if existing_directory_stack_name:
-            directory_stack_name = existing_directory_stack_name
-            directory_stack = CfnStack(name=directory_stack_name, region=region, template=None)
-            logging.info("Using pre-existing directory stack named %s", directory_stack_name)
-        elif created_directory_stacks.get(region, {}).get("directory"):
-            directory_stack_name = created_directory_stacks.get(region, {}).get("directory")
-            directory_stack = CfnStack(name=directory_stack_name, region=region, template=None)
-            logging.info("Using directory stack named %s created by another test", directory_stack_name)
-        else:
-            directory_stack = _create_directory_stack(
-                cfn_stacks_factory,
-                request,
+            return existing_directory_stack_name
+
+        if not is_directory_supported(region, directory_type):
+            raise RuntimeError(f"Directory type {directory_type} not supported in {region}")
+
+        pid = os.getpid()
+        xdist_worker_id_and_pid = f"{xdist_worker_id}: {pid}"
+
+        vpc_stack = vpc_stacks_shared[region]  # one VPC per region (from vpc_stacks_shared)
+
+        shared_fixture = SharedFixture(
+            name=f"directory_stack_{region}_{directory_type}",
+            shared_save_location=base_dir,
+            fixture_func=_directory_stack_resource_generator,  # generator does find-or-create + cleanup
+            fixture_func_args=(
+                existing_directory_stack_name,
                 directory_type,
-                test_resources_dir,
                 region,
                 vpc_stack,
-            )
-            directory_stack_name = directory_stack.name
-            created_directory_stacks[region]["directory"] = directory_stack_name
-            _populate_directory_with_users(directory_stack, NUM_USERS_TO_CREATE, region)
-        # Create NLB that will be used to enable LDAPS
-        if existing_nlb_stack_name:
-            nlb_stack_name = existing_nlb_stack_name
-            logging.info("Using pre-existing NLB stack named %s", nlb_stack_name)
-        elif created_directory_stacks.get(region, {}).get("nlb"):
-            nlb_stack_name = created_directory_stacks.get(region, {}).get("nlb")
-            logging.info("Using NLB stack named %s created by another test", nlb_stack_name)
-        else:
-            directory_stack_outputs = get_infra_stack_outputs(directory_stack_name)
-            common_name = directory_stack_outputs.get("DomainName")
-            certificate_arn, certificate = _generate_certificate(common_name)
-            certificate_secret_arn = store_secret_in_secret_manager(region, secret_binary=certificate)
-            created_certificates[region] = certificate_arn
-            nlb_stack_name = _create_nlb_stack(
                 cfn_stacks_factory,
                 request,
-                directory_stack,
-                region,
-                test_resources_dir,
-                certificate_arn,
-                certificate_secret_arn,
-                common_name,
-            ).name
-            created_directory_stacks[region]["nlb"] = nlb_stack_name
-        return directory_stack_name, nlb_stack_name
+            ),
+            fixture_func_kwargs={},
+            xdist_worker_id_and_pid=xdist_worker_id_and_pid,
+            log_file=request.config.getoption("tests_log_file"),
+        )
 
-    yield _directory_factory
+        data = shared_fixture.acquire()
+        nonlocal last_shared_fixture
+        last_shared_fixture = shared_fixture
+        payload = data.fixture_return_value or {}
+        stack_name = payload.get("name")
+        return stack_name
 
-    for region, stack_dict in created_directory_stacks.items():
-        for stack_type in stack_dict:
-            stack_name = stack_dict[stack_type]
-            if request.config.getoption("no_delete"):
-                logging.info(
-                    "Not deleting %s stack named %s in region %s because --no-delete option was specified",
-                    stack_type,
-                    stack_name,
-                    region,
-                )
-            else:
-                logging.info("Deleting %s stack named %s in region %s", stack_type, stack_name, region)
-                cfn_stacks_factory.delete_stack(stack_name, region)
+    yield _factory
 
-    for region, certificate_arn in created_certificates.items():
-        if request.config.getoption("no_delete"):
-            logging.info(
-                "Not deleting ACM certificate %s in region %s because --no-delete option was specified",
-                certificate_arn,
-                region,
-            )
-        else:
-            logging.info(
-                "Sleeping 180 seconds to wait for the ACM certificate %s in region %s to become unused",
-                certificate_arn,
-                region,
-            )
-            time.sleep(180)
-            _delete_certificate(certificate_arn=certificate_arn, region=region)
+    # Release once (per worker). If future changes call this factory multiple times per worker,
+    # switch to tracking all acquisitions and releasing each.
+    if last_shared_fixture:
+        try:
+            last_shared_fixture.release()
+        except Exception as e:
+            logging.warning("Error releasing shared fixture: %s", e)
 
 
-def _run_user_workloads(users, test_datadir, remote_command_executor):
-    compile_osu("openmpi", remote_command_executor)
+def _run_user_workloads(users, test_datadir, shared_storage_mount_dirs):
     _check_whoami(users)
-    _check_files_permissions(users)
+    _check_files_permissions(users, shared_storage_mount_dirs)
     job_submission_outputs = [
         # TODO: render script from template to dynamically provide path to benchmarks and other paramters
         user.submit_script(str(test_datadir / "workload.sh"), nodes=2, slots=2).stdout
@@ -475,7 +394,7 @@ def _check_whoami(users):
         assert_that(result).is_equal_to(user.alias)
 
 
-def _check_files_permissions(users):
+def _check_files_permissions(users, shared_storage_mount_dirs):
     logging.info("Checking file permissions")
     for index, user in enumerate(users):
         logging.info("Checking permission of sssd.conf file from user %s", user.alias)
@@ -486,14 +405,11 @@ def _check_files_permissions(users):
         result = user.run_remote_command("cat /etc/sssd/sssd.conf", raise_on_error=False)
         _check_failed_result_for_permission_denied(result)
         previous_user = users[index - 1]
-        for path in [
-            f"{user.home_dir}/my_file",
-            f"/shared/{user.alias}_file",
-            f"/ebs/{user.alias}_file",
-            f"/efs/{user.alias}_file",
-            f"/fsxopenzfs/{user.alias}_file",
-            f"/fsxontap/{user.alias}_file",
-        ]:
+        paths = [f"{user.home_dir}/my_file"]
+        paths.extend(
+            [f"{shared_storage_mount_dir}/{user.alias}_file" for shared_storage_mount_dir in shared_storage_mount_dirs]
+        )
+        for path in paths:
             user.run_remote_command(f"touch {path}")
             # Specify that only owner of file should have read/write access.
             user.run_remote_command(f"chmod 600 {path}")
@@ -518,6 +434,7 @@ def _check_ssh_key_generation(user, remote_command_executor, scheduler_commands,
     # Remove user's home directory to ensure public SSH key doesn't exist
     user.cleanup()
     user.ssh_connect()
+    time.sleep(3)
     _check_home_directory(user, remote_command_executor)
     _check_ssh_key(user, generate_ssh_keys_for_user, remote_command_executor, scheduler_commands)
     logging.info(
@@ -526,12 +443,12 @@ def _check_ssh_key_generation(user, remote_command_executor, scheduler_commands,
         generate_ssh_keys_for_user,
     )
 
-    ssh_key_path = f"{user.home_dir}/.ssh/id_rsa"
+    ssh_key_path = f"{user.home_dir}/.ssh/id_ed25519"
 
     # Switch User - Interactive
     switch_user_commands = [
-        f"sudo su {user.alias} --command='ls {ssh_key_path}'",
-        f"sudo su - {user.alias} --command='ls {ssh_key_path}'",
+        f"sudo su {user.alias} --command='sleep 3 && ls {ssh_key_path}'",
+        f"sudo su - {user.alias} --command='sleep 3 && ls {ssh_key_path}'",
         # TODO: Checks for below commands are failing, even if a manual check on the same cluster succeeds.
         # We need to double check these failures, but we can consider them as not blocking.
         # f"sudo -u {user.alias} ls {ssh_key_path}",
@@ -566,6 +483,8 @@ def _check_home_directory(user, remote_command_executor):
     """
     logging.info("Checking home directory for user %s", user.alias)
 
+    # Reset underlying ssh connection to prevent occasional `file not found` issues
+    remote_command_executor.reset_connection()
     check_existence = f"sudo ls {user.home_dir}"
     result = remote_command_executor.run_remote_command(check_existence)
     assert_that(result.failed).is_false()
@@ -587,7 +506,10 @@ def _check_ssh_key(user, ssh_generation_enabled, remote_command_executor, schedu
     """
     logging.info("Checking SSH key for user %s (expected to exist: %s)", user.alias, ssh_generation_enabled)
 
-    ssh_key_path = f"{user.home_dir}/.ssh/id_rsa"
+    ssh_key_path = f"{user.home_dir}/.ssh/id_ed25519"
+
+    # Reset underlying ssh connection to prevent occasional `file not found` issues
+    remote_command_executor.reset_connection()
 
     # Check existence
     check_existence = f"sudo ls {ssh_key_path}"
@@ -629,7 +551,7 @@ def _check_ssh_key(user, ssh_generation_enabled, remote_command_executor, schedu
         key_content = result.stdout
         assert_that(key_content).is_not_empty()
 
-        user_command_executor = user.ssh_connect(pkey=RSAKey.from_private_key(io.StringIO(key_content)))
+        user_command_executor = user.ssh_connect(pkey=Ed25519Key.from_private_key(io.StringIO(key_content)))
         logging.info(
             "Verified SSH key usable for SSH login to the head node for user %s (expected to exist: %s)",
             user.alias,
@@ -654,15 +576,11 @@ def _check_ssh_key(user, ssh_generation_enabled, remote_command_executor, schedu
     "directory_type,directory_protocol,directory_certificate_verification",
     [
         ("SimpleAD", "ldap", False),
-        # ("SimpleAD", "ldaps", False),
-        ("SimpleAD", "ldaps", True),
-        ("MicrosoftAD", "ldap", False),
-        # ("MicrosoftAD", "ldaps", False),
         ("MicrosoftAD", "ldaps", True),
     ],
 )
 @pytest.mark.usefixtures("os", "instance")
-def test_ad_integration(
+def test_ad_integration(  # noqa: C901
     region,
     scheduler,
     scheduler_commands_factory,
@@ -672,13 +590,8 @@ def test_ad_integration(
     directory_certificate_verification,
     test_datadir,
     directory_factory,
-    fsx_factory,
-    svm_factory,
     request,
-    store_secret_in_secret_manager,
     clusters_factory,
-    run_benchmarks,
-    benchmarks,
 ):
     """
     Verify AD integration works as expected.
@@ -688,69 +601,46 @@ def test_ad_integration(
     3. SSH key for AD users is created when the property GenerateSshKeysForUsers is true;
     4. AD users can submit workloads;
     5. AD users filter out by LdapAccessFilter cannot access to the head node.
-
-    Optionally, it executes performance tests using OSU benchmarks.
     """
-    head_node_instance_type = "c5n.18xlarge" if request.config.getoption("benchmarks") else "c5.xlarge"
-    compute_instance_type_info = {"name": "c5.xlarge", "num_cores": 4}
-    config_params = {
-        "compute_instance_type": compute_instance_type_info.get("name"),
-        "head_node_instance_type": head_node_instance_type,
-    }
-    directory_stack_name, nlb_stack_name = directory_factory(
+    if not is_directory_supported(region, directory_type):
+        pytest.skip(f"Skipping the test because directory type {directory_type} is not supported in region {region}")
+
+    directory_stack_name = directory_factory(
         request.config.getoption("directory_stack_name"),
-        request.config.getoption("ldaps_nlb_stack_name"),
         directory_type,
-        str(test_datadir),
         region,
     )
     directory_stack_outputs = get_infra_stack_outputs(directory_stack_name)
-    ad_user_password = directory_stack_outputs.get("UserPassword")
-    password_secret_arn = store_secret_in_secret_manager(
-        region, secret_string=directory_stack_outputs.get("AdminPassword")
-    )
-    nlb_stack_parameters = get_infra_stack_parameters(nlb_stack_name)
-    ldap_tls_ca_cert = "/opt/parallelcluster/shared/directory_service/certificate.crt"
-    config_params.update(
-        get_ad_config_param_vals(
-            directory_stack_outputs,
-            nlb_stack_parameters,
-            password_secret_arn,
-            ldap_tls_ca_cert,
-            directory_type,
-            directory_protocol,
-            directory_certificate_verification,
-        )
-    )
-    config_params.update(get_fsx_config_param_vals(fsx_factory, svm_factory))
-    cluster_config = pcluster_config_reader(benchmarks=benchmarks, **config_params)
-    cluster = clusters_factory(cluster_config)
+    ad_user_password = get_user_password(directory_stack_outputs.get("UserPasswordSecretArn"))
 
-    certificate_secret_arn = nlb_stack_parameters.get("CertificateSecretArn")
-    certificate = boto3.client("secretsmanager").get_secret_value(SecretId=certificate_secret_arn)["SecretBinary"]
-    with open(test_datadir / "certificate.crt", "wb") as f:
+    ldap_tls_ca_cert = "/opt/parallelcluster/shared/directory_service/certificate.crt"
+    config_params = get_ad_config_param_vals(
+        directory_stack_outputs,
+        ldap_tls_ca_cert,
+        directory_type,
+        directory_protocol,
+        directory_certificate_verification,
+    )
+
+    vpc = directory_stack_outputs.get("VpcId")
+    config_params.update(get_vpc_public_subnet(vpc))
+
+    certificate_secret_arn = directory_stack_outputs.get("DomainCertificateSecretArn")
+    certificate = boto3.client("secretsmanager").get_secret_value(SecretId=certificate_secret_arn)["SecretString"]
+    with open(test_datadir / "certificate.crt", "w") as f:
         f.write(certificate)
 
-    # Publish compute node count metric every minute via cron job
-    # TODO: use metrics reporter from the benchmarks module
-    remote_command_executor = RemoteCommandExecutor(cluster)
-    remote_command_executor.run_remote_command(
-        f"sudo cp certificate.crt {ldap_tls_ca_cert} && sudo service sssd restart",
-        additional_files=[test_datadir / "certificate.crt"],
+    cluster_config = pcluster_config_reader(**config_params)
+    cluster = clusters_factory(
+        cluster_config,
+        post_cluster_setup=partial(
+            setup_directory_certificate,
+            ldap_tls_ca_cert=ldap_tls_ca_cert,
+            certificate_path=test_datadir / "certificate.crt",
+            directory_certificate_verification=directory_certificate_verification,
+        ),
     )
-    if directory_certificate_verification:
-        logging.info("Sleeping 10 minutes to wait for the SSSD agent use the certificate.")
-        time.sleep(600)
-        # TODO: we have to sleep for 10 minutes to wait for the SSSD agent use the newly placed certificate.
-        #  We should look for other methods to let the SSSD agent use the new certificate more quickly
     remote_command_executor = RemoteCommandExecutor(cluster)
-    metric_publisher_script = "publish_compute_node_count_metric.sh"
-    remote_metric_publisher_script_path = f"/shared/{metric_publisher_script}"
-    crontab_expression = f"* * * * * {remote_metric_publisher_script_path} &> {remote_metric_publisher_script_path}.log"
-    remote_command_executor.run_remote_command(
-        f"echo '{crontab_expression}' | crontab -",
-        additional_files={str(test_datadir / metric_publisher_script): remote_metric_publisher_script_path},
-    )
 
     scheduler_commands = scheduler_commands_factory(remote_command_executor)
     assert_that(NUM_USERS_TO_TEST).is_less_than_or_equal_to(NUM_USERS_TO_CREATE)
@@ -767,14 +657,13 @@ def test_ad_integration(
                 scheduler_commands_factory,
             )
         )
-    _run_user_workloads(users, test_datadir, remote_command_executor)
+    shared_storage_mount_dirs = ["/shared"]
+    _run_user_workloads(users, test_datadir, shared_storage_mount_dirs)
     logging.info("Testing pcluster update and generate ssh keys for user")
     _check_ssh_key_generation(users[0], remote_command_executor, scheduler_commands, False)
 
     # Verify access control with ldap access provider.
-    updated_config_file = pcluster_config_reader(
-        config_file="pcluster.config.update.yaml", benchmarks=benchmarks, **config_params
-    )
+    updated_config_file = pcluster_config_reader(config_file="pcluster.config.update.yaml", **config_params)
     cluster.update(str(updated_config_file), force_update="true")
     # Reset stateful connection variables after the cluster update
     remote_command_executor = RemoteCommandExecutor(cluster)
@@ -788,9 +677,7 @@ def test_ad_integration(
 
     # Verify access control with simple access provider.
     # With this test we also verify that AdditionalSssdConfigs is working properly.
-    updated_config_file = pcluster_config_reader(
-        config_file="pcluster.config.update2.yaml", benchmarks=benchmarks, **config_params
-    )
+    updated_config_file = pcluster_config_reader(config_file="pcluster.config.update2.yaml", **config_params)
     cluster.update(str(updated_config_file), force_update="true")
     # Reset stateful connection variables after the cluster update
     remote_command_executor = RemoteCommandExecutor(cluster)
@@ -803,7 +690,6 @@ def test_ad_integration(
         _check_ssh_auth(user=user, expect_success=user.alias != "PclusterUser0")
 
     run_system_analyzer(cluster, scheduler_commands_factory, request)
-    run_benchmarks(users[0].remote_command_executor(), users[0].scheduler_commands(), diretory_type=directory_type)
 
 
 def _check_ssh_auth(user, expect_success=True):
@@ -815,3 +701,88 @@ def _check_ssh_auth(user, expect_success=True):
             raise e
         else:
             logging.info(f"SSH access denied for user {user.alias}, as expected")
+
+
+@pytest.mark.parametrize(
+    "directory_type,directory_protocol,directory_certificate_verification",
+    [
+        ("SimpleAD", "ldap", False),
+        ("MicrosoftAD", "ldaps", True),
+    ],
+)
+@pytest.mark.usefixtures("os", "instance")
+def test_ad_integration_on_login_nodes(
+    region,
+    scheduler,
+    scheduler_commands_factory,
+    pcluster_config_reader,
+    directory_type,
+    directory_protocol,
+    directory_certificate_verification,
+    test_datadir,
+    directory_factory,
+    request,
+    store_secret_in_secret_manager,
+    clusters_factory,
+):
+    """
+    Verify AD integration works as expected.
+    In particular, it verifies that :
+    1. AD users can access to the login node, both with password and SSH key (if created);
+    2. SSH key for AD users is created when the property GenerateSshKeysForUsers is true;
+    3. AD users can submit workloads;
+    """
+    directory_stack_name = directory_factory(
+        request.config.getoption("directory_stack_name"),
+        directory_type,
+        region,
+    )
+    directory_stack_outputs = get_infra_stack_outputs(directory_stack_name)
+    ad_user_password = get_user_password(directory_stack_outputs.get("PasswordSecretArn"))
+    ldap_tls_ca_cert = "/opt/parallelcluster/shared_login_nodes/directory_service/certificate.crt"
+    config_params = get_ad_config_param_vals(
+        directory_stack_outputs,
+        ldap_tls_ca_cert,
+        directory_type,
+        directory_protocol,
+        directory_certificate_verification,
+    )
+    config_params.update(get_vpc_public_subnet(directory_stack_outputs.get("VpcId")))
+    certificate_secret_arn = directory_stack_outputs.get("DomainCertificateSecretArn")
+    certificate = boto3.client("secretsmanager").get_secret_value(SecretId=certificate_secret_arn)["SecretString"]
+    with open(test_datadir / "certificate.crt", "w") as f:
+        f.write(certificate)
+
+    cluster_config = pcluster_config_reader(**config_params)
+    cluster = clusters_factory(
+        cluster_config,
+        post_cluster_setup=partial(
+            setup_directory_certificate,
+            ldap_tls_ca_cert=ldap_tls_ca_cert,
+            certificate_path=test_datadir / "certificate.crt",
+            directory_certificate_verification=directory_certificate_verification,
+        ),
+    )
+
+    login_node_command_executor = RemoteCommandExecutor(cluster, use_login_node=True)
+    scheduler_commands = scheduler_commands_factory(login_node_command_executor)
+    users = []
+    for user_num in range(NUM_USERS_TO_TEST):
+        users.append(
+            ClusterUser(
+                user_num,
+                test_datadir,
+                cluster,
+                scheduler,
+                login_node_command_executor,
+                ad_user_password,
+                scheduler_commands_factory,
+            )
+        )
+
+    # Let's test that AD users can login into a LoginNode and they'll have their home and ssh-key created
+    # With the same behavior we have in the HeadNode
+    for user in users:
+        _check_ssh_key_generation(user, login_node_command_executor, scheduler_commands, True)
+
+    run_system_analyzer(cluster, scheduler_commands_factory, request)

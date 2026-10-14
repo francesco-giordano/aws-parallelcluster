@@ -13,7 +13,7 @@ import os
 from datetime import datetime
 
 from pcluster.aws.aws_api import AWSApi
-from pcluster.aws.aws_resources import FsxStorageInfo, InstanceTypeInfo
+from pcluster.aws.aws_resources import FsxStorageInfo, ImageInfo, InstanceTypeInfo
 from pcluster.aws.cfn import CfnClient
 from pcluster.aws.dynamo import DynamoResource
 from pcluster.aws.ec2 import Ec2Client
@@ -24,6 +24,7 @@ from pcluster.aws.imagebuilder import ImageBuilderClient
 from pcluster.aws.kms import KmsClient
 from pcluster.aws.logs import LogsClient
 from pcluster.aws.resource_groups import ResourceGroupsClient
+from pcluster.aws.resource_groups_tagging_api import ResourceGroupsTaggingApiClient
 from pcluster.aws.route53 import Route53Client
 from pcluster.aws.s3 import S3Client
 from pcluster.aws.s3_resource import S3Resource
@@ -37,7 +38,8 @@ class _DummyInstanceTypeInfo(InstanceTypeInfo):
         self,
         instance_type,
         gpu_count=0,
-        interfaces_count=1,
+        cards_count=1,
+        cards_index_list=None,
         vcpus=1,
         supported_architectures=None,
         efa_supported=False,
@@ -46,7 +48,8 @@ class _DummyInstanceTypeInfo(InstanceTypeInfo):
     ):
         super().__init__(instance_type_data={})
         self._gpu_count = gpu_count
-        self._max_network_interface_count = interfaces_count
+        self._max_network_card_count = cards_count
+        self._network_cards_index_list = cards_index_list if cards_index_list else []
         self._vcpus = vcpus
         self._supported_architectures = supported_architectures if supported_architectures else ["x86_64"]
         self._efa_supported = efa_supported
@@ -57,13 +60,16 @@ class _DummyInstanceTypeInfo(InstanceTypeInfo):
     def gpu_count(self):
         return self._gpu_count
 
-    def max_network_interface_count(self):
-        return self._max_network_interface_count
+    def max_network_cards(self):
+        return self._max_network_card_count
+
+    def network_cards_list(self):
+        return self._network_cards_index_list
 
     def default_threads_per_core(self):
         # There are more instance types, but for the simplicity of the mock,
-        # we consider only t2 as having one thread per core.
-        return 1 if self._instance_type.startswith("t2") else 2
+        # we consider only t3 as having one thread per core.
+        return 1 if self._instance_type.startswith("t3") else 2
 
     def vcpus_count(self):
         return self._vcpus
@@ -102,11 +108,11 @@ class _DummyAWSApi(AWSApi):
         self._sts = _DummyStsClient()
         self._s3_resource = _DummyS3Resource()
         self._iam = _DummyIamClient()
-        self._batch = _DummyBatchClient()
         self._logs = _DummyLogsClient()
         self._ddb_resource = _DummyDynamoResource()
         self._route53 = _DummyRoute53Client()
         self._resource_groups = _DummyResourceGroupsClient()
+        self._resource_groups_tagging_api = _DummyResourceGroupsTaggingApiClient()
         self._secretsmanager = _DummySecretsManagerClient()
         self._ssm = _DummySsmClient()
 
@@ -124,12 +130,16 @@ class _DummyEc2Client(Ec2Client):
     def __init__(self):
         """Override Parent constructor. No real boto3 client is created."""
         self.capacity_reservations_cache = {
-            "cr-54321fcdbd5971234": {"InstanceType": "t2.micro", "AvailabilityZone": "string"},
-            "cr-321456cdbd597f551": {"InstanceType": "t2.micro", "AvailabilityZone": "string"},
-            "cr-123": {"InstanceType": "t2.micro", "AvailabilityZone": "string"},
-            "cr-234": {"InstanceType": "t2.micro", "AvailabilityZone": "string"},
+            "cr-54321fcdbd5971234": {"InstanceType": "t3.micro", "AvailabilityZone": "string"},
+            "cr-321456cdbd597f551": {"InstanceType": "t3.micro", "AvailabilityZone": "string"},
+            "cr-123": {"InstanceType": "t3.micro", "AvailabilityZone": "string"},
+            "cr-234": {"InstanceType": "t3.micro", "AvailabilityZone": "string"},
         }
         self.security_groups_cache = {}
+
+    def describe_launch_template_version(self, launch_template_id, version):
+        """Return mock launch template data."""
+        return {"NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": "subnet-123"}]}
 
     def get_official_image_id(self, os, architecture, filters=None):
         return "dummy-ami-id"
@@ -173,6 +183,9 @@ class _DummyEc2Client(Ec2Client):
 
     def get_subnet_vpc(self, subnet_id):
         return "vpc-123"
+
+    def is_subnet_public(self, subnet_id):
+        return True
 
     def get_eip_allocation_id(self, eip):
         return "eipalloc-123"
@@ -266,7 +279,7 @@ class _DummyFSxClient(FSxClient):
         return result
 
     def describe_file_caches(self, file_cache_ids):
-        """Describe FSx File cache."""
+        """Describe File Cache."""
         if self.non_happy_describe_storage_error is not None:
             raise self.non_happy_describe_storage_error
 
@@ -318,6 +331,27 @@ class _DummyIamClient(IamClient):
         """Override Parent constructor. No real boto3 client is created."""
         pass
 
+    def get_instance_profile(self, instance_profile_name):
+        return {
+            "InstanceProfile": {
+                "InstanceProfileId": "XXXXXXXXXX",
+                "Roles": [
+                    {
+                        "AssumeRolePolicyDocument": "<URL-encoded-JSON>",
+                        "RoleId": "XXXXXXXXXX",
+                        "CreateDate": "2024-01-10T06:33:26Z",
+                        "RoleName": "Mocked-RoleName",
+                        "Path": "/",
+                        "Arn": "arn:aws:iam::XXXXXXXXXXXX:role/Mocked-RoleName",
+                    }
+                ],
+                "CreateDate": "2024-01-10T06:33:26Z",
+                "InstanceProfileName": instance_profile_name,
+                "Path": "/",
+                "Arn": "arn:aws:iam::XXXXXXXXXXXX:instance-profile/instance_profile_name",
+            }
+        }
+
 
 class _DummyDynamoResource(DynamoResource):
     def __init__(self):
@@ -355,6 +389,16 @@ class _DummyResourceGroupsClient(ResourceGroupsClient):
             if group != "skip_dummy"
             else super().get_capacity_reservation_ids_from_group_resources(group)
         )
+
+
+class _DummyResourceGroupsTaggingApiClient(ResourceGroupsTaggingApiClient):
+    def __init__(self):
+        """Override Parent constructor. No real boto3 client is created."""
+        pass
+
+    def get_resources(self, tag_filters, resource_type_filters=None):
+        """Return an empty list of resource ARNs by default."""
+        return []
 
 
 class _DummySecretsManagerClient(SecretsManagerClient):
@@ -397,5 +441,43 @@ class _DummySsmClient(SsmClient):
 def mock_aws_api(mocker, mock_instance_type_info=True):
     """Mock AWS Api."""
     mocker.patch("pcluster.aws.aws_api.AWSApi.instance", return_value=_DummyAWSApi())
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.describe_image",
+        return_value=ImageInfo({"BlockDeviceMappings": [{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 35}}]}),
+    )
+
+    # Mock example b300 override to stress template size limits
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.describe_launch_template_version",
+        return_value={
+            "NetworkInterfaces": [
+                {
+                    "NetworkCardIndex": 0,
+                    "DeviceIndex": 0,
+                    "Groups": ["sg-abcd1234", "sg-abcd1235", "sg-abcd1236", "sg-abcd1237", "sg-abcd1238"],
+                    "SubnetId": "subnet-123456789",
+                }
+            ]
+            + [
+                eni
+                for card in range(1, 17)
+                for eni in (
+                    {
+                        "NetworkCardIndex": card,
+                        "DeviceIndex": 0,
+                        "InterfaceType": "efa-only",
+                        "Groups": ["sg-abcd1234", "sg-abcd1235", "sg-abcd1236", "sg-abcd1237", "sg-abcd1238"],
+                        "SubnetId": "subnet-123456789",
+                    },
+                    {
+                        "NetworkCardIndex": card,
+                        "DeviceIndex": 1,
+                        "Groups": ["sg-abcd1234", "sg-abcd1235", "sg-abcd1236", "sg-abcd1237", "sg-abcd1238"],
+                        "SubnetId": "subnet-123456789",
+                    },
+                )
+            ]
+        },
+    )
     if mock_instance_type_info:
         mocker.patch("pcluster.aws.ec2.Ec2Client.get_instance_type_info", side_effect=_DummyInstanceTypeInfo)

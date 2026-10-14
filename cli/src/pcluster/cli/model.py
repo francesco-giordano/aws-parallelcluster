@@ -20,12 +20,6 @@ from pcluster.api import encoder, openapi
 from pcluster.cli.exceptions import APIOperationException
 from pcluster.utils import to_kebab_case, to_snake_case, yaml_load
 
-# For importing package resources
-try:
-    import importlib.resources as pkg_resources  # pylint: disable=ungrouped-imports
-except ImportError:
-    import importlib_resources as pkg_resources
-
 
 def _param_overrides(operation, param):
     """Provide updates to the model that are specific to the CLI."""
@@ -88,7 +82,7 @@ def _resolve_body(spec, operation):
 
 def package_spec():
     """Load the OpenAPI specification from the package."""
-    with pkg_resources.open_text(openapi, "openapi.yaml") as spec_file:
+    with importlib.resources.open_text(openapi, "openapi.yaml") as spec_file:  # pylint: disable=deprecated-method
         return yaml_load(spec_file.read())
 
 
@@ -170,7 +164,8 @@ def get_function_from_name(function_name):
 
     while not module:
         try:
-            module = importlib.import_module(module_name)
+            # TODO: Fix semgrep finding in line below. https://sg.run/y6Jk
+            module = importlib.import_module(module_name)  # nosem
         except ImportError as import_error:
             last_import_error = import_error
             if "." in module_name:

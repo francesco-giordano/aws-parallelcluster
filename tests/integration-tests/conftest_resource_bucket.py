@@ -22,7 +22,6 @@ import tempfile
 from pathlib import Path
 
 import boto3
-import pkg_resources
 import pytest
 import urllib3
 from framework.fixture_utils import xdist_session_fixture
@@ -30,17 +29,19 @@ from framework.fixture_utils import xdist_session_fixture
 from tests.common.utils import get_installed_parallelcluster_version
 
 logger = logging.getLogger()
-NODE_VERSION = "v16.19.0"  # maintenance version compatible with alinux2's GLIBC
+NODE_VERSION = "v18.20.3"
 
 
 def install_pc(basepath, pc_version):
     """Install ParallelCluster to a temporary directory"""
     tempdir = Path(basepath) / "python"
-    root = Path(pkg_resources.resource_filename(__name__, "/../.."))
+    root = Path(__file__).parent.parent.parent
     cli_dir = root / "cli"
     try:
         logger.info("installing ParallelCluster packages...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", f"{cli_dir}[awslambda]", "-t", tempdir])
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "jsonschema==4.17.3", f"{cli_dir}[awslambda]", "-t", tempdir]
+        )
         # The following are provided by the lambda runtime
         shutil.rmtree(tempdir / "botocore")
         shutil.rmtree(tempdir / "boto3")
@@ -103,15 +104,16 @@ def get_resource_map():
 
 @xdist_session_fixture()
 def resource_bucket_shared(request, s3_bucket_factory_shared, lambda_layer_source):
-    root = Path(pkg_resources.resource_filename(__name__, "/../.."))
+    root = Path(__file__).parent.parent.parent
     if request.config.getoption("resource_bucket"):
-        return  # short-circuit this fixture if a resource-bucket is provided
+        return None  # short-circuit this fixture if a resource-bucket is provided
 
     for region, s3_bucket in s3_bucket_factory_shared.items():
         logger.info(f"Uploading artifacts to: {s3_bucket}[{region}]")
+        s3_resource = boto3.resource("s3", region_name=region)
         for file, key in get_resource_map().items():
             logger.info(f"  {root / file} -> {s3_bucket}/{key}")
-            boto3.resource("s3").Bucket(s3_bucket).upload_file(str(root / file), key)
+            s3_resource.Bucket(s3_bucket).upload_file(str(root / file), key)
 
         layer_key = (
             f"parallelcluster/{get_installed_parallelcluster_version()}/layers/aws-parallelcluster/lambda-layer.zip"
@@ -120,7 +122,7 @@ def resource_bucket_shared(request, s3_bucket_factory_shared, lambda_layer_sourc
             bucket, key = re.search(r"s3://([^/]*)/(.*)", lambda_layer_source).groups()
             source = {"Bucket": bucket, "Key": key}
             logger.info(f"Copying Lambda Layer from: s3://{bucket}/{key} -> s3://{s3_bucket}/{layer_key}")
-            boto3.resource("s3").Bucket(s3_bucket).copy(source, layer_key)
+            s3_resource.Bucket(s3_bucket).copy(source, layer_key)
         else:
             with tempfile.TemporaryDirectory() as basepath:
                 install_pc(basepath, get_installed_parallelcluster_version())
@@ -130,7 +132,7 @@ def resource_bucket_shared(request, s3_bucket_factory_shared, lambda_layer_sourc
                     zipfilename = Path(zipfile.name)
                     logger.info(f"    {zipfilename} -> {s3_bucket}/{layer_key}")
                     shutil.make_archive(zipfilename.with_suffix(""), format="zip", root_dir=basepath)
-                    boto3.resource("s3").Bucket(s3_bucket).upload_file(str(zipfilename), layer_key)
+                    s3_resource.Bucket(s3_bucket).upload_file(str(zipfilename), layer_key)
 
     logger.info(s3_bucket_factory_shared)
     return s3_bucket_factory_shared
@@ -139,5 +141,5 @@ def resource_bucket_shared(request, s3_bucket_factory_shared, lambda_layer_sourc
 @pytest.fixture(scope="class")
 def resource_bucket(request, region, resource_bucket_shared):
     if request.config.getoption("resource_bucket"):
-        return request.config.getoption("resource_bucket").format(region)
+        return request.config.getoption("resource_bucket").format(region=region)
     return resource_bucket_shared[region]

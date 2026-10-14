@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import click
-import matplotlib.pyplot as plt
 
 from ..common import METRICS
 
@@ -17,6 +16,8 @@ def generate(datadir, outdir, configurations, nodes):
 
 
 def generate_plots(datadir, outdir, configurations, nodes):
+    import matplotlib.pyplot as plt
+
     # Load samples
     samples = {}
     for configuration in configurations:
@@ -50,7 +51,7 @@ def generate_plots(datadir, outdir, configurations, nodes):
         # Box Plots
         box_plots = {}
         for configuration in configurations:
-            positions = all_positions[configurations.index(configuration) :: n_configurations]  # noqa: E203
+            positions = all_positions[configurations.index(configuration) :: n_configurations]  # noqa: E203, B038
             box_plots[configuration] = ax.boxplot(
                 data[configuration],
                 patch_artist=True,

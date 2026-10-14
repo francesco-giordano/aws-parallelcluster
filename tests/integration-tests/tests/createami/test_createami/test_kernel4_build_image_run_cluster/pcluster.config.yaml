@@ -10,18 +10,13 @@ HeadNode:
   Imds:
     Secured: False
 Scheduling:
-  Scheduler: {{ scheduler }}
-  {% if scheduler == "awsbatch" %}AwsBatchQueues:{% else %}SlurmQueues:{% endif %}
-  - Name: queue1
-    Networking:
-      SubnetIds:
-        - {{ private_subnet_id }}
-    ComputeResources:
-      - Name: compute-resource1
-        {% if scheduler == "awsbatch" %}
-        InstanceTypes:
-          - {{ instance }}
-        {% else %}
-        Instances:
-          - InstanceType: {{ instance }}
-        {% endif %}
+  Scheduler: slurm
+  SlurmQueues:
+    - Name: queue1
+      Networking:
+        SubnetIds:
+          - {{ private_subnet_id }}
+      ComputeResources:
+        - Name: compute-resource1
+          Instances:
+            - InstanceType: {{ instance }}

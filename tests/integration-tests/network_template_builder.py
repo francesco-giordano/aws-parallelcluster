@@ -27,9 +27,11 @@ from troposphere.ec2 import (
     VPCEndpoint,
     VPCGatewayAttachment,
 )
+from troposphere.iam import InstanceProfile, Role
+from utils import get_arn_partition
 
 TAGS_PREFIX = "ParallelCluster"
-BASTION_INSTANCE_TYPE = "c5.large"
+BASTION_INSTANCE_TYPE = "t3.large"
 
 
 class Gateways(Enum):
@@ -50,6 +52,7 @@ class SubnetConfig(NamedTuple):
     has_nat_gateway: bool = True
     availability_zone: str = None
     default_gateway: Gateways = Gateways.INTERNET_GATEWAY
+    zone_type: str = "availability-zone"
 
     def tags(self):
         """Get the tags for the subnet"""
@@ -154,6 +157,7 @@ class NetworkTemplateBuilder:
         subnet_refs = []
         bastion_subnet_ref = None
         no_internet_subnet_ref = None
+        first_nat_gateway = None  # Any NAT gateway in parent AZ to be used by private subnets in local zones
         for subnet_config in self.__vpc_subnets:
             subnet = self.__build_subnet(subnet_config, self.__vpc, self.__additional_vpc_cidr_blocks)
             subnets.append(subnet)
@@ -162,7 +166,15 @@ class NetworkTemplateBuilder:
                 nat_gateway_per_az_map[subnet_config.availability_zone] = self.__build_nat_gateway(
                     subnet_config, subnet
                 )
-            if subnet_config.default_gateway == Gateways.INTERNET_GATEWAY:
+                if first_nat_gateway is None:
+                    first_nat_gateway = nat_gateway_per_az_map[subnet_config.availability_zone]
+            if subnet_config.zone_type == "local-zone":
+                # NAT is not available in local zone. Route connection to a NAT in parent AZ.
+                nat_gateway_per_az_map[subnet_config.availability_zone] = first_nat_gateway
+            if (
+                subnet_config.zone_type == "availability-zone"
+                and subnet_config.default_gateway == Gateways.INTERNET_GATEWAY
+            ):
                 bastion_subnet_ref = Ref(subnet)
             if subnet_config.default_gateway == Gateways.NONE:
                 no_internet_subnet_ref = Ref(subnet)
@@ -248,6 +260,24 @@ class NetworkTemplateBuilder:
                 enable_private_dns=True,
             ),
             VPCEndpointConfig(
+                name="SystemsManagerEndpoint",
+                service_name=f"com.amazonaws.{region}.ssm",
+                type=VPCEndpointConfig.EndpointType.INTERFACE,
+                enable_private_dns=True,
+            ),
+            VPCEndpointConfig(
+                name="SystemsManagerMessagesEndpoint",
+                service_name=f"com.amazonaws.{region}.ssmmessages",
+                type=VPCEndpointConfig.EndpointType.INTERFACE,
+                enable_private_dns=True,
+            ),
+            VPCEndpointConfig(
+                name="EC2MessagesEndpoint",
+                service_name=f"com.amazonaws.{region}.ec2messages",
+                type=VPCEndpointConfig.EndpointType.INTERFACE,
+                enable_private_dns=True,
+            ),
+            VPCEndpointConfig(
                 name="S3Endpoint",
                 service_name=f"com.amazonaws.{region}.s3",
                 type=VPCEndpointConfig.EndpointType.GATEWAY,
@@ -280,6 +310,25 @@ class NetworkTemplateBuilder:
                 )
             )
 
+    def __bastion_instance_profile(self):
+        instance_role = Role(
+            "BastionNetworkingRole",
+            ManagedPolicyArns=[f"arn:{get_arn_partition(self.__region)}:iam::aws:policy/AmazonSSMManagedInstanceCore"],
+            AssumeRolePolicyDocument={
+                "Version": "2012-10-17",
+                "Statement": [
+                    {"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}
+                ],
+            },
+        )
+        self.__template.add_resource(instance_role)
+        instance_profile = InstanceProfile(
+            "BastionInstanceProfile",
+            Roles=[Ref(instance_role)],
+        )
+        self.__template.add_resource(instance_profile)
+        return instance_profile
+
     def __build_bastion_instance(self, bastion_subnet_id):
         bastion_sg = ec2.SecurityGroup(
             "NetworkingTestBastionSG",
@@ -294,11 +343,18 @@ class NetworkTemplateBuilder:
             ],
             VpcId=Ref(self.__vpc),
         )
-        launch_template = ec2.LaunchTemplate.from_dict(
-            "LaunchTemplateIMDSv2",
-            {
-                "LaunchTemplateData": {"MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"}},
-            },
+        instance_profile = self.__bastion_instance_profile()
+        launch_template = ec2.LaunchTemplate(
+            "NetworkingBastionLaunchTemplate",
+            LaunchTemplateData=ec2.LaunchTemplateData(
+                MetadataOptions=ec2.MetadataOptions(
+                    HttpTokens="required",
+                    HttpEndpoint="enabled",
+                ),
+                IamInstanceProfile=ec2.IamInstanceProfile(
+                    Arn=GetAtt(instance_profile, "Arn"),
+                ),
+            ),
         )
         self.__template.add_resource(launch_template)
         instance = ec2.Instance(

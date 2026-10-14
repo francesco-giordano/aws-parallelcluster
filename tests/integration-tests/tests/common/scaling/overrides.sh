@@ -1,0 +1,110 @@
+#!/bin/bash
+# Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# A copy of the License is located at
+#
+# http://aws.amazon.com/apache2.0/
+#
+# or in the "LICENSE.txt" file accompanying this file.
+# This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or implied.
+# See the License for the specific language governing permissions and limitations under the License.
+
+
+set -ex
+
+
+fail() {
+    echo "[ERROR] $1" >&2
+    exit 1
+}
+
+while [ $# -gt 0 ] ; do
+    case "$1" in
+        --single-instance-type-ice-cr)
+            INSTANCE_TYPE_ICE_CR="$2"
+            shift
+        ;;
+        --multi-instance-types-ice-cr)
+            INSTANCE_TYPES_ICE_CR="$2"
+            shift
+        ;;
+        --multi-instance-types-exp-cr)
+            INSTANCE_TYPES_EXCEPTION_CR="$2"
+            shift
+        ;;
+        *)
+            fail "[ERROR] Unrecognized option '$1'"
+        ;;
+    esac
+    shift
+done
+
+[[ -n "${INSTANCE_TYPE_ICE_CR}" ]] || [[ -n "${INSTANCE_TYPES_ICE_CR}" ]] || fail "You must provide either --single-instance-type-ice-cr or --multi-instance-types-ice-cr or both"
+
+# Gates the CreateFleet ICE emulation
+# When this file exists, the CreateFleet requests returns the mocked ICE.
+# Otherwise, the request is not mocked and reaches EC2.
+CREATE_FLEET_ICE_GATE="/opt/slurm/etc/pcluster/.emulate_create_fleet_ice"
+sudo touch "${CREATE_FLEET_ICE_GATE}"
+
+slurm_plugin_path=$(sudo find / -iname slurm_plugin -print0|grep -FzZ 'node_virtualenv')
+cat > $slurm_plugin_path/overrides.py << EOF
+from botocore.exceptions import ClientError
+import boto3
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+CREATE_FLEET_ICE_GATE = "${CREATE_FLEET_ICE_GATE}"
+
+def run_instances(region, boto3_config, **run_instances_kwargs):
+    if "${INSTANCE_TYPE_ICE_CR}" and "${INSTANCE_TYPE_ICE_CR}" in run_instances_kwargs.get("LaunchTemplate", {}).get("LaunchTemplateName"):
+        # Forcing the Placement/tenancy override to host will trigger an InsufficientHostCapacity since we do not
+        # have a fleet of reserved hosts
+        run_instances_kwargs['Placement']= {'Tenancy': 'host'}
+        logger.info("Updated parameters for EC2 run_instances: %s", run_instances_kwargs)
+    ec2_client = boto3.client("ec2", region_name=region, config=boto3_config)
+    return ec2_client.run_instances(**run_instances_kwargs)
+
+def create_fleet(region, boto3_config, **create_fleet_kwargs):
+    configs = create_fleet_kwargs.get("LaunchTemplateConfigs", [])
+    if len(configs) >= 1 and configs[0]:
+        lt_config = configs[0]
+
+        if "${INSTANCE_TYPES_ICE_CR}" and "${INSTANCE_TYPES_ICE_CR}" in lt_config.get('LaunchTemplateSpecification').get("LaunchTemplateName") and os.path.exists(CREATE_FLEET_ICE_GATE):
+            # Emulate a real InsufficientInstanceCapacity error by returning a mocked response, so the node
+            # reports InsufficientInstanceCapacity and triggers fast capacity failover. Removing the
+            # gate file lets the next CreateFleet call pass through to EC2, recovering from the ICE.
+            logger.info("Emulating InsufficientInstanceCapacity for CreateFleet args: %s", create_fleet_kwargs)
+            return {
+                "Instances": [],
+                "Errors": [
+                    {
+                        "LaunchTemplateAndOverrides": lt_config,
+                        "Lifecycle": "on-demand",
+                        "ErrorCode": "InsufficientInstanceCapacity",
+                        "ErrorMessage": "We currently do not have sufficient capacity for the requested instance type."
+                    },
+                ],
+            }
+        elif "${INSTANCE_TYPES_EXCEPTION_CR}" and "${INSTANCE_TYPES_EXCEPTION_CR}" in lt_config.get('LaunchTemplateSpecification').get("LaunchTemplateName"):
+            # force CreateFleet to raise an exception since "inf*" instance types have Inferentia accelerators
+            # that are manufactured by AWS, and we are also requesting Manufacturer=nvidia
+            lt_config['Overrides'] = [{
+                        "InstanceRequirements": {
+                            "VCpuCount": { "Min": 2 },
+                            "MemoryMiB": { "Min": 2048 },
+                            "AllowedInstanceTypes": [  "inf*" ],
+                            "AcceleratorManufacturers": [ "nvidia" ]
+                        }
+                    }]
+            logger.info("Updated Instance Overrides for CreateFleet args: %s", create_fleet_kwargs)
+
+        ec2_client = boto3.client("ec2", region_name=region, config=boto3_config)
+        return ec2_client.create_fleet(**create_fleet_kwargs)
+    else:
+        raise Exception("Missing LaunchTemplateSpecification parameter in create_fleet request.")
+EOF

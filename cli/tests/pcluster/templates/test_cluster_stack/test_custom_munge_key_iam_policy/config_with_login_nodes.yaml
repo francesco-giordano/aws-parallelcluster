@@ -1,0 +1,27 @@
+Image:
+  Os: alinux2023
+LoginNodes:
+  Pools:
+  - Name: pool
+    InstanceType: t3.micro
+    GracetimePeriod: 3
+    Count: 1
+    Networking:
+      SubnetIds:
+      - subnet-12345678
+HeadNode:
+  InstanceType: t3.micro
+  Networking:
+    SubnetId: subnet-12345678
+Scheduling:
+  Scheduler: slurm
+  SlurmQueues:
+    - Name: queue1
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+      ComputeResources:
+        - Name: compute_resource1
+          InstanceType: c5.2xlarge
+  SlurmSettings:
+    MungeKeySecretArn: arn:aws:secretsmanager:us-east-1:123456789012:secret:TestCustomMungeKey

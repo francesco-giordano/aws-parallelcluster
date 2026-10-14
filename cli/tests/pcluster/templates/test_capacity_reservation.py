@@ -14,6 +14,7 @@ import json
 import pytest
 from assertpy import assert_that
 
+from pcluster.aws.aws_resources import CapacityReservationInfo
 from pcluster.schemas.cluster_schema import ClusterSchema
 from pcluster.templates.cdk_builder import CDKTemplateBuilder
 from pcluster.utils import load_yaml_dict
@@ -23,7 +24,7 @@ from tests.pcluster.utils import get_head_node_policy, get_statement_by_sid
 
 
 @pytest.mark.parametrize(
-    "config_file_name,",
+    "config_file_name",
     ["config.yaml"],
 )
 def test_capacity_reservation_id_permissions(mocker, test_datadir, config_file_name):
@@ -33,11 +34,13 @@ def test_capacity_reservation_id_permissions(mocker, test_datadir, config_file_n
     mocker.patch(
         "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
         return_value=[
-            {
-                "CapacityReservationArn": "arn:partition:service:region:account-id:capacity-reservation/cr-12345",
-                "InstanceType": "c5.xlarge",
-                "AvailabilityZone": "us-east-1a",
-            }
+            CapacityReservationInfo(
+                {
+                    "CapacityReservationArn": "arn:partition:service:region:account-id:capacity-reservation/cr-12345",
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                }
+            )
         ],
     )
 
@@ -57,9 +60,9 @@ def test_capacity_reservation_id_permissions(mocker, test_datadir, config_file_n
 
 
 @pytest.mark.parametrize(
-    "config_file_name,",
+    "config_file_name",
     [
-        ("config.yaml"),
+        "config.yaml",
     ],
 )
 def test_capacity_reservation_group_arns_permissions(mocker, test_datadir, config_file_name):
@@ -69,10 +72,12 @@ def test_capacity_reservation_group_arns_permissions(mocker, test_datadir, confi
     mocker.patch(
         "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
         return_value=[
-            {
-                "InstanceType": "c5.xlarge",
-                "AvailabilityZone": "us-east-1a",
-            }
+            CapacityReservationInfo(
+                {
+                    "InstanceType": "c5.xlarge",
+                    "AvailabilityZone": "us-east-1a",
+                }
+            )
         ],
     )
 

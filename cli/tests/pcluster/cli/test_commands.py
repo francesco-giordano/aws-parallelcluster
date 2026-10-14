@@ -10,13 +10,14 @@
 # limitations under the License.
 
 """This module provides unit tests for the functions in the pcluster.commands module."""
+
 import pytest
 from assertpy import assert_that
 
 from pcluster.aws.common import AWSClientError
 from pcluster.models.cluster import ClusterActionError, ClusterStack
 from tests.pcluster.aws.dummy_aws_api import mock_aws_api
-from tests.pcluster.config.dummy_cluster_config import dummy_awsbatch_cluster_config, dummy_slurm_cluster_config
+from tests.pcluster.config.dummy_cluster_config import dummy_slurm_cluster_config
 from tests.pcluster.models.dummy_s3_bucket import mock_bucket, mock_bucket_object_utils, mock_bucket_utils
 from tests.pcluster.test_utils import dummy_cluster
 
@@ -41,11 +42,8 @@ def _mock_cluster(
         mocker.patch("pcluster.aws.cfn.CfnClient.describe_stack", side_effect=describe_stack_side_effect)
         cluster = dummy_cluster()
 
-    if scheduler == "slurm":
-        cluster.config = dummy_slurm_cluster_config(mocker)
-        mocker.patch.object(cluster.config, "get_instance_types_data", return_value={})
-    else:
-        cluster.config = dummy_awsbatch_cluster_config(mocker)
+    cluster.config = dummy_slurm_cluster_config(mocker)
+    mocker.patch.object(cluster.config, "get_instance_types_data", return_value={})
 
     return cluster
 
@@ -61,6 +59,7 @@ def _mock_cluster(
         "mock_generated_bucket_name",
         "expected_bucket_name",
         "provided_bucket_name",
+        "default_bucket",
     ),
     [
         (
@@ -73,17 +72,7 @@ def _mock_cluster(
             "parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete",
             "parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete",
             None,
-        ),
-        (
-            "awsbatch",
-            "cluster2",
-            "dummy_config2",
-            "dummy_template2",
-            "dummy_asset2",
-            ["models/../resources/custom_resources", "models/../resources/batch"],
-            "parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete",
-            "parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete",
-            None,
+            True,
         ),
         (
             "slurm",
@@ -95,6 +84,7 @@ def _mock_cluster(
             "parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete",
             "parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete",
             None,
+            True,
         ),
         (
             "slurm",
@@ -106,6 +96,7 @@ def _mock_cluster(
             None,
             "user_provided_bucket",
             "user_provided_bucket",
+            False,
         ),
     ],
 )
@@ -120,6 +111,7 @@ def test_setup_bucket_with_resources_success(
     mock_generated_bucket_name,
     expected_bucket_name,
     provided_bucket_name,
+    default_bucket,
 ):
     """Verify that create_bucket_with_batch_resources behaves as expected."""
     # mock calls for bucket property in cluster object
@@ -153,7 +145,10 @@ def test_setup_bucket_with_resources_success(
     for dir in expected_dirs:
         cluster.bucket.upload_resources(dir)
 
-    check_bucket_mock.assert_called_with()
+    if default_bucket:
+        check_bucket_mock.assert_called_with(default_bucket=default_bucket)
+    else:
+        check_bucket_mock.assert_called_with()
 
     # assert upload has been called
     upload_config_mock.assert_called_with(expected_config, "fake_config_name")
@@ -224,13 +219,15 @@ def test_setup_bucket_with_resources_creation_failure(
 @pytest.mark.parametrize(
     (
         "check_bucket_is_bootstrapped_error",
+        "check_bucket_is_bootstrapped_return_value",
         "bucket_configure_error",
         "upload_bootstrapped_file_error",
         "cluster_action_error",
     ),
     [
         (
-            AWSClientError(function_name="head_object", message="No object", error_code="404"),
+            None,
+            False,
             AWSClientError(function_name="put_bucket_versioning", message="No put bucket versioning policy"),
             None,
             "Unable to initialize s3 bucket. No put bucket versioning policy",
@@ -239,10 +236,12 @@ def test_setup_bucket_with_resources_creation_failure(
             AWSClientError(function_name="head_object", message="NoSuchBucket", error_code="403"),
             None,
             None,
+            None,
             "NoSuchBucket",
         ),
         (
-            AWSClientError(function_name="head_object", message="No object", error_code="404"),
+            None,
+            False,
             None,
             AWSClientError(function_name="put_object", message="No put object policy"),
             "No put object policy",
@@ -252,6 +251,7 @@ def test_setup_bucket_with_resources_creation_failure(
 def test_setup_bucket_with_bucket_configuration_failure(
     mocker,
     check_bucket_is_bootstrapped_error,
+    check_bucket_is_bootstrapped_return_value,
     bucket_configure_error,
     upload_bootstrapped_file_error,
     cluster_action_error,
@@ -271,6 +271,7 @@ def test_setup_bucket_with_bucket_configuration_failure(
         mocker,
         check_bucket_is_bootstrapped_side_effect=check_bucket_is_bootstrapped_error,
         upload_bootstrapped_file_side_effect=upload_bootstrapped_file_error,
+        check_bucket_is_bootstrapped_return_value=check_bucket_is_bootstrapped_return_value,
     )
 
     with pytest.raises(ClusterActionError, match=cluster_action_error):
@@ -295,6 +296,7 @@ def test_setup_bucket_with_resources_upload_failure(
     upload_fileobj_awsclient_error = AWSClientError(
         function_name="upload_fileobj", message="Unable to upload file to the S3 bucket"
     )
+    upload_instance_types_data_action_error = "Unable to upload instance types data to the S3 bucket"
 
     mock_aws_api(mocker)
 
@@ -328,4 +330,10 @@ def test_setup_bucket_with_resources_upload_failure(
     with pytest.raises(ClusterActionError, match=upload_resource_cluster_action_error):
         cluster._upload_artifacts()
 
-    check_bucket_mock.assert_called_with()
+    with pytest.raises(ClusterActionError, match=upload_instance_types_data_action_error):
+        cluster._upload_instance_types_data()
+
+    if provided_bucket_name:
+        check_bucket_mock.assert_called_with(default_bucket=True)
+    else:
+        check_bucket_mock.assert_called_with()

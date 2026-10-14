@@ -15,7 +15,7 @@ Parameters:
 Mappings:
   ParallelCluster:
     Constants:
-      Version: 3.7.0
+      Version: 3.17.0
       Bucket: '' # For debug purposes only
 
 Conditions:
@@ -62,9 +62,9 @@ Resources:
               Owner: self
           - !Ref AWS::NoValue
         Image:
-          Os: alinux2
+          Os: alinux2023
         HeadNode:
-          InstanceType: t2.medium
+          InstanceType: t3.medium
           Networking:
             SubnetId: !GetAtt [ PclusterVpc, Outputs.PublicSubnetId ]
           Ssh:
@@ -78,10 +78,22 @@ Resources:
           - Name: queue0
             ComputeResources:
             - Name: queue0-cr0
-              InstanceType: t2.micro
+              InstanceType: t3.medium
             Networking:
               SubnetIds:
               - !GetAtt [ PclusterVpc, Outputs.PrivateSubnetId ]
+        LoginNodes:
+          Pools:
+            - Name: login
+              InstanceType: t3.medium
+              Count: 1
+              Networking:
+                SubnetIds:
+                  - !GetAtt [ PclusterVpc, Outputs.PublicSubnetId ]
+              Iam:
+                AdditionalIamPolicies:
+                  - Policy: !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+              GracetimePeriod: 3
 
 Outputs:
   HeadNodeIp:

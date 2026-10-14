@@ -24,18 +24,22 @@ from pcluster.config.imagebuilder_config import (
     Iam,
     Image,
     ImageBuilderConfig,
+    ImagebuilderDeploymentSettings,
     ImagebuilderDevSettings,
+    Installation,
+    LustreClient,
+    NvidiaSoftware,
     UpdateOsPackages,
     Volume,
 )
-from pcluster.constants import PCLUSTER_IMAGE_NAME_REGEX
+from pcluster.constants import IAM_INSTANCE_PROFILE_REGEX, IAM_POLICY_REGEX, IAM_ROLE_REGEX, PCLUSTER_IMAGE_NAME_REGEX
 from pcluster.imagebuilder_utils import AMI_NAME_REQUIRED_SUBSTRING
 from pcluster.schemas.common_schema import (
     ALLOWED_VALUES,
     AdditionalIamPolicySchema,
+    BaseDeploymentSettingsSchema,
     BaseDevSettingsSchema,
     BaseSchema,
-    DeploymentSettingsSchema,
     ImdsSchema,
     TagSchema,
     get_field_validator,
@@ -135,11 +139,11 @@ class DistributionConfigurationSchema(BaseSchema):
 class IamSchema(BaseSchema):
     """Represent the schema of the ImageBuilder IAM."""
 
-    instance_role = fields.Str(validate=validate.Regexp("^arn:.*:role/"))
-    instance_profile = fields.Str(validate=validate.Regexp("^arn:.*:instance-profile/"))
-    cleanup_lambda_role = fields.Str(validate=validate.Regexp("^arn:.*:role/"))
+    instance_role = fields.Str(validate=validate.Regexp(IAM_ROLE_REGEX))
+    instance_profile = fields.Str(validate=validate.Regexp(IAM_INSTANCE_PROFILE_REGEX))
+    cleanup_lambda_role = fields.Str(validate=validate.Regexp(IAM_ROLE_REGEX))
     additional_iam_policies = fields.Nested(AdditionalIamPolicySchema, many=True)
-    permissions_boundary = fields.Str(validate=validate.Regexp("^arn:.*:policy/"))
+    permissions_boundary = fields.Str(validate=validate.Regexp(IAM_POLICY_REGEX))
 
     @validates_schema
     def no_coexist_role_policies(self, data, **kwargs):
@@ -166,6 +170,40 @@ class UpdateOsPackagesSchema(BaseSchema):
         return UpdateOsPackages(**data)
 
 
+class LustreClientSchema(BaseSchema):
+    """Represent the schema of the ImageBuilder NvidiaSoftware."""
+
+    enabled = fields.Bool()
+
+    @post_load
+    def make_resource(self, data, **kwargs):
+        """Generate resource."""
+        return LustreClient(**data)
+
+
+class NvidiaSoftwareSchema(BaseSchema):
+    """Represent the schema of the ImageBuilder NvidiaSoftware."""
+
+    enabled = fields.Bool()
+
+    @post_load
+    def make_resource(self, data, **kwargs):
+        """Generate resource."""
+        return NvidiaSoftware(**data)
+
+
+class InstallationSchema(BaseSchema):
+    """Represent the schema of the ImageBuilder Installation."""
+
+    lustre_client = fields.Nested(LustreClientSchema)
+    nvidia_software = fields.Nested(NvidiaSoftwareSchema)
+
+    @post_load
+    def make_resource(self, data, **kwargs):
+        """Generate resource."""
+        return Installation(**data)
+
+
 class BuildSchema(BaseSchema):
     """Represent the schema of the ImageBuilder Build."""
 
@@ -178,6 +216,7 @@ class BuildSchema(BaseSchema):
     subnet_id = fields.Str(validate=get_field_validator("subnet_id"))
     update_os_packages = fields.Nested(UpdateOsPackagesSchema)
     imds = fields.Nested(ImdsSchema)
+    installation = fields.Nested(InstallationSchema)
 
     @post_load
     def make_resource(self, data, **kwargs):
@@ -203,11 +242,22 @@ class ImagebuilderDevSettingsSchema(BaseDevSettingsSchema):
     distribution_configuration = fields.Nested(DistributionConfigurationSchema)
     terminate_instance_on_failure = fields.Bool()
     disable_validate_and_test = fields.Bool()
+    cli_attribute_overrides = fields.Str()
+    disable_kernel_update = fields.Bool()
 
     @post_load
     def make_resource(self, data, **kwargs):
         """Generate resource."""
         return ImagebuilderDevSettings(**data)
+
+
+class ImagebuilderDeploymentSettingsSchema(BaseDeploymentSettingsSchema):
+    """Represent the schema of the ImageBuilder Deployment Setting."""
+
+    @post_load
+    def make_resource(self, data, **kwargs):
+        """Generate resource."""
+        return ImagebuilderDeploymentSettings(**data)
 
 
 # ---------------------- ImageBuilder Schema ---------------------- #
@@ -221,7 +271,7 @@ class ImageBuilderSchema(BaseSchema):
     dev_settings = fields.Nested(ImagebuilderDevSettingsSchema)
     config_region = fields.Str(data_key="Region")
     custom_s3_bucket = fields.Str()
-    deployment_settings = fields.Nested(DeploymentSettingsSchema)
+    deployment_settings = fields.Nested(ImagebuilderDeploymentSettingsSchema)
 
     @post_load(pass_original=True)
     def make_resource(self, data, original_data, **kwargs):

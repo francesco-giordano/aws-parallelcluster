@@ -24,9 +24,12 @@ from remote_command_executor import RemoteCommandExecutor
 from retrying import retry
 from time_utils import minutes, seconds
 from troposphere.fsx import LustreConfiguration
+from utils import is_fsx_lustre_deployment_type_supported
 
 from tests.storage.storage_common import (
+    assert_client_lockd_uses_port,
     assert_fsx_lustre_correctly_mounted,
+    check_dra,
     check_fsx,
     create_fsx_ontap,
     create_fsx_open_zfs,
@@ -53,7 +56,7 @@ MAX_MINUTES_TO_WAIT_FOR_BACKUP_COMPLETION = 7
         "data_compression_type",
     ),
     [
-        ("PERSISTENT_1", 200, "NEW_CHANGED", None, None, 1200, 1024, None),
+        ("PERSISTENT_1", 50, "NEW_CHANGED", None, None, 1200, 1024, None),
         ("SCRATCH_1", None, "NEW", None, None, 1200, 1024, "LZ4"),
         ("SCRATCH_2", None, "NEW_CHANGED_DELETED", None, None, 1200, 1024, "LZ4"),
         ("PERSISTENT_1", 40, None, "HDD", None, 1800, 512, "LZ4"),
@@ -78,6 +81,11 @@ def test_fsx_lustre_configuration_options(
     storage_capacity,
     imported_file_chunk_size,
 ):
+    if not is_fsx_lustre_deployment_type_supported(region, deployment_type):
+        pytest.skip(
+            f"Skipping the test because the deployment type {deployment_type} is not supported in region {region}"
+        )
+
     mount_dir = "/fsx_mount_dir"
     bucket_name = None
     if deployment_type != "PERSISTENT_2":
@@ -86,7 +94,9 @@ def test_fsx_lustre_configuration_options(
         bucket_name = s3_bucket_factory()
         bucket = boto3.resource("s3", region_name=region).Bucket(bucket_name)
         bucket.upload_file(str(test_datadir / "s3_test_file"), "s3_test_file")
-    weekly_maintenance_start_time = (datetime.datetime.utcnow() + datetime.timedelta(minutes=60)).strftime("%u:%H:%M")
+    weekly_maintenance_start_time = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=60)
+    ).strftime("%u:%H:%M")
     cluster_config = pcluster_config_reader(
         bucket_name=bucket_name,
         mount_dir=mount_dir,
@@ -180,6 +190,49 @@ def test_fsx_lustre(
 
 
 @pytest.mark.usefixtures("os", "instance", "scheduler")
+def test_fsx_lustre_dra(
+    region,
+    pcluster_config_reader,
+    s3_bucket_factory,
+    clusters_factory,
+    test_datadir,
+    scheduler_commands_factory,
+):
+    """Test Data Respository Associations for a FSx Lustre file system."""
+    mount_dir = "/fsx_mount_dir"
+    bucket_name = s3_bucket_factory()
+    bucket = boto3.resource("s3", region_name=region).Bucket(bucket_name)
+    bucket.upload_file(str(test_datadir / "s3_test_file"), "test1/s3_test_file")
+    cluster_config = pcluster_config_reader(
+        bucket_name=bucket_name,
+        mount_dir=mount_dir,
+        storage_capacity=1200,
+    )
+
+    cluster = clusters_factory(cluster_config)
+
+    check_dra(cluster, region, 1, "test1", mount_dir)
+
+    # Add a second DRA
+    cluster_update_config = pcluster_config_reader(
+        config_file="pcluster.config.update.yaml",
+        mount_dir=mount_dir,
+        bucket_name=bucket_name,
+        storage_capacity=1200,
+    )
+
+    bucket.upload_file(str(test_datadir / "s3_test_file"), "test2/s3_test_file")
+    cluster.update(str(cluster_update_config))
+
+    check_dra(cluster, region, 2, "test2", mount_dir)
+
+    # Remove a DRA
+    cluster.update(str(cluster_config))
+
+    check_dra(cluster, region, 1, None, mount_dir)
+
+
+@pytest.mark.usefixtures("os", "instance", "scheduler")
 def test_fsx_lustre_backup(region, pcluster_config_reader, clusters_factory, scheduler_commands_factory):
     """
     Test FSx Lustre backup feature. As part of this test, following steps are performed
@@ -197,7 +250,7 @@ def test_fsx_lustre_backup(region, pcluster_config_reader, clusters_factory, sch
 
     """
     mount_dir = "/fsx_mount_dir"
-    daily_automatic_backup_start_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
+    daily_automatic_backup_start_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=15)
     logging.info(f"daily_automatic_backup_start_time: {daily_automatic_backup_start_time}")
     cluster_config = pcluster_config_reader(
         mount_dir=mount_dir, daily_automatic_backup_start_time=daily_automatic_backup_start_time.strftime("%H:%M")
@@ -260,7 +313,6 @@ def test_multiple_fsx(
     scheduler_commands_factory,
     test_datadir,
     request,
-    run_benchmarks,
 ):
     """
     Test existing Fsx file system
@@ -276,19 +328,15 @@ def test_multiple_fsx(
     partition = utils.get_arn_partition(region)
     num_new_fsx_lustre = 1
     num_existing_fsx_ontap_volumes = (
-        2 if partition in ["aws", "aws-us-gov"] else 0
+        2 if partition in ["aws", "aws-us-gov", "us-iso"] and utils.is_fsx_ontap_supported(region) else 0
     )  # China and Isolated do not have Ontap
     num_existing_fsx_open_zfs_volumes = (
         2 if partition in ["aws"] else 0
     )  # China, GovCloud and Isolated do not have OpenZFS.
-    if request.config.getoption("benchmarks") and os == "alinux2":
-        # Only create more FSx when benchmarks are specified. Limiting OS to reduce cost of too many file systems
-        num_existing_fsx = 20
-    else:
-        # Minimal total existing FSx is the number of Ontap and OpenZFS plus one existing FSx Lustre
-        num_existing_fsx = num_existing_fsx_ontap_volumes + num_existing_fsx_open_zfs_volumes + 1
+    # Minimal total existing FSx is the number of Ontap and OpenZFS plus one existing FSx Lustre
+    num_existing_fsx = num_existing_fsx_ontap_volumes + num_existing_fsx_open_zfs_volumes + 1
     num_existing_fsx_lustre = num_existing_fsx - num_existing_fsx_ontap_volumes - num_existing_fsx_open_zfs_volumes
-    fsx_lustre_mount_dirs = ["/shared"]  # OSU benchmark relies on /shared directory
+    fsx_lustre_mount_dirs = ["/shared"]
     for i in range(num_new_fsx_lustre + num_existing_fsx_lustre - 1):
         fsx_lustre_mount_dirs.append(f"/fsx_lustre_mount_dir{i}")
 
@@ -322,16 +370,15 @@ def test_multiple_fsx(
         bucket_name,
     )
 
-    remote_command_executor = RemoteCommandExecutor(cluster)
-    scheduler_commands = scheduler_commands_factory(remote_command_executor)
-    run_benchmarks(remote_command_executor, scheduler_commands)
+    if fsx_on_tap_volume_ids:
+        assert_client_lockd_uses_port(RemoteCommandExecutor(cluster), fsx_on_tap_volume_ids[0])
 
 
 @pytest.mark.usefixtures("instance")
-def test_fsx_file_cache(
+def test_file_cache(
     os,
     region,
-    create_fsx_file_cache,
+    create_file_cache,
     pcluster_config_reader,
     s3_bucket_factory,
     clusters_factory,
@@ -339,7 +386,7 @@ def test_fsx_file_cache(
     test_datadir,
 ):
     """
-    Test existing Fsx file cache
+    Test existing File Cache
 
     Check fsx_fc_id provided in config file can be mounted correctly
     """
@@ -350,12 +397,12 @@ def test_fsx_file_cache(
         bucket = boto3.resource("s3", region_name=region).Bucket(bucket_name)
         bucket.upload_file(str(test_datadir / "s3_test_file"), "s3_test_file")
 
-        fsx_file_cache_id = _get_fsx_file_cache_id(
-            create_fsx_file_cache,
-            "/fsx-cache-path/",
+        file_cache_id = _get_file_cache_id(
+            create_file_cache,
+            "/file-cache-path/",
             bucket_name,
         )
-        cluster_config = pcluster_config_reader(fsx_file_cache_id=fsx_file_cache_id, bucket_name=bucket_name)
+        cluster_config = pcluster_config_reader(file_cache_id=file_cache_id, bucket_name=bucket_name)
         cluster = clusters_factory(cluster_config)
 
         check_fsx(
@@ -364,7 +411,7 @@ def test_fsx_file_cache(
             scheduler_commands_factory,
             ["/existing-file-cache-mount-1"],
             bucket_name,
-            file_cache_path="/fsx-cache-path/",
+            file_cache_path="/file-cache-path/",
         )
 
 
@@ -433,22 +480,22 @@ def _create_fsx_open_zfs_volume_ids(num_existing_fsx_open_zfs_volumes, fsx_facto
     return []
 
 
-def _get_fsx_file_cache_id(create_fsx_file_cache, file_cache_path, bucket_name):
-    return create_fsx_file_cache(file_cache_path, bucket_name)
+def _get_file_cache_id(create_file_cache, file_cache_path, bucket_name):
+    return create_file_cache(file_cache_path, bucket_name)
 
 
 @pytest.fixture
-def create_fsx_file_cache(request, region, vpc_stack: CfnVpcStack, cfn_stacks_factory):
-    """Create a FSx File Cache Stack with its required Networking resources."""
+def create_file_cache(request, region, vpc_stack: CfnVpcStack, cfn_stacks_factory):
+    """Create a File Cache Stack with its required Networking resources."""
     file_cache_config_file = os.path.join("resources", "file-cache-storage-cfn.yaml")
 
-    def _create_fsx_file_cache(file_cache_path, bucket_name):
+    def _create_file_cache(file_cache_path, bucket_name):
         if request.config.getoption("external_shared_storage_stack_name"):
             stack = CfnStack(
                 name=request.config.getoption("external_shared_storage_stack_name"), region=region, template=None
             )
         else:
-            logging.info("Creating the stack for Fsx File Cache")
+            logging.info("Creating the stack for File Cache")
             params = [
                 {"ParameterKey": "FileCachePath", "ParameterValue": file_cache_path},
                 {"ParameterKey": "S3BucketName", "ParameterValue": bucket_name},
@@ -467,13 +514,13 @@ def create_fsx_file_cache(request, region, vpc_stack: CfnVpcStack, cfn_stacks_fa
                 capabilities=["CAPABILITY_IAM"],
             )
             cfn_stacks_factory.create_stack(stack)
-            logging.info("Created the FileCacheId {0}".format(stack.cfn_outputs["FsxFileCacheId"]))
+            logging.info("Created the FileCacheId {0}".format(stack.cfn_outputs["FileCacheId"]))
             # Immediately using the FileCacheId after its creation gives Error
-            time.sleep(100)
+            time.sleep(150)
 
-        return stack.cfn_outputs["FsxFileCacheId"]
+        return stack.cfn_outputs["FileCacheId"]
 
-    yield _create_fsx_file_cache
+    yield _create_file_cache
 
 
 def _create_fsx_lustre_volume_ids(num_existing_fsx_lustre, fsx_factory, import_path, export_path):
@@ -488,8 +535,9 @@ def _create_fsx_lustre_volume_ids(num_existing_fsx_lustre, fsx_factory, import_p
             ImportPath=import_path,
             ExportPath=export_path,
             DeploymentType="PERSISTENT_1",
-            PerUnitStorageThroughput=200,
+            PerUnitStorageThroughput=50,
         ),
+        FileSystemTypeVersion="2.15",
     )
 
 
@@ -628,7 +676,7 @@ def monitor_automatic_backup_creation(fsx_fs_id, region, backup_start_time):
 def sleep_until_automatic_backup_creation_start_time(fsx_fs_id, backup_start_time):
     """Wait for the automatic backup of the given file system to start."""
     logging.info(f"Sleeping until time when {fsx_fs_id}'s backup creation should start at {backup_start_time}")
-    remaining_time = (backup_start_time - datetime.datetime.utcnow()).total_seconds()
+    remaining_time = (backup_start_time - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
     if remaining_time > 0:
         time.sleep(remaining_time)
 

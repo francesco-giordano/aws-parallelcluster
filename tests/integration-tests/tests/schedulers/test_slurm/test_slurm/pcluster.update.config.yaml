@@ -1,5 +1,16 @@
 Image:
   Os: {{ os }}
+{% if use_login_node == True %}
+LoginNodes:
+  Pools:
+    - Name: testpool
+      InstanceType: {{ instance }}
+      Count: 2
+      Networking:
+        SubnetIds:
+          - {{ public_subnet_id }}
+      GracetimePeriod: 5
+{% endif %}
 HeadNode:
   InstanceType: {{ instance }}
   Networking:
@@ -42,4 +53,8 @@ DevSettings:
   Timeouts:
     HeadNodeBootstrapTimeout: 1700
     ComputeNodeBootstrapTimeout: {{compute_node_bootstrap_timeout}}
+  Cookbook:
+    # This DevSettings is here just to verify that the Slurm reconfigure timeout can be updated.
+    ExtraChefAttributes: |
+      { "cluster" : { "slurm" : { "reconfigure_timeout": 600 } } }
 

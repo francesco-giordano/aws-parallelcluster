@@ -45,16 +45,20 @@ phases:
                 RELEASE="${ID}${VERSION_ID:+.${VERSION_ID}}"
               fi
 
-              if [ $(echo "${RELEASE}" | grep -w '^amzn\.2') ]; then
-                OS='alinux2'
-              elif [ $(echo "${RELEASE}" | grep '^centos\.7') ]; then
-                OS='centos7'
-              elif [ $(echo "${RELEASE}" | grep '^ubuntu\.18') ]; then
-                OS='ubuntu1804'
-              elif [ $(echo "${RELEASE}" | grep '^ubuntu\.20') ]; then
-                OS='ubuntu2004'
+              if [ $(echo "${RELEASE}" | grep -w '^amzn\.2023') ]; then
+                OS='alinux2023'
+              elif [ $(echo "${RELEASE}" | grep '^ubuntu\.22') ]; then
+                OS='ubuntu2204'
+              elif [ $(echo "${RELEASE}" | grep '^ubuntu\.24') ]; then
+                OS='ubuntu2404'
               elif [ $(echo "${RELEASE}" | grep '^rhel\.8') ]; then
                 OS='rhel8'
+              elif [ $(echo "${RELEASE}" | grep '^rocky\.8') ]; then
+                OS='rocky8'
+              elif [ $(echo "${RELEASE}" | grep '^rhel\.9') ]; then
+                OS='rhel9'
+              elif [ $(echo "${RELEASE}" | grep '^rocky\.9') ]; then
+                OS='rocky9'
               fi
 
               echo ${OS}
@@ -70,7 +74,7 @@ phases:
               which aws
               if [[ $? -ne 0 ]]; then
                 echo "Installing unzip"
-                if [[ "{{ test.OperatingSystemName.outputs.stdout }}" =~ ^(centos7|alinux|rhel) ]]; then
+                if [[ "{{ test.OperatingSystemName.outputs.stdout }}" =~ ^(alinux|rhel|rocky) ]]; then
                   yum -y install unzip
                 elif [[ "{{ test.OperatingSystemName.outputs.stdout }}" =~ ^ubuntu ]]; then
                   apt-get -y install unzip

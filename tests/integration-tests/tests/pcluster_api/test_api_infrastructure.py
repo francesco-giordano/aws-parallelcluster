@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and limitations under the License.
 import logging
 import re
+import time
 
 import boto3
 import botocore
@@ -59,7 +60,58 @@ def api_with_default_settings(
         factory.create_stack(stack)
         yield stack
     finally:
-        factory.delete_all_stacks()
+        if not request.config.getoption("no_delete"):
+            factory.delete_all_stacks()
+
+
+@pytest.fixture()
+def api_with_full_settings(
+    api_infrastructure_s3_uri,
+    api_definition_s3_uri,
+    policies_uri,
+    request,
+    region,
+    resource_bucket,
+    api_permissions_boundary_policy_arn,
+):
+    """Deploy the ParallelCluster API infrastructure with all the stack parameters being set"""
+    factory = CfnStacksFactory(request.config.getoption("credential"))
+
+    params = []
+    if api_definition_s3_uri:
+        params.append({"ParameterKey": "ApiDefinitionS3Uri", "ParameterValue": api_definition_s3_uri})
+    if policies_uri:
+        params.append({"ParameterKey": "PoliciesTemplateUri", "ParameterValue": policies_uri})
+    if resource_bucket:
+        params.append({"ParameterKey": "CustomBucket", "ParameterValue": resource_bucket})
+
+    params.append({"ParameterKey": "CreateApiUserRole", "ParameterValue": "true"})
+    params.append({"ParameterKey": "EnableFSxS3Access", "ParameterValue": "true"})
+    params.append({"ParameterKey": "EnableIamAdminAccess", "ParameterValue": "true"})
+    params.append({"ParameterKey": "FsxS3Buckets", "ParameterValue": "*"})
+    params.append({"ParameterKey": "IAMRoleAndPolicyPrefix", "ParameterValue": "abcdefghij"})
+    params.append({"ParameterKey": "PermissionsBoundaryPolicy", "ParameterValue": api_permissions_boundary_policy_arn})
+    params.append({"ParameterKey": "Region", "ParameterValue": region})
+
+    template = (
+        api_infrastructure_s3_uri
+        or f"https://{resource_bucket}.s3.{region}.amazonaws.com{'.cn' if region.startswith('cn') else ''}"
+        f"/parallelcluster/{get_installed_parallelcluster_version()}/api/parallelcluster-api.yaml"
+    )
+    logging.info(f"Creating API Server stack in {region} with template {template}")
+    stack = CfnStack(
+        name=generate_stack_name("integ-tests-api", request.config.getoption("stackname_suffix")),
+        region=region,
+        parameters=params,
+        capabilities=["CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"],
+        template=template,
+    )
+    try:
+        factory.create_stack(stack)
+        yield stack
+    finally:
+        if not request.config.getoption("no_delete"):
+            factory.delete_all_stacks()
 
 
 def test_api_infrastructure_with_default_parameters(region, api_with_default_settings):
@@ -79,6 +131,27 @@ def test_api_infrastructure_with_default_parameters(region, api_with_default_set
     _assert_parallelcluster_api(api_id=parallelcluster_api_id, api_url=parallelcluster_api_url)
     _test_auth(region, parallelcluster_user_role, parallelcluster_api_url)
     _test_api_deletion(api_with_default_settings)
+
+
+def test_api_infrastructure_with_full_parameters(region, api_with_full_settings):
+    """
+    Test that creating the API Infrastructure stack with the all the parameters being set with custom values
+    correctly sets up the Lambda and APIGateway API
+
+    :param region: the region where the stack is run
+    :api_with_full_settings: factory that deploys a ParallelCluster API
+    """
+    parallelcluster_lambda_name = api_with_full_settings.cfn_resources["ParallelClusterFunction"]
+    parallelcluster_lambda_arn = api_with_full_settings.cfn_outputs["ParallelClusterLambdaArn"]
+
+    parallelcluster_api_id = api_with_full_settings.cfn_resources["ApiGatewayApiWithoutCustomDomain"]
+    parallelcluster_api_url = api_with_full_settings.cfn_outputs["ParallelClusterApiInvokeUrl"]
+    parallelcluster_user_role = api_with_full_settings.cfn_outputs["ParallelClusterApiUserRole"]
+
+    _assert_parallelcluster_lambda(lambda_name=parallelcluster_lambda_name, lambda_arn=parallelcluster_lambda_arn)
+    _assert_parallelcluster_api(api_id=parallelcluster_api_id, api_url=parallelcluster_api_url)
+    _test_auth(region, parallelcluster_user_role, parallelcluster_api_url)
+    _test_api_deletion(api_with_full_settings)
 
 
 def _assert_parallelcluster_lambda(lambda_name, lambda_arn):
@@ -141,6 +214,7 @@ def _call_list_clusters(region, api_url, enable_sigv4=True):
 
 def _test_auth(region, parallelcluster_user_role, parallelcluster_api_url):
     logging.info("Testing API auth")
+    time.sleep(60)  # Wait for IAM propagation
     with sts_credential_provider(region, parallelcluster_user_role):
         assert_that(_call_list_clusters(region, parallelcluster_api_url).status_code).is_equal_to(requests.codes.ok)
     assert_that(_call_list_clusters(region, parallelcluster_api_url).status_code).is_equal_to(requests.codes.forbidden)
@@ -174,8 +248,4 @@ def _test_api_deletion(api_stack):
 )
 def _wait_for_image_build(image_builder_pipeline):
     image_builder = boto3.client("imagebuilder")
-    return image_builder.list_image_pipeline_images(
-        imagePipelineArn=image_builder_pipeline,
-    )[
-        "imageSummaryList"
-    ][0]
+    return image_builder.list_image_pipeline_images(imagePipelineArn=image_builder_pipeline)["imageSummaryList"][0]

@@ -2,7 +2,7 @@ Image:
   Os: {{ os }}
 CustomS3Bucket: {{ bucket }}
 HeadNode:
-  InstanceType: {{ instance }}
+  InstanceType: "c5.2xlarge"
   Networking:
     SubnetId: {{ public_subnet_id }}
   Ssh:
@@ -13,26 +13,23 @@ HeadNode:
         EnableWriteAccess: true
 Scheduling:
   Scheduler: {{ scheduler }}
+  {% if scheduler =="slurm" %}
+  ScalingStrategy: {{ scaling_strategy }}
+  {% endif %}
   {{ scheduler_prefix }}Queues:
     - Name: broken
       Networking:
         SubnetIds:
           - {{ private_subnet_ids[0] }}
-          {% if scheduler == "slurm" %}
           - {{ private_subnet_ids[1] }}
-          {% endif %}
       CustomActions:
         OnNodeStart:
           # pre-install script to make c5.large instance type instance has bootstrap error
           Script: s3://{{ bucket }}/scripts/preinstall.sh
       ComputeResources:
         - Name: broken-static
-          {% if scheduler == "plugin" %}
-          InstanceType: c5.large # instance type has bootstrap failure
-          {% else %}
           Instances:
             - InstanceType: c5.large # instance type has bootstrap failure
-          {% endif %}
           MinCount: 2
           MaxCount: 250
       Iam:
@@ -43,29 +40,19 @@ Scheduling:
       Networking:
         SubnetIds:
           - {{ private_subnet_ids[0] }}
-          {% if scheduler == "slurm" %}
           - {{ private_subnet_ids[1] }}
-          {% endif %}
       CustomActions:
         OnNodeStart:
           # pre-install script to make c5.large instance type instance has bootstrap error
           Script: s3://{{ bucket }}/scripts/preinstall.sh
       ComputeResources:
         - Name: broken-dynamic
-          {% if scheduler == "plugin" %}
-          InstanceType: c5.large # instance type has bootstrap failure
-          {% else %}
           Instances:
             - InstanceType: c5.large # instance type has bootstrap failure
-          {% endif %}
           MaxCount: 250
         - Name: working-static
-          {% if scheduler == "plugin" %}
-          InstanceType: c5.xlarge # instance type works as expected
-          {% else %}
           Instances:
             - InstanceType: c5.xlarge # instance type works as expected
-          {% endif %}
           MinCount: 1
           MaxCount: 250
       Iam:
@@ -76,21 +63,15 @@ Scheduling:
       Networking:
         SubnetIds:
           - {{ private_subnet_ids[0] }}
-          {% if scheduler == "slurm" %}
           - {{ private_subnet_ids[1] }}
-          {% endif %}
       CustomActions:
         OnNodeStart:
           # pre-install script to make c5.large instance type instance has bootstrap error
           Script: s3://{{ bucket }}/scripts/preinstall.sh
       ComputeResources:
         - Name: normal
-          {% if scheduler == "plugin" %}
-          InstanceType: c5.xlarge # instance type works as expected
-          {% else %}
           Instances:
             - InstanceType: c5.xlarge # instance type works as expected
-          {% endif %}
           MinCount: 1
           MaxCount: 250
       Iam:

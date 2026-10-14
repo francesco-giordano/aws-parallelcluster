@@ -20,6 +20,7 @@ from utils import render_jinja_template
 
 OSU_COMMON_DATADIR = pathlib.Path(__file__).parent / "data/osu/"
 SUPPORTED_MPIS = ["openmpi", "intelmpi"]
+PRIVATE_OSES = ["rocky8", "rocky9"]
 
 
 def compile_osu(mpi_variant, remote_command_executor):
@@ -38,7 +39,7 @@ def compile_osu(mpi_variant, remote_command_executor):
     )
 
 
-def run_individual_osu_benchmark(
+def run_individual_osu_benchmark(  # noqa C901
     mpi_version,
     benchmark_group,
     benchmark_name,
@@ -47,10 +48,12 @@ def run_individual_osu_benchmark(
     scheduler_commands,
     num_instances,
     slots_per_instance,
+    network_interfaces_count,
     test_datadir,
     submission_script_template_path=None,
     rendered_template_path=None,
     timeout=None,
+    repetitions=1,
 ):
     """
     Run the given OSU benchmark.
@@ -64,10 +67,13 @@ def run_individual_osu_benchmark(
     :param scheduler_commands: SchedulerlurmCommands instance, used to submit jobs
     :param num_instances: int, number of instances to run benchmark across
     :param slots_per_instance: int, number of processes to run on each node
+    :param network_interfaces_count: int, number of network interfaces on each node
     :param test_datadir: Path, used to construct default output path when rendering submission script template
     :param submission_script_template_path: string, override default path for source submission script template
     :param rendered_template_path: string, override destination path when rendering submission script template
     :param timeout: int, maximum number of minutes to wait for job to complete
+    :param repetitions: int, how many times to run the benchmark inside the same job. The caller reduces the
+                        repetitions to their median per packet size
     :return: string, stdout of the benchmark job
     """
     logging.info(f"Running OSU benchmark {OSU_BENCHMARK_VERSION}: {benchmark_name} for {mpi_version}")
@@ -89,16 +95,40 @@ def run_individual_osu_benchmark(
         benchmark_name=benchmark_name,
         osu_benchmark_version=OSU_BENCHMARK_VERSION,
         num_of_processes=slots,
+        num_of_processes_per_node=slots_per_instance,
+        network_interfaces_count=network_interfaces_count,
+        repetitions=repetitions,
     )
-    if partition:
-        result = scheduler_commands.submit_script(
-            str(submission_script), slots=slots, partition=partition, nodes=num_instances
-        )
-    else:
-        result = scheduler_commands.submit_script(str(submission_script), slots=slots, nodes=num_instances)
-    job_id = scheduler_commands.assert_job_submitted(result.stdout)
-    scheduler_commands.wait_job_completed(job_id, timeout=timeout)
-    scheduler_commands.assert_job_succeeded(job_id)
+
+    def submit_job():
+        if partition:
+            result = scheduler_commands.submit_script(
+                str(submission_script), slots=slots, partition=partition, nodes=num_instances
+            )
+        else:
+            result = scheduler_commands.submit_script(str(submission_script), slots=slots, nodes=num_instances)
+        return scheduler_commands.assert_job_submitted(result.stdout)
+
+    job_id = submit_job()
+    for attempt in range(2):
+        try:
+            scheduler_commands.wait_job_completed(job_id, timeout=timeout)
+        except Exception:
+            if attempt == 0:
+                logging.warning(f"wait_job_completed failed for job {job_id}, canceling and retrying")
+                scheduler_commands.cancel_job(job_id)
+                job_id = submit_job()
+                continue
+            raise
+        try:
+            scheduler_commands.assert_job_succeeded(job_id)
+            break
+        except Exception:
+            if attempt == 0:
+                logging.warning(f"assert_job_succeeded failed for job {job_id}, retrying")
+                job_id = submit_job()
+                continue
+            raise
 
     output = remote_command_executor.run_remote_command(f"cat /shared/{benchmark_name}.out").stdout
     return job_id, output

@@ -1,0 +1,13 @@
+type: map
+mapping:
+  MaxMonitoringTimeInMins:
+    type: int
+    required: true
+  ScalingTargets:
+    type: seq
+    required: true
+    sequence:
+      - type: int
+  HeadNodeInstanceType:
+    type: str
+    required: true

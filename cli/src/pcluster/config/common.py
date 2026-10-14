@@ -17,14 +17,25 @@ import itertools
 import json
 import logging
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import List, Set
 
+from pcluster.utils import event_loop
 from pcluster.validators.common import AsyncValidator, FailureLevel, ValidationResult, Validator, ValidatorContext
+from pcluster.validators.dev_settings_validators import ExtraChefAttributesValidator
 from pcluster.validators.iam_validators import AdditionalIamPolicyValidator
 from pcluster.validators.networking_validators import LambdaFunctionsVpcConfigValidator
 from pcluster.validators.s3_validators import UrlValidator
 
 LOGGER = logging.getLogger(__name__)
+
+
+class CapacityType(Enum):
+    """Enum to identify the type compute supported by the queues."""
+
+    CAPACITY_BLOCK = "CAPACITY_BLOCK"
+    ONDEMAND = "ONDEMAND"
+    SPOT = "SPOT"
 
 
 class ValidatorSuppressor(ABC):
@@ -198,11 +209,9 @@ class Resource:
         # if they are taking too long to execute for a resource and its children since the use of
         # get_async_timed_validator_type_for allows to decorate only on single validator at a time and
         # does not cascade to child resources
-        return list(
-            itertools.chain.from_iterable(
-                asyncio.get_event_loop().run_until_complete(asyncio.gather(*self._validation_futures))
-            )
-        )
+        with event_loop() as loop:
+            validation_results = loop.run_until_complete(asyncio.gather(*self._validation_futures))
+        return list(itertools.chain.from_iterable(validation_results))
 
     def _nested_resources(self):
         nested_resources = []
@@ -302,6 +311,20 @@ class BaseTag(Resource):
         self.value = Resource.init_param(value)
 
 
+def merge_tags(*tag_lists):
+    """
+    Merge lists of Tag objects, deduplicating by key.
+
+    Later lists take precedence over earlier ones on duplicate keys, mirroring the tag precedence
+    applied at launch time (cluster < queue < compute resource). ``None`` lists are skipped.
+    """
+    merged = {}
+    for tags in tag_lists:
+        for tag in tags or []:
+            merged[tag.key] = tag
+    return list(merged.values())
+
+
 class AdditionalIamPolicy(Resource):
     """Represent the Additional IAM Policy configuration."""
 
@@ -324,6 +347,8 @@ class Cookbook(Resource):
     def _register_validators(self, context: ValidatorContext = None):
         if self.chef_cookbook is not None:
             self._register_validator(UrlValidator, url=self.chef_cookbook)
+        if self.extra_chef_attributes:
+            self._register_validator(ExtraChefAttributesValidator, extra_chef_attributes=self.extra_chef_attributes)
 
 
 class LambdaFunctionsVpcConfig(Resource):
@@ -342,18 +367,14 @@ class BaseDevSettings(Resource):
         self,
         cookbook: Cookbook = None,
         node_package: str = None,
-        aws_batch_cli_package: str = None,
     ):
         super().__init__()
         self.cookbook = cookbook
         self.node_package = Resource.init_param(node_package)
-        self.aws_batch_cli_package = Resource.init_param(aws_batch_cli_package)
 
     def _register_validators(self, context: ValidatorContext = None):
         if self.node_package:
             self._register_validator(UrlValidator, url=self.node_package)
-        if self.aws_batch_cli_package:
-            self._register_validator(UrlValidator, url=self.aws_batch_cli_package)
 
 
 class Imds(Resource):
@@ -366,10 +387,17 @@ class Imds(Resource):
 
     def __init__(self, imds_support: str = None, **kwargs):
         super().__init__(**kwargs)
-        self.imds_support = Resource.init_param(imds_support, default="v1.0")
+        self.imds_support = Resource.init_param(imds_support, default="v2.0")
 
 
-class DeploymentSettings(Resource):
+class DefaultUserHomeType(Enum):
+    """Define supported allocation strategies."""
+
+    SHARED = "Shared"
+    LOCAL = "Local"
+
+
+class BaseDeploymentSettings(Resource):
     """
     Represent the settings related to PCluster deployment, i.e. Lambda Functions for custom resources.
 
@@ -379,6 +407,7 @@ class DeploymentSettings(Resource):
 
     def __init__(self, lambda_functions_vpc_config: LambdaFunctionsVpcConfig = None, **kwargs):
         super().__init__(**kwargs)
+
         self.lambda_functions_vpc_config = Resource.init_param(lambda_functions_vpc_config)
 
     def _register_validators(self, context: ValidatorContext = None):
@@ -417,3 +446,12 @@ class ExtraChefAttributes:
         attribute_json = {"cluster": self._cluster_attributes}
         attribute_json.update(self._extra_attributes)
         return json.dumps(attribute_json, sort_keys=True)
+
+
+class SharedStorageType(Enum):
+    """Define storage types to be used as shared storage."""
+
+    EBS = "ebs"
+    RAID = "raid"
+    EFS = "efs"
+    FSX = "fsx"

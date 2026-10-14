@@ -8,9 +8,11 @@
 # or in the "LICENSE.txt" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
 # OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import logging
 import random
 from collections import OrderedDict
+from typing import List
 
 import boto3
 from assertpy import assert_that
@@ -26,6 +28,8 @@ from utils import (
     retrieve_tags,
     to_pascal_from_kebab_case,
 )
+
+SENSITIVE_PARAMETER_NAME_SUBSTRINGS = ("password", "secret")
 
 
 class CfnStack:
@@ -47,6 +51,21 @@ class CfnStack:
         self.__cfn_outputs = retrieve_cfn_outputs(self.name, self.region)
         self.__cfn_resources = retrieve_cfn_resources(self.name, self.region)
         self.tags = retrieve_tags(self.name, self.region)
+
+    @property
+    def obfuscated_parameters(self) -> List[dict]:
+        """
+        Return a copy of the stack parameters with sensitive values obfuscated.
+
+        A parameter is considered sensitive when its ParameterKey contains "password" or "secret"
+        (case insensitive). This is used to avoid logging secret values.
+        """
+        obfuscated = copy.deepcopy(self.parameters)
+        for parameter in obfuscated:
+            key = parameter.get("ParameterKey", "")
+            if any(substring in key.lower() for substring in SENSITIVE_PARAMETER_NAME_SUBSTRINGS):
+                parameter["ParameterValue"] = "****"
+        return obfuscated
 
     @property
     def cfn_outputs(self):
@@ -80,6 +99,20 @@ class CfnVpcStack(CfnStack):
         self.az_override = None
         self.__public_subnet_ids = None
         self.__private_subnet_ids = None
+        if "CAPABILITY_NAMED_IAM" not in self.capabilities:
+            self.capabilities.append("CAPABILITY_NAMED_IAM")
+
+    @property
+    def bastion(self):
+        """Return the SSH bastion for this VPC as "user@ip", or None if the VPC has no bastion.
+
+        The network template emits the BastionUser/BastionIP outputs only for VPCs that deploy a
+        bastion instance (e.g. to reach head nodes in private or no-internet subnets).
+        """
+        outputs = self.cfn_outputs
+        user = outputs.get("BastionUser")
+        ip = outputs.get("BastionIP")
+        return f"{user}@{ip}" if user and ip else None
 
     def set_az_override(self, az_override):
         """Sets the az_id to override the default AZ used to pick the subnets."""
@@ -161,7 +194,9 @@ class CfnStacksFactory:
         if id in self.__created_stacks:
             raise ValueError("Stack {0} already exists in region {1}".format(name, region))
 
-        logging.info("Creating stack {0} in region {1}".format(name, region))
+        logging.info(
+            "Creating stack {0} in region {1} with parameters: {2}".format(name, region, stack.obfuscated_parameters)
+        )
         is_template_url = stack.template.startswith("https://")
         with aws_credential_provider(region, self.__credentials):
             try:
@@ -214,8 +249,21 @@ class CfnStacksFactory:
                 try:
                     stack = self.__created_stacks[internal_id]
                     cfn_client = boto3.client("cloudformation", region_name=stack.region)
+                    tags = cfn_client.describe_stacks(StackName=stack.name)["Stacks"][0]["Tags"]
+                    for tag in tags:
+                        if tag.get("Key") == "DO-NOT-DELETE":
+                            logging.info(
+                                "Deletion of stack {0} in region {1} skipped due to DO-NOT-DELETE tag".format(
+                                    name, region
+                                )
+                            )
+                            del self.__created_stacks[internal_id]
+                            return
                     cfn_client.delete_stack(StackName=stack.name)
                     final_status = self.__wait_for_stack_deletion(stack.cfn_stack_id, cfn_client)
+                    if final_status == "DELETE_FAILED":
+                        cfn_client.delete_stack(StackName=stack.name, DeletionMode="FORCE_DELETE_STACK")
+                        final_status = self.__wait_for_stack_deletion(stack.cfn_stack_id, cfn_client)
                     self.__assert_stack_status(
                         final_status, "DELETE_COMPLETE", stack_name=stack.cfn_stack_id, region=region
                     )
@@ -236,7 +284,16 @@ class CfnStacksFactory:
         wait_fixed=5000,
         retry_on_exception=lambda exception: isinstance(exception, ClientError),
     )
-    def update_stack(self, name, region, parameters, stack_is_under_test=False, tags=None, wait_for_rollback=False):
+    def update_stack(
+        self,
+        name,
+        region,
+        parameters,
+        stack_is_under_test=False,
+        tags=None,
+        template_body=None,
+        wait_for_rollback=False,
+    ):
         """Update a created cfn stack."""
         with aws_credential_provider(region, self.__credentials):
             internal_id = self.__get_stack_internal_id(name, region)
@@ -245,12 +302,11 @@ class CfnStacksFactory:
                 try:
                     stack = self.__created_stacks[internal_id]
                     cfn_client = boto3.client("cloudformation", region_name=stack.region)
+                    template_args = {"TemplateBody": template_body} if template_body else {"UsePreviousTemplate": True}
                     if tags is not None:
-                        cfn_client.update_stack(
-                            StackName=stack.name, UsePreviousTemplate=True, Parameters=parameters, Tags=tags
-                        )
+                        cfn_client.update_stack(StackName=stack.name, Parameters=parameters, Tags=tags, **template_args)
                     else:
-                        cfn_client.update_stack(StackName=stack.name, UsePreviousTemplate=True, Parameters=parameters)
+                        cfn_client.update_stack(StackName=stack.name, Parameters=parameters, **template_args)
 
                     if wait_for_rollback:
                         final_status = self.__wait_for_stack_update_rollback(stack.cfn_stack_id, cfn_client)
@@ -284,18 +340,42 @@ class CfnStacksFactory:
                     "Couldn't find stack with name {0} in region {1}. Skipping update.".format(name, region)
                 )
 
-    def delete_all_stacks(self):
-        """Destroy all created stacks."""
+    def delete_all_stacks(self, excluded_stacks=None):  # noqa: C901
+        """Destroy all created stacks except for those in excluded_stacks."""
         logging.debug("Destroying all cfn stacks")
         for value in reversed(OrderedDict(self.__created_stacks).values()):
+            if excluded_stacks:
+                excluded = False
+                for stack in excluded_stacks:
+                    if stack in value.name:
+                        excluded = True
+                        break
+                if excluded:
+                    continue
             try:
                 self.delete_stack(value.name, value.region)
             except Exception as e:
-                logging.error(
-                    "Failed when destroying stack {0} in region {1} with exception {2}.".format(
-                        value.name, value.region, e
+                if "-vpc-" in value.name:
+                    # Retry deletion only if it is a VPC stack.
+                    # Because VPC stack is not part of the released product, we can ignore deletion failures.
+                    logging.warning(
+                        "Failed when destroying stack {0} in region {1} with exception {2}. "
+                        "Trying delete again.".format(value.name, value.region, e)
                     )
-                )
+                    try:
+                        self.delete_stack(value.name, value.region)
+                    except Exception as e:
+                        logging.error(
+                            "Failed when destroying stack {0} in region {1} with exception {2}.".format(
+                                value.name, value.region, e
+                            )
+                        )
+                else:
+                    logging.error(
+                        "Failed when destroying stack {0} in region {1} with exception {2}.".format(
+                            value.name, value.region, e
+                        )
+                    )
 
     @retry(
         retry_on_result=lambda result: result == "CREATE_IN_PROGRESS",
@@ -322,11 +402,11 @@ class CfnStacksFactory:
         return self.__get_stack_status(name, cfn_client)
 
     @retry(
-        stop_max_attempt_number=15,
+        stop_max_attempt_number=30,
         retry_on_result=lambda result: result == "UPDATE_ROLLBACK_IN_PROGRESS"
         or result == "UPDATE_IN_PROGRESS"
         or result == "UPDATE_FAILED",
-        wait_fixed=5000,
+        wait_fixed=10000,
         retry_on_exception=lambda exception: isinstance(exception, ClientError) and "Rate exceeded" in str(exception),
     )
     def __wait_for_stack_update_rollback(self, name, cfn_client):

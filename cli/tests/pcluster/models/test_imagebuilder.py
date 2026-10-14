@@ -10,6 +10,7 @@
 # limitations under the License.
 import datetime
 import json
+import os
 from urllib.error import URLError
 
 import pytest
@@ -68,12 +69,13 @@ from tests.pcluster.test_utils import FAKE_NAME
                         },
                     }
                 ],
+                "Description": "AWS ParallelCluster AMI for alinux2023",
             },
             None,
             [
                 "Kms Key Id key_id is specified, the encrypted state must be True.",
                 "Root volume size 25 GB is less than the minimum required size 50 GB that equals parent ami"
-                " volume size.",
+                + " volume size.",
             ],
             [FailureLevel.ERROR, FailureLevel.ERROR],
         )
@@ -108,7 +110,6 @@ def test_imagebuilder_kms_key_id_encrypted_validator_and_ami_volume_size_validat
                 "dev_settings": {
                     "cookbook": {"chef_cookbook": "https:///test/aws-parallelcluster-cookbook-3.0.tgz"},
                     "node_package": "s3://test/aws-parallelcluster-node-3.0.tgz",
-                    "aws_batch_cli_package": "ftp://test/aws-parallelcluster-batch-3.0.tgz",
                 },
             },
             True,
@@ -120,11 +121,11 @@ def test_imagebuilder_kms_key_id_encrypted_validator_and_ami_volume_size_validat
             URLError("[Errno 2] No such file or directory: '/test/aws-parallelcluster-cookbook-3.0.tgz'"),
             [
                 "The url 'https:///test/aws-parallelcluster-cookbook-3.0.tgz' causes URLError, the error reason is "
-                "'[Errno 2] No such file or directory: '/test/aws-parallelcluster-cookbook-3.0.tgz''",
+                + "'[Errno 2] No such file or directory: '/test/aws-parallelcluster-cookbook-3.0.tgz''",
                 "Failed when accessing object 'aws-parallelcluster-node-3.0.tgz' from bucket 'test'. This can be due "
-                "to 'aws-parallelcluster-node-3.0.tgz' not found in 'test'",
+                + "to 'aws-parallelcluster-node-3.0.tgz' not found in 'test'",
                 "The value 'ftp://test/aws-parallelcluster-batch-3.0.tgz' is not a valid URL, choose URL with "
-                "'https' or 's3' prefix.",
+                + "'https' or 's3' prefix.",
             ],
             [FailureLevel.WARNING, FailureLevel.WARNING, FailureLevel.ERROR],
         ),
@@ -156,101 +157,164 @@ def test_imagebuilder_url_validator(
     [
         (
             {
-                "build": {
-                    "parent_image": "ami-0185634c5a8a37250",
-                    "instance_type": "c5.xlarge",
-                    "update_os_packages": {"enabled": True},
-                },
-                "dev_settings": {
-                    "node_package": "s3://test/aws-parallelcluster-node-3.0.tgz",
-                    "aws_batch_cli_package": "https://test/aws-parallelcluster-3.0.tgz",
-                },
+                "imagebuilder": {
+                    "build": {
+                        "parent_image": "ami-0185634c5a8a37250",
+                        "instance_type": "c5.xlarge",
+                        "update_os_packages": {"enabled": True},
+                    },
+                    "dev_settings": {
+                        "node_package": "s3://test/aws-parallelcluster-node-3.0.tgz",
+                        "disable_kernel_update": "true",
+                    },
+                }
             },
             {
                 "cluster": {
                     "base_os": "{{ build.OperatingSystemName.outputs.stdout }}",
-                    "custom_awsbatchcli_package": "https://test/aws-parallelcluster-3.0.tgz",
                     "custom_node_package": "s3://test/aws-parallelcluster-node-3.0.tgz",
+                    "disable_kernel_update": "true",
                     "is_official_ami_build": "false",
                     "nvidia": {"enabled": "no"},
-                    "region": "{{ build.AWSRegion.outputs.stdout }}",
+                    "lustre": {"enabled": "yes"},
+                    "region": "us-east-1",
+                    "slurm_patches_s3_archive": "",
                 }
             },
         ),
         (
             {
-                "dev_settings": {
-                    "cookbook": {
-                        "chef_cookbook": "https://test/aws-parallelcluster-cookbook-3.0.tgz",
-                        "extra_chef_attributes": '{"cluster": {"nvidia": { "enabled" : "yes" }, "dcv" :"no"}}',
+                "imagebuilder": {
+                    "build": {
+                        "parent_image": "ami-0185634c5a8a37250",
+                        "instance_type": "c5.xlarge",
+                        "installation": {"lustre_client": {"enabled": False}},
                     },
-                    "node_package": "s3://test/aws-parallelcluster-node-3.0.tgz",
-                },
+                    "dev_settings": {
+                        "cookbook": {
+                            "chef_cookbook": "https://test/aws-parallelcluster-cookbook-3.0.tgz",
+                            "extra_chef_attributes": '{"cluster": {"nvidia": { "enabled" : "yes" }, "dcv" :"no"}}',
+                        },
+                        "node_package": "s3://test/aws-parallelcluster-node-3.0.tgz",
+                    },
+                }
             },
             {
                 "cluster": {
                     "base_os": "{{ build.OperatingSystemName.outputs.stdout }}",
-                    "custom_awsbatchcli_package": "",
                     "custom_node_package": "s3://test/aws-parallelcluster-node-3.0.tgz",
                     "dcv": "no",
+                    "disable_kernel_update": "false",
                     "is_official_ami_build": "false",
+                    "lustre": {"enabled": "no"},
                     "nvidia": {"enabled": "yes"},
-                    "region": "{{ build.AWSRegion.outputs.stdout }}",
+                    "region": "us-east-1",
+                    "slurm_patches_s3_archive": "",
                 }
             },
         ),
         (
             {
-                "dev_settings": {
-                    "cookbook": {
-                        "chef_cookbook": "https://test/aws-parallelcluster-cookbook-3.0.tgz",
-                        "extra_chef_attributes": '{"cluster": {"nvidia": { "enabled" : "yes" }, "dcv" :"no"}, '
-                        '"nfs": "true"}',
+                "imagebuilder": {
+                    "build": {
+                        "parent_image": "ami-0185634c5a8a37250",
+                        "instance_type": "c5.xlarge",
+                        "installation": {"lustre_client": {"enabled": True}},
                     },
-                    "aws_batch_cli_package": "https://test/aws-parallelcluster-3.0.tgz",
+                    "dev_settings": {
+                        "cookbook": {
+                            "chef_cookbook": "https://test/aws-parallelcluster-cookbook-3.0.tgz",
+                            "extra_chef_attributes": '{"cluster": {"nvidia": { "enabled" : "yes" }, "dcv" :"no"}, '
+                            '"nfs": "true"}',
+                        },
+                    },
                 },
             },
             {
                 "cluster": {
                     "base_os": "{{ build.OperatingSystemName.outputs.stdout }}",
-                    "custom_awsbatchcli_package": "https://test/aws-parallelcluster-3.0.tgz",
                     "custom_node_package": "",
                     "dcv": "no",
+                    "disable_kernel_update": "false",
                     "is_official_ami_build": "false",
                     "nvidia": {"enabled": "yes"},
-                    "region": "{{ build.AWSRegion.outputs.stdout }}",
+                    "lustre": {"enabled": "yes"},
+                    "region": "us-east-1",
+                    "slurm_patches_s3_archive": "",
                 },
                 "nfs": "true",
             },
         ),
         (
             {
-                "dev_settings": {
-                    "cookbook": {
-                        "chef_cookbook": "https://test/aws-parallelcluster-cookbook-3.0.tgz",
-                        "extra_chef_attributes": '{"cluster": {"is_official_ami_build": "true"},"nfs": "true"}',
+                "imagebuilder": {
+                    "build": {
+                        "parent_image": "ami-0185634c5a8a37250",
+                        "instance_type": "c5.xlarge",
+                        "installation": {"nvidia_software": {"enabled": True}},
                     },
-                    "aws_batch_cli_package": "https://test/aws-parallelcluster-3.0.tgz",
+                    "dev_settings": {
+                        "cookbook": {
+                            "chef_cookbook": "https://test/aws-parallelcluster-cookbook-3.0.tgz",
+                            "extra_chef_attributes": '{"cluster": {"is_official_ami_build": "true"},"nfs": "true"}',
+                        },
+                    },
                 },
             },
             {
                 "cluster": {
                     "base_os": "{{ build.OperatingSystemName.outputs.stdout }}",
-                    "custom_awsbatchcli_package": "https://test/aws-parallelcluster-3.0.tgz",
                     "custom_node_package": "",
+                    "disable_kernel_update": "false",
                     "is_official_ami_build": "true",
-                    "nvidia": {"enabled": "no"},
-                    "region": "{{ build.AWSRegion.outputs.stdout }}",
+                    "nvidia": {"enabled": "yes"},
+                    "lustre": {"enabled": "yes"},
+                    "region": "us-east-1",
+                    "slurm_patches_s3_archive": "",
                 },
                 "nfs": "true",
+            },
+        ),
+        # Test case with URL for Slurm patches from S3
+        (
+            {
+                "imagebuilder": {
+                    "build": {
+                        "parent_image": "ami-0185634c5a8a37250",
+                        "instance_type": "c5.xlarge",
+                        "installation": {"nvidia_software": {"enabled": False}},
+                    },
+                    "dev_settings": {
+                        "cookbook": {
+                            "extra_chef_attributes": "{"
+                            '"cluster": {'
+                            '"slurm_patches_s3_archive": "s3://example-s3-bucket/example-archive.tgz"'
+                            "}"
+                            "}"
+                        },
+                    },
+                }
+            },
+            {
+                "cluster": {
+                    "base_os": "{{ build.OperatingSystemName.outputs.stdout }}",
+                    "custom_node_package": "",
+                    "disable_kernel_update": "false",
+                    "is_official_ami_build": "false",
+                    "nvidia": {"enabled": "no"},
+                    "lustre": {"enabled": "yes"},
+                    "region": "us-east-1",
+                    "slurm_patches_s3_archive": "s3://example-s3-bucket/example-archive.tgz",
+                }
             },
         ),
     ],
 )
 def test_imagebuilder_extra_chef_attributes(resource, dna_json):
-    dev_settings = imagebuilder_factory(resource).get("dev_settings")
-    chef_attributes = ImageBuilderExtraChefAttributes(dev_settings).dump_json()
-    assert_that(chef_attributes).is_equal_to(json.dumps(dna_json))
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+    config = imagebuilder_factory(resource).get("imagebuilder")
+    chef_attributes = ImageBuilderExtraChefAttributes(config).dump_json()
+    assert_that(json.loads(chef_attributes)).is_equal_to(dna_json)
 
 
 def _test_imagebuilder(
@@ -439,7 +503,7 @@ class TestImageBuilder:
                     "ResourceType": "AWS::CloudFormation::Stack",
                     "StackId": "arn:aws:cloudformation:us-east-1:000000000000:stack/img",
                     "StackName": "img",
-                    "Timestamp": datetime.datetime(2021, 7, 13, 2, 20, 20, 000000, tzinfo=tz.tzutc()),
+                    "Timestamp": datetime.datetime(2021, 7, 13, 2, 20, 20, 0o00000, tzinfo=tz.tzutc()),
                 }
             ],
         }

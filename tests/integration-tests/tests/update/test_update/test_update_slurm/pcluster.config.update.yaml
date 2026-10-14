@@ -32,7 +32,7 @@ Scheduling:
       ComputeSettings:
         LocalStorage:
           RootVolume:
-            Size: 40
+            Size: {{ root_volume_size }}
       CustomActions:
         OnNodeStart:
           Script: s3://{{ resource_bucket }}/scripts/updated_preinstall.sh # Updated parameter value
@@ -46,9 +46,9 @@ Scheduling:
       ComputeResources:
         - Name: queue1-i1
           Instances:
-            - InstanceType: c5.xlarge
-            - InstanceType: c5n.xlarge
-            - InstanceType: c5d.xlarge
+            - InstanceType: c5.large
+            - InstanceType: c5n.large
+            - InstanceType: c5d.large
           MinCount: 2 # Increased parameter value
           MaxCount: 4 # Increased parameter value
         - Name: queue1-i2
@@ -58,7 +58,9 @@ Scheduling:
           # Removed MinCount
         - Name: queue1-i3 # New compute resource
           Instances:
-            - InstanceType: t2.micro
+          {% for instance_type in spot_instance_types %}
+            - InstanceType: {{ instance_type }}
+          {% endfor %}
               # Removed MinCount
       Networking:
         SubnetIds:
@@ -79,7 +81,7 @@ Scheduling:
       ComputeSettings:
         LocalStorage:
           RootVolume:
-            Size: 40
+            Size: {{ root_volume_size }}
       CustomActions: # New section
         OnNodeStart:
           Script: s3://{{ resource_bucket }}/scripts/updated_preinstall.sh
@@ -112,7 +114,7 @@ Scheduling:
       ComputeSettings:
         LocalStorage:
           RootVolume:
-            Size: 40
+            Size: {{ root_volume_size }}
       CustomActions:
         OnNodeStart:
           Script: s3://{{ resource_bucket }}/scripts/updated_preinstall.sh
@@ -131,7 +133,7 @@ Scheduling:
             Enabled: true
         - Name: queue3-i2
           Instances:
-            - InstanceType: t2.xlarge
+            - InstanceType: t3.xlarge
           DisableSimultaneousMultithreading: true
           Efa:
             Enabled: false
@@ -145,13 +147,9 @@ SharedStorage:
     StorageType: Ebs
     Name: raid
     EbsSettings:
-    {% if "-iso" in region %}
-      VolumeType: gp2
-    {% else %}
       VolumeType: gp3
       Iops: 3200 # New parameter
       Throughput: 130 # New parameter
-    {% endif %}
       Raid:
         Type: 0
         NumberOfVolumes: 2
@@ -159,27 +157,21 @@ SharedStorage:
     Name: ebs
     StorageType: Ebs
     EbsSettings:
-    {% if "-iso" in region %}
-      VolumeType: gp2
-    {% else %}
       VolumeType: gp3
       Iops: 3200 # New parameter
       Throughput: 130 # New parameter
-    {% endif %}
   - MountDir: efs
     Name: efs
     StorageType: Efs
     EfsSettings: # New section
       ThroughputMode: provisioned
-      ProvisionedThroughput: 1024
-{% if "-iso" not in region %}
+      ProvisionedThroughput: 20
   - MountDir: fsx
     Name: fsx
     StorageType: FsxLustre
     FsxLustreSettings:
       StorageCapacity: 2400
       WeeklyMaintenanceStartTime: "3:02:30" # New parameter
-{% endif %}
 Monitoring:
   DetailedMonitoring: false
   Logs:

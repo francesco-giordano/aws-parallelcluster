@@ -8,7 +8,7 @@ HeadNode:
       - {{ database_client_security_group }}
   Iam:
     AdditionalIamPolicies:
-      - Policy: arn:aws:iam::aws:policy/AmazonSSMFullAccess
+      - Policy: arn:{{partition}}:iam::aws:policy/AmazonSSMManagedInstanceCore
   Ssh:
     KeyName: {{ key_name }}
   Imds:
@@ -25,15 +25,18 @@ Scheduling:
       ComputeResources:
         - Name: cit
           Instances:
-            - InstanceType: {{ instance }}
+            - InstanceType: c5.xlarge
+            - InstanceType: m5.xlarge
+            - InstanceType: c5d.xlarge
+            - InstanceType: t3.xlarge
           MinCount: 0
-          MaxCount: 12
+          MaxCount: 10
       Networking:
         SubnetIds:
           - {{ private_subnet_id }}
       Iam:
         AdditionalIamPolicies:
-          - Policy: arn:aws:iam::aws:policy/AmazonSSMFullAccess
+          - Policy: arn:{{partition}}:iam::aws:policy/AmazonSSMManagedInstanceCore
 Monitoring:
   Logs:
     CloudWatch:

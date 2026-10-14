@@ -5,6 +5,8 @@
 #  or in the "LICENSE.txt" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
 #  OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 #  limitations under the License.
+import re
+
 import pytest
 from assertpy import assert_that
 
@@ -33,7 +35,8 @@ class TestListImagesCommand:
             ),
             (
                 ["--image-status", "invalid"],
-                "argument --image-status: invalid choice: 'invalid' (choose from 'AVAILABLE', 'PENDING', 'FAILED')",
+                r"argument --image-status: invalid choice: 'invalid' "
+                r"\(choose from .*AVAILABLE.*, .*PENDING.*, .*FAILED.*\)",
             ),
             (
                 ["--image-status", "AVAILABLE", "--invalid"],
@@ -50,19 +53,19 @@ class TestListImagesCommand:
         run_cli(command, expect_failure=True)
 
         out, err = capsys.readouterr()
-        assert_that(out + err).contains(error_message)
+        assert_that(re.search(error_message, out + err) or error_message in out + err).is_true()
 
     def test_execute(self, mocker):
         response_dict = {
             "images": [
                 {
-                    "imageId": "aws-parallelcluster-3-0-0-amzn2-hvm-x86-64-202107121836",
+                    "imageId": "aws-parallelcluster-3-0-0-amzn2023-hvm-x86-64-202107121836",
                     "imageBuildStatus": "BUILD_COMPLETE",
                     "region": "us-east-2",
                     "version": "3.0.0",
                 },
                 {
-                    # "imageId": "dlami-aws-parallelcluster-3-0-0-amzn2-hvm-x86-64-202106181651",
+                    # "imageId": "dlami-aws-parallelcluster-3-0-0-amzn2023-hvm-x86-64-202106181651",
                     "imageId": "dlami-aws-parallelcluster-3-0-0-truncated",
                     "imageBuildStatus": "BUILD_COMPLETE",
                     "region": "us-east-2",

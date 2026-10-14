@@ -76,11 +76,6 @@ class ClusterStack(StackInfo):
         """Delete stack."""
         AWSApi.instance().cfn.delete_stack(self.name)
 
-    @property
-    def batch_compute_environment(self):
-        """Return Batch compute environment."""
-        return self._get_output("BatchComputeEnvironmentArn")
-
     def _get_failure_reason(self):
         """Reason of the failure when the cluster_status is in CREATE_FAILED."""
 
@@ -153,9 +148,6 @@ class ClusterStack(StackInfo):
             ClusterCreationFailure("FsxMountFailure", "Failed to mount FSX.", "Failed to mount FSX"),
             ClusterCreationFailure("RaidMountFailure", "Failed to mount RAID array.", "Failed to mount RAID array"),
             ClusterCreationFailure(
-                "HeadNodeBootstrapFailure", "Failed to set up the head node.", "configured scheduler plugin"
-            ),
-            ClusterCreationFailure(
                 "HeadNodeBootstrapFailure", "Failed to set up the head node.", "Failed to run chef recipe"
             ),
             ClusterCreationFailure(
@@ -168,6 +160,11 @@ class ClusterStack(StackInfo):
             ),
             ClusterCreationFailure(
                 "HeadNodeBootstrapFailure", "Cluster creation timed out.", "WaitCondition timed out"
+            ),
+            ClusterCreationFailure(
+                "StaticNodeBootstrapFailure",
+                "Cluster has been set to PROTECTED mode due to failures detected in static node provisioning.",
+                "Cluster has been set to PROTECTED mode due to failures detected in static node provisioning",
             ),
         ]
 

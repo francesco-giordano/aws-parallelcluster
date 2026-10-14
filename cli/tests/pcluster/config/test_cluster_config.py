@@ -1,10 +1,14 @@
 import pytest
 from assertpy import assert_that
 
-from pcluster.aws.aws_resources import InstanceTypeInfo
+from pcluster.aws.aws_api import AWSApi
+from pcluster.aws.aws_resources import CapacityReservationInfo, InstanceTypeInfo
 from pcluster.config.cluster_config import (
     AmiSearchFilters,
     BaseClusterConfig,
+    BaseQueue,
+    CapacityReservationTarget,
+    CapacityType,
     ClusterDevSettings,
     ComputeSettings,
     Ebs,
@@ -13,8 +17,14 @@ from pcluster.config.cluster_config import (
     HeadNode,
     HeadNodeImage,
     HeadNodeNetworking,
+    HeadNodeSsh,
     HealthChecks,
     Image,
+    LoginNodes,
+    LoginNodesImage,
+    LoginNodesNetworking,
+    LoginNodesPool,
+    LoginNodesSsh,
     PlacementGroup,
     QueueImage,
     SharedEbs,
@@ -28,6 +38,8 @@ from pcluster.config.cluster_config import (
     SlurmSettings,
     Tag,
 )
+from pcluster.validators.ec2_validators import PlacementGroupCapacityTypeValidator
+from tests.pcluster.aws.dummy_aws_api import mock_aws_api
 
 mock_compute_resources = [
     SlurmComputeResource(
@@ -59,6 +71,122 @@ mock_compute_resources = [
     ),
 ]
 
+network_test_parameters = [
+    (
+        [
+            {"MaximumNetworkCards": 1, "NetworkCards": [{"NetworkCardIndex": 0}]},
+            {"MaximumNetworkCards": 1, "NetworkCards": [{"NetworkCardIndex": 0}]},
+        ],
+        1,
+        [0],
+        1,
+        [0],
+    ),
+    (
+        [
+            {"MaximumNetworkCards": 0, "NetworkCards": [{"NetworkCardIndex": 0}]},
+            {"MaximumNetworkCards": 0, "NetworkCards": [{"NetworkCardIndex": 0}]},
+        ],
+        1,
+        [0],
+        1,
+        [0],
+    ),
+    (
+        [
+            {"MaximumNetworkCards": 0, "NetworkCards": [{"NetworkCardIndex": 1}, {"NetworkCardIndex": 0}]},
+            {
+                "MaximumNetworkCards": 3,
+                "NetworkCards": [{"NetworkCardIndex": 3}, {"NetworkCardIndex": 2}, {"NetworkCardIndex": 1}],
+            },
+        ],
+        2,
+        [0, 1],
+        2,
+        [0, 1],
+    ),
+    (
+        [
+            {
+                "MaximumNetworkCards": 3,
+                "NetworkCards": [{"NetworkCardIndex": 2}, {"NetworkCardIndex": 0}, {"NetworkCardIndex": 1}],
+            },
+            {
+                "MaximumNetworkCards": 5,
+                "NetworkCards": [
+                    {"NetworkCardIndex": 0},
+                    {"NetworkCardIndex": 1},
+                    {"NetworkCardIndex": 2},
+                    {"NetworkCardIndex": 3},
+                    {"NetworkCardIndex": 4},
+                ],
+            },
+        ],
+        3,
+        [0, 1, 2],
+        3,
+        [0, 1, 2],
+    ),
+    (
+        [
+            {
+                "MaximumNetworkCards": 3,
+                "NetworkCards": [{"NetworkCardIndex": 0}, {"NetworkCardIndex": 3}, {"NetworkCardIndex": 5}],
+            },
+            {
+                "MaximumNetworkCards": 4,
+                "NetworkCards": [
+                    {"NetworkCardIndex": 0},
+                    {"NetworkCardIndex": 1},
+                    {"NetworkCardIndex": 2},
+                    {"NetworkCardIndex": 3},
+                ],
+            },
+        ],
+        3,
+        [0, 3, 5],
+        3,
+        [0, 3, 5],
+    ),
+    (
+        [
+            {
+                "MaximumNetworkCards": 4,
+                "NetworkCards": [
+                    {"NetworkCardIndex": 7},
+                    {"NetworkCardIndex": 3},
+                    {"NetworkCardIndex": 5},
+                    {"NetworkCardIndex": 0},
+                ],
+            },
+            {
+                "MaximumNetworkCards": 3,
+                "NetworkCards": [{"NetworkCardIndex": 0}, {"NetworkCardIndex": 3}, {"NetworkCardIndex": 5}],
+            },
+        ],
+        4,
+        [0, 3, 5, 7],
+        3,
+        [0, 3, 5],
+    ),
+]
+
+
+@pytest.fixture
+def instance_type_info_networking_mock(aws_api_mock, network_info):
+    aws_api_mock.ec2.get_instance_type_info.side_effect = [
+        InstanceTypeInfo(
+            {
+                "NetworkInfo": network_info[0],
+            }
+        ),
+        InstanceTypeInfo(
+            {
+                "NetworkInfo": network_info[1],
+            }
+        ),
+    ]
+
 
 @pytest.fixture
 def get_region(mocker):
@@ -72,10 +200,135 @@ def instance_type_info_mock(aws_api_mock):
             "InstanceType": "g4ad.16xlarge",
             "VCpuInfo": {"DefaultVCpus": 64},
             "GpuInfo": {"Gpus": [{"Name": "*", "Manufacturer": "AMD", "Count": 4}]},
-            "NetworkInfo": {"EfaSupported": False, "MaximumNetworkCards": 1},
+            "NetworkInfo": {"EfaSupported": False, "MaximumNetworkCards": 1, "NetworkCards": [{"NetworkCardIndex": 0}]},
             "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
         }
     )
+
+
+class TestBaseQueue:
+    @pytest.mark.parametrize(
+        ("capacity_type", "expected_capacity_type", "expected_error"),
+        [
+            (None, CapacityType.ONDEMAND, False),
+            ("", CapacityType.ONDEMAND, False),
+            ("capacity_block", CapacityType.CAPACITY_BLOCK, False),
+            ("CAPACITY_BLOCK", CapacityType.CAPACITY_BLOCK, False),
+            ("spot", CapacityType.SPOT, False),
+            ("SPOT", CapacityType.SPOT, False),
+            ("ONDEMAND", CapacityType.ONDEMAND, False),
+            ("ondemand", CapacityType.ONDEMAND, False),
+            ("wrong-value", CapacityType.ONDEMAND, True),
+        ],
+    )
+    def test_capacity_type_init(self, capacity_type, expected_capacity_type, expected_error, caplog):
+        queue = BaseQueue(name="queue1", capacity_type=capacity_type)
+        if expected_error:
+            assert_that(caplog.text).contains("'WRONG-VALUE' is not a valid CapacityType value, setting ONDEMAND")
+
+        assert_that(queue.name).is_equal_to("queue1")
+        assert_that(queue.capacity_type).is_equal_to(expected_capacity_type)
+
+    @pytest.mark.parametrize(
+        ("capacity_type", "expected_result"),
+        [("CAPACITY_BLOCK", False), ("spot", True), ("SPOT", True), ("ONDEMAND", False)],
+    )
+    def test_is_spot(self, capacity_type, expected_result):
+        queue = BaseQueue(name="queue1", capacity_type=capacity_type)
+        assert_that(queue.is_spot()).is_equal_to(expected_result)
+
+    @pytest.mark.parametrize(
+        ("capacity_type", "expected_result"),
+        [("capacity_block", True), ("CAPACITY_BLOCK", True), ("SPOT", False), ("ONDEMAND", False)],
+    )
+    def test_is_capacity_block(self, capacity_type, expected_result):
+        queue = BaseQueue(name="queue1", capacity_type=capacity_type)
+        assert_that(queue.is_capacity_block()).is_equal_to(expected_result)
+
+
+class TestSlurmComputeResource:
+    @pytest.mark.parametrize(
+        ("capacity_reservation_target", "avail_capacity_reservations", "expected_instance_type"),
+        [
+            (None, None, None),
+            (CapacityReservationTarget(), None, None),
+            (CapacityReservationTarget(capacity_reservation_resource_group_arn="arn"), None, None),
+            (CapacityReservationTarget(capacity_reservation_id="cr-123456"), None, None),
+            (CapacityReservationTarget(capacity_reservation_id="cr-123456"), [], None),
+            (
+                CapacityReservationTarget(capacity_reservation_id="cr-123456"),
+                [CapacityReservationInfo({"InstanceType": "mocked-instance-type"})],
+                "mocked-instance-type",
+            ),
+        ],
+    )
+    def test_instance_type_from_capacity_reservation(
+        self, mocker, capacity_reservation_target, avail_capacity_reservations, expected_instance_type
+    ):
+        mock_aws_api(mocker)
+        describe_capacity_res_mock = mocker.patch(
+            "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations", return_value=avail_capacity_reservations
+        )
+
+        compute_resource = SlurmComputeResource(name="name", capacity_reservation_target=capacity_reservation_target)
+        capacity_reservation_id = (
+            compute_resource.capacity_reservation_target.capacity_reservation_id
+            if compute_resource.capacity_reservation_target
+            else None
+        )
+        instance_type, _ = AWSApi.instance().ec2.get_instance_type_and_reservation_type_from_capacity_reservation(
+            capacity_reservation_id
+        )
+        assert_that(instance_type).is_equal_to(expected_instance_type)
+        if capacity_reservation_target and capacity_reservation_target.capacity_reservation_id:
+            describe_capacity_res_mock.assert_called()
+        else:
+            describe_capacity_res_mock.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("instance_type", "capacity_reservation_target", "expected_instance_type"),
+        [
+            (None, None, None),
+            ("t3.micro", None, "t3.micro"),
+            (None, CapacityReservationTarget(capacity_reservation_resource_group_arn="arn"), None),
+            (None, CapacityReservationTarget(capacity_reservation_id="cr-123456"), "mocked-instance-type"),
+            # instance type param wins
+            ("t3.micro", CapacityReservationTarget(capacity_reservation_id="cr-123456"), "t3.micro"),
+        ],
+    )
+    def test_instance_types(self, mocker, instance_type, capacity_reservation_target, expected_instance_type):
+        mock_aws_api(mocker)
+        describe_capacity_res_mock = mocker.patch(
+            "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
+            return_value=[CapacityReservationInfo({"InstanceType": "mocked-instance-type"})],
+        )
+        compute_resource = SlurmComputeResource(
+            name="name", instance_type=instance_type, capacity_reservation_target=capacity_reservation_target
+        )
+        assert_that(compute_resource.instance_types).is_equal_to([expected_instance_type])
+
+        if not instance_type and capacity_reservation_target and capacity_reservation_target.capacity_reservation_id:
+            describe_capacity_res_mock.assert_called()
+        else:
+            describe_capacity_res_mock.assert_not_called()
+
+    @pytest.mark.usefixtures("instance_type_info_networking_mock")
+    @pytest.mark.usefixtures(
+        "get_region", "expected_max_network_cards_flexible", "expected_network_cards_index_list_flexible"
+    )
+    @pytest.mark.parametrize(
+        "network_info, expected_max_network_cards, expected_network_cards_index_list, "
+        "expected_max_network_cards_flexible, expected_network_cards_index_list_flexible",
+        network_test_parameters,
+    )
+    def test_network_cards(self, expected_max_network_cards, expected_network_cards_index_list):
+        compute_resource = SlurmComputeResource(name="compute_resource", instance_type="fake-instance-type")
+        assert_that(compute_resource.max_network_cards).is_equal_to(expected_max_network_cards)
+        network_cards_list = compute_resource.network_cards_list
+        for index in range(len(expected_network_cards_index_list)):
+            assert_that(network_cards_list[index].network_card_index()).is_equal_to(
+                expected_network_cards_index_list[index]
+            )
 
 
 @pytest.mark.usefixtures("instance_type_info_mock")
@@ -85,7 +338,7 @@ class TestBaseClusterConfig:
     def base_cluster_config(self):
         return BaseClusterConfig(
             cluster_name="clustername",
-            image=Image("alinux2"),
+            image=Image("alinux2023"),
             head_node=HeadNode("c5.xlarge", HeadNodeNetworking("subnet")),
         )
 
@@ -93,7 +346,7 @@ class TestBaseClusterConfig:
     def base_slurm_cluster_config(self):
         return SlurmClusterConfig(
             cluster_name="clustername",
-            image=Image("alinux2"),
+            image=Image("alinux2023"),
             head_node=HeadNode("c5.xlarge", HeadNodeNetworking("subnet")),
             scheduling=SlurmScheduling(
                 [
@@ -113,7 +366,8 @@ class TestBaseClusterConfig:
     def test_registration_of_validators(self, memory_scheduling_enabled, mocker):
         cluster_config = SlurmClusterConfig(
             cluster_name="clustername",
-            image=Image("alinux2"),
+            login_nodes=None,
+            image=Image("alinux2023"),
             head_node=HeadNode("c5.xlarge", HeadNodeNetworking("subnet")),
             scheduling=SlurmScheduling(
                 [
@@ -137,7 +391,14 @@ class TestBaseClusterConfig:
             ),
         )
         cluster_config._register_validators()
-        assert_that(cluster_config._validators).is_not_empty()
+        actual_validators = cluster_config._validators
+        assert_that(actual_validators).is_not_empty()
+        assert_that(actual_validators).contains(
+            (
+                PlacementGroupCapacityTypeValidator().__class__,
+                {"capacity_type": CapacityType.ONDEMAND, "placement_group_enabled": False},
+            )
+        )
 
     def test_instances_in_slurm_queue(self):
         queue = SlurmQueue(
@@ -145,7 +406,7 @@ class TestBaseClusterConfig:
             networking=SlurmQueueNetworking(subnet_ids=["subnet"]),
             compute_resources=[
                 SlurmComputeResource(name="compute_resource_1", instance_type="c5n.4xlarge"),
-                SlurmComputeResource(name="compute_resource_2", instance_type="t2.micro"),
+                SlurmComputeResource(name="compute_resource_2", instance_type="t3.micro"),
                 SlurmFlexibleComputeResource(
                     name="compute_resource_3",
                     instances=[
@@ -163,7 +424,7 @@ class TestBaseClusterConfig:
             ],
         )
 
-        expected_instance_type_list = ["c5n.4xlarge", "t2.micro", "c5n.9xlarge", "c5n.18xlarge"]
+        expected_instance_type_list = ["c5n.4xlarge", "t3.micro", "c5n.9xlarge", "c5n.18xlarge"]
         assert_that(queue.instance_type_list).is_length(len(expected_instance_type_list))
         assert_that(set(queue.instance_type_list) - set(expected_instance_type_list)).is_length(0)
 
@@ -177,7 +438,7 @@ class TestBaseClusterConfig:
                     instance_type="c5n.4xlarge",
                     networking=SlurmComputeResourceNetworking(placement_group=PlacementGroup(name="mock-pg")),
                 ),
-                SlurmComputeResource(name="compute_resource_2", instance_type="t2.micro"),
+                SlurmComputeResource(name="compute_resource_2", instance_type="t3.micro"),
             ],
         )
 
@@ -196,7 +457,7 @@ class TestBaseClusterConfig:
                     instance_type="c5n.4xlarge",
                     networking=SlurmComputeResourceNetworking(placement_group=PlacementGroup(id="mock-pg")),
                 ),
-                SlurmComputeResource(name="compute_resource_2", instance_type="t2.micro"),
+                SlurmComputeResource(name="compute_resource_2", instance_type="t3.micro"),
             ],
         )
 
@@ -213,7 +474,7 @@ class TestBaseClusterConfig:
                     instance_type="c5n.4xlarge",
                     networking=SlurmComputeResourceNetworking(placement_group=PlacementGroup(enabled=True)),
                 ),
-                SlurmComputeResource(name="compute_resource_2", instance_type="t2.micro"),
+                SlurmComputeResource(name="compute_resource_2", instance_type="t3.micro"),
             ],
         )
 
@@ -246,7 +507,7 @@ class TestBaseClusterConfig:
         assert_that(ami_id).is_equal_to(expected_ami)
 
         if not (global_custom_ami or head_node_custom_ami):
-            aws_api_mock.ec2.get_official_image_id.assert_called_with("alinux2", "x86_64", ami_filters)
+            aws_api_mock.ec2.get_official_image_id.assert_called_with("alinux2023", "x86_64", ami_filters)
         else:
             aws_api_mock.ec2.get_official_image_id.assert_not_called()
 
@@ -278,7 +539,7 @@ class TestBaseClusterConfig:
             assert_that(image_dict[queue.name]).is_equal_to(expected_ami)
 
         if not (global_custom_ami or compute_custom_ami):
-            aws_api_mock.ec2.get_official_image_id.assert_called_with("alinux2", "x86_64", ami_filters)
+            aws_api_mock.ec2.get_official_image_id.assert_called_with("alinux2023", "x86_64", ami_filters)
         else:
             aws_api_mock.ec2.get_official_image_id.assert_not_called()
 
@@ -452,8 +713,8 @@ class TestBaseClusterConfig:
     @pytest.mark.parametrize(
         "region, expected_volume_type",
         [
-            ("us-iso-WHATEVER", "gp2"),
-            ("us-isob-WHATEVER", "gp2"),
+            ("us-iso-WHATEVER", "gp3"),
+            ("us-isob-WHATEVER", "gp3"),
             ("WHATEVER_ELSE_REGION", "gp3"),
         ],
     )
@@ -462,7 +723,7 @@ class TestBaseClusterConfig:
 
         cluster_config = BaseClusterConfig(
             cluster_name="clustername",
-            image=Image("alinux2"),
+            image=Image("alinux2023"),
             head_node=HeadNode("c5.xlarge", HeadNodeNetworking("subnet")),
         )
 
@@ -471,8 +732,8 @@ class TestBaseClusterConfig:
     @pytest.mark.parametrize(
         "region, expected_volume_type",
         [
-            ("us-iso-WHATEVER", "gp2"),
-            ("us-isob-WHATEVER", "gp2"),
+            ("us-iso-WHATEVER", "gp3"),
+            ("us-isob-WHATEVER", "gp3"),
             ("WHATEVER_ELSE_REGION", "gp3"),
         ],
     )
@@ -493,13 +754,124 @@ class TestBaseClusterConfig:
         )
         assert_that(queue.get_tags()).is_equal_to(tags)
 
+    def test_login_node_pool_default_value(self):
+        login_node_pool = LoginNodesPool(
+            name="test_pool2",
+            instance_type="t3.xlarge",
+            image=LoginNodesImage(custom_ami="ami-0222222222222222"),
+            networking=LoginNodesNetworking(subnet_ids=["subnet-0222222222222222"]),
+            ssh=LoginNodesSsh(),
+        )
+
+        login_nodes = LoginNodes(pools=[login_node_pool])
+        assert_that(login_nodes.pools[0].count).is_equal_to(1)
+        assert_that(login_nodes.pools[0].gracetime_period).is_equal_to(10)
+
+    @pytest.mark.parametrize(
+        "queue, expected_value",
+        [
+            # JobExclusiveAllocation should be disabled by default
+            (
+                dict(
+                    name="queue",
+                    networking=SlurmQueueNetworking(subnet_ids=[], placement_group=PlacementGroup(enabled=False)),
+                    compute_resources=mock_compute_resources,
+                ),
+                False,
+            ),
+            (
+                dict(
+                    name="queue",
+                    networking=SlurmQueueNetworking(subnet_ids=[], placement_group=PlacementGroup(enabled=False)),
+                    job_exclusive_allocation=True,
+                    compute_resources=mock_compute_resources,
+                ),
+                True,
+            ),
+            (
+                dict(
+                    name="queue",
+                    networking=SlurmQueueNetworking(subnet_ids=[], placement_group=PlacementGroup(enabled=False)),
+                    job_exclusive_allocation=False,
+                    compute_resources=mock_compute_resources,
+                ),
+                False,
+            ),
+        ],
+    )
+    def test_job_exclusive_allocation_defaults(self, queue, expected_value):
+        queue = SlurmQueue(**queue)
+        assert_that(queue.job_exclusive_allocation).is_equal_to(expected_value)
+
+    @pytest.mark.parametrize(
+        "head_node_ssh, login_node_ssh, expected_allowed_ips",
+        [
+            (
+                HeadNodeSsh(key_name="head-node-key", allowed_ips="1.2.3.4/24"),
+                LoginNodesSsh(allowed_ips="6.5.4.3/24"),
+                "6.5.4.3/24",
+            ),
+            (
+                HeadNodeSsh(key_name="head-node-key", allowed_ips="1.2.3.4/24"),
+                LoginNodesSsh(),
+                "1.2.3.4/24",
+            ),
+            (
+                HeadNodeSsh(key_name="head-node-key", allowed_ips="1.2.3.4/24"),
+                None,
+                "1.2.3.4/24",
+            ),
+            (
+                None,
+                LoginNodesSsh(allowed_ips="6.5.4.3/24"),
+                "6.5.4.3/24",
+            ),
+        ],
+    )
+    def test_login_nodes_ssh_default_values(self, head_node_ssh, login_node_ssh, expected_allowed_ips, mocker):
+        cluster_config = SlurmClusterConfig(
+            cluster_name="clustername",
+            login_nodes=LoginNodes(
+                [
+                    LoginNodesPool(
+                        name="test_pool",
+                        instance_type="t3.xlarge",
+                        image=LoginNodesImage(custom_ami="ami-12345678"),
+                        networking=LoginNodesNetworking(subnet_ids=["subnet-12345678"]),
+                        ssh=login_node_ssh,
+                    )
+                ]
+            ),
+            image=Image("alinux2023"),
+            head_node=HeadNode("c5.xlarge", HeadNodeNetworking("subnet"), ssh=head_node_ssh),
+            scheduling=SlurmScheduling(
+                [
+                    SlurmQueue(
+                        name="queue0",
+                        networking=SlurmQueueNetworking(subnet_ids=["subnet"]),
+                        compute_resources=[
+                            SlurmComputeResource(name="compute_resource_1", instance_type="c5.xlarge"),
+                            SlurmFlexibleComputeResource(
+                                [FlexibleInstanceType(instance_type="c5.xlarge")], name="compute_resource_2"
+                            ),
+                            SlurmFlexibleComputeResource(
+                                [FlexibleInstanceType(instance_type="c5n.18xlarge")], name="compute_resource_3"
+                            ),
+                        ],
+                    )
+                ],
+            ),
+        )
+        print(cluster_config.head_node.ssh.key_name)
+        assert_that(cluster_config.login_nodes.pools[0].ssh.allowed_ips).is_equal_to(expected_allowed_ips)
+
 
 class TestSharedEbs:
     @pytest.mark.parametrize(
         "region, expected_volume_type",
         [
-            ("us-iso-WHATEVER", "gp2"),
-            ("us-isob-WHATEVER", "gp2"),
+            ("us-iso-WHATEVER", "gp3"),
+            ("us-isob-WHATEVER", "gp3"),
             ("WHATEVER_ELSE_REGION", "gp3"),
         ],
     )
@@ -515,8 +887,8 @@ class TestEbs:
     @pytest.mark.parametrize(
         "region, expected_volume_type",
         [
-            ("us-iso-WHATEVER", "gp2"),
-            ("us-isob-WHATEVER", "gp2"),
+            ("us-iso-WHATEVER", "gp3"),
+            ("us-isob-WHATEVER", "gp3"),
             ("WHATEVER_ELSE_REGION", "gp3"),
         ],
     )
@@ -526,3 +898,42 @@ class TestEbs:
         ebs = Ebs()
 
         assert_that(ebs.volume_type).is_equal_to(expected_volume_type)
+
+
+class TestHeadNode:
+    @pytest.mark.usefixtures("instance_type_info_networking_mock")
+    @pytest.mark.usefixtures(
+        "get_region", "expected_max_network_cards_flexible", "expected_network_cards_index_list_flexible"
+    )
+    @pytest.mark.parametrize(
+        "network_info, expected_max_network_cards, expected_network_cards_index_list, "
+        "expected_max_network_cards_flexible, expected_network_cards_index_list_flexible",
+        network_test_parameters,
+    )
+    def test_network_cards(self, expected_max_network_cards, expected_network_cards_index_list):
+        head_node = HeadNode("c5.xlarge", HeadNodeNetworking("subnet"))
+        assert_that(head_node.max_network_cards).is_equal_to(expected_max_network_cards)
+        for index in range(len(expected_network_cards_index_list)):
+            assert_that(head_node.network_cards_list[index].network_card_index()).is_equal_to(
+                expected_network_cards_index_list[index]
+            )
+
+
+class TestSlurmFlexibleComputeResource:
+    @pytest.mark.usefixtures("instance_type_info_networking_mock")
+    @pytest.mark.usefixtures("get_region", "expected_max_network_cards", "expected_network_cards_index_list")
+    @pytest.mark.parametrize(
+        "network_info, expected_max_network_cards, expected_network_cards_index_list, "
+        "expected_max_network_cards_flexible, expected_network_cards_index_list_flexible",
+        network_test_parameters,
+    )
+    def test_network_cards(self, expected_max_network_cards_flexible, expected_network_cards_index_list_flexible):
+        compute_resource = SlurmFlexibleComputeResource(
+            [FlexibleInstanceType(instance_type="type_1"), FlexibleInstanceType(instance_type="type_2")],
+            name="compute_resource",
+        )
+        assert_that(compute_resource.max_network_cards).is_equal_to(expected_max_network_cards_flexible)
+        for index in range(len(expected_network_cards_index_list_flexible)):
+            assert_that(compute_resource.network_cards_list[index].network_card_index()).is_equal_to(
+                expected_network_cards_index_list_flexible[index]
+            )

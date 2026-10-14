@@ -8,9 +8,19 @@
 # or in the "LICENSE.txt" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
 # OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 # limitations under the License.
-
-SCHEDULERS_SUPPORTING_IMDS_SECURED = ["slurm", "plugin"]
+import os
+from enum import Enum
 
 OSU_BENCHMARK_VERSION = "5.7.1"
 
-SCHEDULER_PLUGIN_INTERFACE_VERSION = "1.0"
+REPOSITORY_ROOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..")
+
+UNSUPPORTED_OSES_FOR_DCV = []
+
+
+class NodeType(Enum):
+    """Categories of nodes."""
+
+    HEAD_NODE = "HeadNode"
+    LOGIN_NODES = "LoginNodes"
+    COMPUTE_NODES = "ComputeNodes"

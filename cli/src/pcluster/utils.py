@@ -20,22 +20,33 @@ import re
 import string
 import sys
 import time
+import urllib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from hashlib import sha256
+from importlib.metadata import version
+from importlib.resources import files  # nosemgrep: python.lang.compatibility.python37.python37-compatibility-importlib2
 from io import BytesIO
 from shlex import quote
 from typing import Callable, NoReturn
+from urllib.error import URLError
 from urllib.parse import urlparse
 
+import boto3
 import dateutil.parser
-import pkg_resources
 import yaml
+from packaging.version import parse
 from yaml import SafeLoader
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
 from pcluster.aws.common import get_region
-from pcluster.constants import SUPPORTED_OSES_FOR_ARCHITECTURE, SUPPORTED_OSES_FOR_SCHEDULER
+from pcluster.constants import (
+    SUPPORTED_OSES_FOR_ARCHITECTURE,
+    UNSUPPORTED_FEATURES_MAP,
+    Feature,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -141,8 +152,8 @@ def zip_dir(path):
     """
     file_out = BytesIO()
     with zipfile.ZipFile(file_out, "w", zipfile.ZIP_DEFLATED) as ziph:
-        for root, _, files in os.walk(path):
-            for file in files:
+        for root, _, files_list in os.walk(path):
+            for file in files_list:
                 _add_file_to_zip(
                     ziph,
                     os.path.join(root, file),
@@ -152,19 +163,20 @@ def zip_dir(path):
     return file_out
 
 
-def get_supported_os_for_scheduler(scheduler):
-    """
-    Return an array containing the list of OSes supported by parallelcluster for the specific scheduler.
-
-    :param scheduler: the scheduler for which we want to know the supported os
-    :return: an array of strings of the supported OSes
-    """
-    return SUPPORTED_OSES_FOR_SCHEDULER.get(scheduler, [])
-
-
 def get_supported_os_for_architecture(architecture):
     """Return list of supported OSes for the specified architecture."""
     return SUPPORTED_OSES_FOR_ARCHITECTURE.get(architecture, [])
+
+
+def is_feature_supported(feature: Feature, region: str = None):
+    """
+    Check if a feature is supported for the given region.
+
+    If region is None, consider the region set in the environment.
+    """
+    _region = get_region() if region is None else region
+    prefixes_of_unsupported_regions = UNSUPPORTED_FEATURES_MAP.get(feature, [])
+    return all(not _region.startswith(region_prefix) for region_prefix in prefixes_of_unsupported_regions)
 
 
 def to_utc_datetime(time_in, default_timezone=datetime.timezone.utc) -> datetime.datetime:
@@ -180,7 +192,7 @@ def to_utc_datetime(time_in, default_timezone=datetime.timezone.utc) -> datetime
     if isinstance(time_in, int):
         if time_in > 1e12:
             time_in /= 1000
-        time_ = datetime.datetime.utcfromtimestamp(time_in)
+        time_ = datetime.datetime.fromtimestamp(time_in, tz=datetime.timezone.utc)
         time_ = time_.replace(tzinfo=datetime.timezone.utc)
     elif isinstance(time_in, str):
         time_ = dateutil.parser.parse(time_in)
@@ -286,8 +298,8 @@ def get_templates_bucket_path():
 
 def get_installed_version(base_version_only: bool = False):
     """Get the version of the installed aws-parallelcluster package."""
-    pkg_distribution = pkg_resources.get_distribution("aws-parallelcluster")
-    return pkg_distribution.version if not base_version_only else pkg_distribution.parsed_version.base_version
+    pkg_version = version("aws-parallelcluster")
+    return pkg_version if not base_version_only else parse(pkg_version).base_version
 
 
 def warn(message):
@@ -324,16 +336,16 @@ def split_resource_prefix(resource_prefix):
     if resource_prefix:
         split_index = resource_prefix.rfind("/") + 1
         return (
-            None
-            if split_index == 0
-            else resource_prefix
-            if split_index == len(resource_prefix)
-            else resource_prefix[:split_index],
-            None
-            if split_index == len(resource_prefix)
-            else resource_prefix
-            if split_index == 0
-            else resource_prefix[split_index:],
+            (
+                None
+                if split_index == 0
+                else resource_prefix if split_index == len(resource_prefix) else resource_prefix[:split_index]
+            ),
+            (
+                None
+                if split_index == len(resource_prefix)
+                else resource_prefix if split_index == 0 else resource_prefix[split_index:]
+            ),
         )
     return None, None
 
@@ -413,6 +425,12 @@ def remove_none_values(original_dictionary):
     return {key: value for key, value in original_dictionary.items() if value is not None}
 
 
+def get_chunks(input_lst, desired_size=20):
+    """Get a list of lists splitting the input list in chunks with a specific length."""
+    for i in range(0, len(input_lst), desired_size):
+        yield input_lst[i : i + desired_size]  # noqa: E203
+
+
 def batch_by_property_callback(items, property_callback: Callable[..., int], batch_size):
     """
     Group a list of items into batches based on a property of each item and the specified `batch_size`.
@@ -453,6 +471,29 @@ def batch_by_property_callback(items, property_callback: Callable[..., int], bat
         if item_index == len(items) - 1:
             # If on the last time, yield the batch
             yield current_batch
+
+
+@contextmanager
+def event_loop():
+    """Provide an asyncio event loop, closing it on exit if this context created it.
+
+    This is required to support Python 3.14, where asyncio.get_event_loop() raises a RuntimeError
+    when there is no running loop instead of implicitly creating one. If a loop is already running
+    it is reused and left open (the caller does not own it); otherwise a new loop is created and
+    closed on exit to avoid leaking event loops.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        created = False
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        created = True
+    try:
+        yield loop
+    finally:
+        if created:
+            loop.close()
 
 
 class AsyncUtils:
@@ -531,8 +572,134 @@ class AsyncUtils:
 
         @functools.wraps(func)
         async def wrapper(self, *args, **kwargs):
-            return await asyncio.get_event_loop().run_in_executor(
+            return await asyncio.get_running_loop().run_in_executor(
                 AsyncUtils._thread_pool_executor, lambda: func(self, *args, **kwargs)
             )
 
         return wrapper
+
+
+def retrieve_supported_regions():
+    """Retrieve the list of supported regions."""
+    if not hasattr(retrieve_supported_regions, "cache"):
+        region = boto3.Session().region_name or "us-east-1"
+        try:
+            url = "https://{region}-aws-parallelcluster.s3.{region}.{aws_domain}/supported-regions".format(
+                region=region,
+                aws_domain=get_url_domain_suffix(region),
+            )
+            with urllib.request.urlopen(url) as f:  # nosec B310 nosemgrep
+                retrieve_supported_regions.cache = f.read().decode("utf-8").split("\n")
+        except URLError:
+            # When the file is not found on the URL, use local file. This is useful when developing new versions.
+            with open(str(files(__package__) / "resources" / "supported-regions"), encoding="utf-8") as f:
+                retrieve_supported_regions.cache = f.read().split("\n")
+    return retrieve_supported_regions.cache
+
+
+def get_service_principal(service_name: str, partition: str, region: str = None, regional: bool = False) -> str:
+    """Generate the service principal for a given service."""
+    domain_suffix = get_url_domain_suffix(partition)
+    if regional:
+        if not region:
+            raise ValueError("Region must be provided when 'regional' is True.")
+        return f"{service_name}.{region}.{domain_suffix}"
+    else:
+        return f"{service_name}.{domain_suffix}"
+
+
+def format_arn(partition: str, service: str, region: str, account: str, resource: str) -> str:
+    """Format an ARN string."""
+    return f"arn:{partition}:{service}:{region}:{account}:{resource}"
+
+
+def generate_string_hash(input_string: str, hash_length: int = 12) -> str:
+    """Return first input length hex chars of sha256(str)."""
+    return sha256(input_string.encode()).hexdigest()[:hash_length]
+
+
+def get_needed_ultraserver_capacity_block_statuses(statuses, capacity_reservation_ids):
+    needed_capacity_block_statuses = []
+    for status in statuses:
+        if (
+            status.get("CapacityReservationStatuses")
+            and status.get("CapacityReservationStatuses")[0].get("CapacityReservationId") in capacity_reservation_ids
+        ):
+            needed_capacity_block_statuses.append(status)
+    return needed_capacity_block_statuses
+
+
+def parse_json_string(value: str, raise_on_error: bool = False, default: any = None) -> any:
+    """
+    Parse a JSON string into a Python object.
+
+    :param value: JSON string to parse
+    :param raise_on_error: If True, raises exception on parse failure; if False, returns default
+    :param default: Value to return on parse failure when raise_on_error is False
+    :return: Parsed JSON object or default value on failure
+    """
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError) as e:
+        LOGGER.error("Failed to parse JSON string: %s. Error: %s", value, e)
+        if raise_on_error:
+            raise e
+        return default
+
+
+def _collect_leaves(d: dict, prefix: str) -> set[str]:
+    """Collect all leaf paths from a dict."""
+    leaves = set()
+    for k, v in d.items():
+        key_path = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, dict) and v:
+            leaves.update(_collect_leaves(v, key_path))
+        else:
+            leaves.add(key_path)
+    return leaves if leaves else {prefix} if prefix else set()
+
+
+def _collect_diff_for_key(d: dict, key: str, path: str) -> set[str]:
+    """Collect leaf paths for a key that exists only in one dictionary."""
+    key_path = f"{path}.{key}" if path else str(key)
+    if isinstance(d[key], dict) and d[key]:
+        return _collect_leaves(d[key], key_path)
+    return {key_path}
+
+
+def get_dictionary_diff(d1: dict, d2: dict, path: str = "") -> set[str]:
+    """
+    Recursively find all leaf paths where two dictionaries differ.
+
+    Returns a set of dot-notation paths (e.g., "cluster.settings.enabled") where
+    the dictionaries have different values, including added or removed keys.
+    Always returns leaf paths, never intermediate dict paths.
+
+    :param d1: First dictionary to compare (if None, treated as empty dict)
+    :param d2: Second dictionary to compare (if None, treated as empty dict)
+    :param path: Current path prefix (used for recursion)
+    :return: Set of dot-notation paths where dictionaries differ.
+             If no differences detected return empoty set.
+    """
+    d1 = d1 or {}
+    d2 = d2 or {}
+
+    diffs: set[str] = set()
+    keys1, keys2 = set(d1.keys()), set(d2.keys())
+
+    # Collect paths that are added or remove
+    for k in keys1 - keys2:
+        diffs.update(_collect_diff_for_key(d1, k, path))
+
+    for k in keys2 - keys1:
+        diffs.update(_collect_diff_for_key(d2, k, path))
+
+    # Compare paths
+    for k in keys1 & keys2:
+        key_path = f"{path}.{k}" if path else str(k)
+        if isinstance(d1[k], dict) and isinstance(d2[k], dict):
+            diffs.update(get_dictionary_diff(d1[k], d2[k], key_path))
+        elif d1[k] != d2[k]:
+            diffs.add(key_path)
+
+    return diffs

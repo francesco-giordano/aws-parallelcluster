@@ -10,14 +10,16 @@
 # limitations under the License.
 import itertools
 import os
+import re
 from copy import deepcopy
 
+import pytest
 from assertpy import assert_that
 
 from pcluster.constants import LAMBDA_VPC_ACCESS_MANAGED_POLICY
 from pcluster.schemas.cluster_schema import ClusterSchema
 from pcluster.templates.cdk_builder import CDKTemplateBuilder
-from pcluster.utils import load_yaml_dict
+from pcluster.utils import get_chunks, load_yaml_dict
 from tests.pcluster.models.dummy_s3_bucket import dummy_cluster_bucket
 
 
@@ -36,12 +38,18 @@ def load_cluster_model_from_yaml(config_file_name, test_datadir=None):
 
 
 def get_resources(
-    generated_template: dict, name: str = None, type: str = None, properties: dict = None, deletion_policy: str = None
+    generated_template: dict,
+    name: str = None,
+    name_pattern: str = None,
+    type: str = None,
+    properties: dict = None,
+    deletion_policy: str = None,
 ):
     return dict(
         (res_name, res_value)
         for res_name, res_value in generated_template.get("Resources", {}).items()
         if (name is None or res_name == name)
+        and (name_pattern is None or re.search(name_pattern, res_name))
         and (type is None or res_value.get("Type") == type)
         and (deletion_policy is None or res_value.get("DeletionPolicy") == deletion_policy)
         and (
@@ -62,6 +70,29 @@ def get_asset_content_with_resource_name(assets, resource_name):
             if asset_content["Resources"].get(resource_name):
                 return asset_content
     return None
+
+
+def get_resource_from_assets(assets, resource_name):
+    """Return the Resource dictionary containing a specific resource."""
+    asset = get_asset_content_with_resource_name(assets, resource_name)
+    if asset:
+        return asset["Resources"][resource_name]
+
+    return None
+
+
+# It expects as input ['UserData']['Fn::Base64']['Fn::Sub'] that is a list of two elements
+# 1: contains a dictionary with the key-values to be replaced by Fn::Sub
+# 0: contains the file (as str) where those values will be replaced
+def render_user_data(user_data):
+    """Render the UserData as CF will do."""
+    content = user_data[0]
+    values = user_data[1]
+
+    for value in values:
+        content = content.replace("${%s}" % value, str(values[value]))
+
+    return content
 
 
 def get_head_node_policy(template, enforce_not_null=True):
@@ -89,14 +120,20 @@ def assert_lambdas_have_expected_vpc_config_and_managed_policy(generated_templat
     resources = generated_template.get("Resources")
 
     for lambda_function in _get_lambda_functions(resources):
-        role = resources.get(_get_role_name(lambda_function))
+        role_name = _get_role_name(lambda_function)
+        if isinstance(role_name, str) and role_name.__contains__("arn"):
+            role = None
+        else:
+            role = resources.get(_get_role_name(lambda_function))
 
         if expected_vpc_config:
             assert_that(_get_vpc_config(lambda_function)).is_equal_to(expected_vpc_config)
-            assert_that(_get_managed_policy_arns(role)).contains(LAMBDA_VPC_ACCESS_MANAGED_POLICY)
+            if role:
+                assert_that(_get_managed_policy_arns(role)).contains(LAMBDA_VPC_ACCESS_MANAGED_POLICY)
         else:
             assert_that(_get_vpc_config(lambda_function)).is_none()
-            assert_that(_get_managed_policy_arns(role)).does_not_contain(LAMBDA_VPC_ACCESS_MANAGED_POLICY)
+            if role:
+                assert_that(_get_managed_policy_arns(role)).does_not_contain(LAMBDA_VPC_ACCESS_MANAGED_POLICY)
 
 
 def _get_vpc_config(lambda_function):
@@ -104,7 +141,12 @@ def _get_vpc_config(lambda_function):
 
 
 def _get_role_name(lambda_function):
-    return lambda_function.get("Properties").get("Role").get("Fn::GetAtt")[0]
+    role_prop = lambda_function.get("Properties").get("Role")
+
+    if "Fn::GetAtt" in role_prop:
+        return role_prop.get("Fn::GetAtt")[0]
+
+    return role_prop.get("Fn::Sub")
 
 
 def _get_lambda_functions(resources):
@@ -121,3 +163,61 @@ def load_cfn_templates_from_config(config_file_path, pcluster_config_reader):
     return CDKTemplateBuilder().build_cluster_template(
         cluster_config=cluster_config, bucket=dummy_cluster_bucket(), stack_name="clustername"
     )
+
+
+@pytest.mark.parametrize(
+    "input_lst, desired_size, expected_output",
+    [
+        ([], None, [[]]),
+        ([], 5, [[]]),
+        ([0, 1, 2, 3, 4, 5], None, [[0, 1, 2, 3, 4, 5]]),
+        (
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+            None,
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19], [20, 21, 22]],
+        ),
+        (
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+            10,
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12, 13, 14, 15, 16, 17, 18, 19], [20, 21, 22]],
+        ),
+    ],
+)
+def test_get_chunks(input_lst, desired_size, expected_output):
+    if desired_size:
+        chunks = get_chunks(input_lst, desired_size)
+    else:
+        chunks = get_chunks(input_lst)
+    index = 0
+    for chunk in chunks:
+        assert_that(chunk).is_equal_to(expected_output[index])
+        index += 1
+
+
+def assert_sg_rule(
+    generated_template: dict,
+    sg_name: str,
+    rule_type: str,
+    protocol: str,
+    port_range: list,
+    target_sg: str,
+    deletion_policy: str = None,
+):
+    constants = {
+        "ingress": {"resource_type": "AWS::EC2::SecurityGroupIngress", "sg_field": "SourceSecurityGroupId"},
+        "egress": {"resource_type": "AWS::EC2::SecurityGroupEgress", "sg_field": "DestinationSecurityGroupId"},
+    }
+    sg_rules = get_resources(
+        generated_template,
+        type=constants[rule_type]["resource_type"],
+        deletion_policy=deletion_policy,
+        properties={
+            "GroupId": {"Ref": sg_name},
+            "IpProtocol": protocol,
+            "FromPort": port_range[0],
+            "ToPort": port_range[1],
+            constants[rule_type]["sg_field"]: target_sg if target_sg.startswith("sg-") else {"Ref": target_sg},
+        },
+    )
+
+    assert_that(sg_rules).is_length(1)

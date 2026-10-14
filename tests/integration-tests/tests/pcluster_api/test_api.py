@@ -12,17 +12,17 @@
 
 
 import logging
+import time
 from pathlib import Path
 
 import boto3
 import cfn_tools
-import pkg_resources
 import pytest
 from assertpy import assert_that
 from benchmarks.common.util import get_instance_vcpus
 from botocore.config import Config
+from cfn_stacks_factory import CfnStack
 from clusters_factory import Cluster, ClustersFactory
-from pcluster_client import ApiException
 from pcluster_client.api import (
     cluster_compute_fleet_api,
     cluster_instances_api,
@@ -106,8 +106,8 @@ def _cloudformation_wait(region, stack_name, status):
     config = Config(region_name=region)
     cloud_formation = boto3.client("cloudformation", config=config)
     waiter = cloud_formation.get_waiter(status)
-    # 180 attempts, one every 30 seconds, times out after 90 minutes
-    waiter.wait(StackName=stack_name, WaiterConfig={"MaxAttempts": 180})
+    # 200 attempts, one every 30 seconds, times out after 100 minutes
+    waiter.wait(StackName=stack_name, WaiterConfig={"MaxAttempts": 200})
 
 
 def _ec2_wait_running(region, instances):
@@ -127,7 +127,7 @@ def _ec2_wait(region, instances, waiter_type):
 
 @pytest.fixture(scope="session", name="resources_dir")
 def resources_dir_fixture():
-    return Path(pkg_resources.resource_filename(__name__, "/../../resources"))
+    return Path(__file__).parent.parent.parent / "resources"
 
 
 @pytest.fixture(scope="session", name="policies_template_path")
@@ -145,7 +145,7 @@ def policies_template_with_custom_actions_bucket_access_fixture(policies_templat
     with open(policies_template_path, "r", encoding="utf-8") as f:
         policies_template = TemplateGenerator(cfn_tools.load_yaml(f.read()))
 
-    policy_document = policies_template.resources.get("ParallelClusterClusterPolicy").properties["PolicyDocument"]
+    policy_document = policies_template.resources.get("ParallelClusterClusterPolicy2").properties["PolicyDocument"]
     statement = policy_document.get("Statement")
     statement.append(
         {
@@ -158,12 +158,13 @@ def policies_template_with_custom_actions_bucket_access_fixture(policies_templat
 
 
 @pytest.fixture(scope="class", name="policies_uri")
-def policies_uri_fixture(policies_template_with_custom_actions_bucket_access, resource_bucket, region):
-    bucket = boto3.resource("s3", region_name=region).Bucket(resource_bucket)
+def policies_uri_fixture(policies_template_with_custom_actions_bucket_access, s3_bucket_factory, region):
+    bucket_name = s3_bucket_factory()
+    bucket = boto3.resource("s3", region_name=region).Bucket(bucket_name)
     path = f"parallelcluster/{get_installed_parallelcluster_version()}/templates/policies/custom-policies.yaml"
     bucket.put_object(Key=path, Body=policies_template_with_custom_actions_bucket_access)
 
-    yield (f"https://{resource_bucket}.s3.{region}.amazonaws.com{'.cn' if region.startswith('cn') else ''}/{path}")
+    yield (f"https://{bucket_name}.s3.{region}.amazonaws.com{'.cn' if region.startswith('cn') else ''}/{path}")
 
 
 @pytest.mark.usefixtures("os", "instance")
@@ -193,29 +194,35 @@ def test_cluster_slurm(
 
 
 @pytest.mark.usefixtures("os", "instance")
-def test_cluster_awsbatch(
+def test_login_nodes(
     region,
     api_client,
     create_cluster,
     request,
     pcluster_config_reader,
     scheduler,
-    instance,
-    custom_actions_bucket_name,
-    test_datadir,
 ):
-    assert_that(scheduler).is_equal_to("awsbatch")
-    _test_cluster_workflow(
-        region,
-        api_client,
-        create_cluster,
-        request,
-        pcluster_config_reader,
-        scheduler,
-        instance,
-        custom_actions_bucket_name,
-        test_datadir,
-    )
+    assert_that(scheduler).is_equal_to("slurm")
+    config_template_args = {}
+    initial_config_file = pcluster_config_reader(**config_template_args)
+
+    cluster_name = generate_stack_name("integ-tests", request.config.getoption("stackname_suffix"))
+    cluster_operations_client = cluster_operations_api.ClusterOperationsApi(api_client)
+    cluster_instances_client = cluster_instances_api.ClusterInstancesApi(api_client)
+
+    cluster = _test_create_cluster(cluster_operations_client, create_cluster, cluster_name, initial_config_file)
+
+    _test_list_clusters(region, cluster_operations_client, cluster_name, "CREATE_IN_PROGRESS")
+
+    # wait for login nodes to come up
+    time.sleep(600)
+    _test_describe_cluster(region, cluster_operations_client, cluster_name, "CREATE_IN_PROGRESS")
+
+    _cloudformation_wait(region, cluster_name, "stack_create_complete")
+
+    cluster.mark_as_created()
+    _test_describe_cluster_login_nodes(region, cluster_instances_client, cluster_name)
+    _test_delete_cluster(region, cluster_operations_client, cluster_name)
 
 
 def _test_cluster_workflow(
@@ -264,21 +271,17 @@ def _test_cluster_workflow(
     _test_list_clusters(region, cluster_operations_client, cluster_name, "CREATE_COMPLETE")
     _test_describe_cluster(region, cluster_operations_client, cluster_name, "CREATE_COMPLETE")
 
-    # We wait for instances to be ready before transitioning stack to CREATE_COMPLETE only when using Slurm
-    if scheduler == "awsbatch":
-        wait_for_num_instances_in_cluster(region=region, cluster_name=cluster_name, desired=NUM_OF_COMPUTE_INSTANCES)
-
     # Update cluster with new configuration
     with open(updated_config_file, encoding="utf-8") as config_file:
         updated_cluster_config = config_file.read()
-    _test_update_cluster_dryrun(region, cluster_operations_client, cluster_name, updated_cluster_config)
+    _test_update_cluster(region, cluster_operations_client, cluster_name, updated_cluster_config)
+    cluster.wait_cluster_status("UPDATE_COMPLETE")
 
     head_node = _test_describe_cluster_head_node(region, cluster_instances_client, cluster_name)
     compute_node_map = _test_describe_cluster_compute_nodes(region, cluster_instances_client, cluster_name)
-    if scheduler == "slurm":
-        _test_delete_cluster_instances(region, cluster_instances_client, cluster_name, head_node, compute_node_map)
+    _test_delete_cluster_instances(region, cluster_instances_client, cluster_name, head_node, compute_node_map)
 
-    running_state = "RUNNING" if scheduler == "slurm" else "ENABLED"
+    running_state = "RUNNING"
     _test_describe_compute_fleet(region, cluster_compute_fleet_client, cluster_name, running_state)
     _test_stop_compute_fleet(region, cluster_compute_fleet_client, cluster_instances_client, cluster_name, scheduler)
 
@@ -350,10 +353,16 @@ def _test_describe_cluster_compute_nodes(region, client, cluster_name, all_termi
     return compute_nodes_map
 
 
+def _test_describe_cluster_login_nodes(region, client, cluster_name):
+    response = client.describe_cluster_instances(
+        cluster_name=cluster_name, node_type=NodeType("LoginNode"), region=region
+    )
+    assert_that(response.instances).is_length(1)
+
+
 def _add_compute_nodes(instances, compute_node_map):
     for instance in instances:
-        # The AWS Batch queue name is not populated
-        queue_name = instance.get("queue_name", "awsbatch_queue")
+        queue_name = instance.get("queue_name")
         if queue_name not in compute_node_map:
             compute_node_map[queue_name] = set()
         compute_node_map[queue_name].add(instance.instance_id)
@@ -381,8 +390,8 @@ def _test_describe_compute_fleet(region, client, cluster_name, status):
 
 
 def _test_stop_compute_fleet(region, cluster_compute_fleet_client, cluster_instances_client, cluster_name, scheduler):
-    stop_status = "STOP_REQUESTED" if scheduler == "slurm" else "DISABLED"
-    terminal_state = "STOPPED" if scheduler == "slurm" else "DISABLED"
+    stop_status = "STOP_REQUESTED"
+    terminal_state = "STOPPED"
 
     head_node = _test_describe_cluster_head_node(region, cluster_instances_client, cluster_name)
     compute_node_map = _test_describe_cluster_compute_nodes(region, cluster_instances_client, cluster_name)
@@ -398,19 +407,14 @@ def _test_stop_compute_fleet(region, cluster_compute_fleet_client, cluster_insta
         region=region,
     )
 
-    if scheduler == "slurm":
-        # AWS Batch does not terminate all compute nodes, it just resizes the compute fleet down to a number
-        # of instances equal to MinvCpus. For AWS Batch we simply check that the compute fleet status has been
-        # updated, while for the Slurm case we wait for the previous compute instances to have been terminated.
-        _ec2_wait_terminated(region, instances_to_terminate)
+    _ec2_wait_terminated(region, instances_to_terminate)
 
     response = cluster_compute_fleet_client.describe_compute_fleet(cluster_name=cluster_name, region=region)
     assert_that(response.status).is_equal_to(ComputeFleetStatus(terminal_state))
 
-    if scheduler == "slurm":
-        new_head_node = _test_describe_cluster_head_node(region, cluster_instances_client, cluster_name)
-        assert_that(new_head_node).is_equal_to(head_node)
-        _test_describe_cluster_compute_nodes(region, cluster_instances_client, cluster_name, all_terminated=True)
+    new_head_node = _test_describe_cluster_head_node(region, cluster_instances_client, cluster_name)
+    assert_that(new_head_node).is_equal_to(head_node)
+    _test_describe_cluster_compute_nodes(region, cluster_instances_client, cluster_name, all_terminated=True)
 
 
 def _get_instances_to_terminate(compute_node_map):
@@ -447,6 +451,8 @@ def _test_describe_cluster(region, client, cluster_name, status):
     assert_that(response.cluster_name).is_equal_to(cluster_name)
     assert_that(response.cluster_status).is_equal_to(ClusterStatus(status))
     assert_that(response.cloud_formation_stack_status).is_equal_to(CloudFormationStackStatus(status))
+    if hasattr(response, "login_nodes"):
+        assert_that(response.login_nodes).is_type_of(list)
 
 
 def _test_create_cluster(client, create_cluster, cluster_name, config):
@@ -457,11 +463,9 @@ def _test_create_cluster(client, create_cluster, cluster_name, config):
     return cluster
 
 
-def _test_update_cluster_dryrun(region, client, cluster_name, config):
+def _test_update_cluster(region, client, cluster_name, config):
     body = UpdateClusterRequestContent(config)
-    error_message = "Request would have succeeded, but DryRun flag is set."
-    with pytest.raises(ApiException, match=error_message):
-        client.update_cluster(cluster_name, body, region=region, dryrun=True)
+    client.update_cluster(cluster_name, body, region=region, dryrun=False)
 
 
 def _test_delete_cluster(region, client, cluster_name):
@@ -482,11 +486,56 @@ def test_official_images(region, api_client):
     assert_that(response.images).is_not_empty()
 
 
-@pytest.mark.usefixtures("instance")
-def test_custom_image(region, api_client, build_image, os, request, pcluster_config_reader):
-    base_ami = retrieve_latest_ami(region, os)
+@pytest.fixture(scope="class")
+def build_image_roles_stack(region, request, cfn_stacks_factory):
+    """Set up and tear down a CloudFormation stack to deploy IAM resources used by build-image."""
+    stack_template_path = "../iam_policies/image-roles.cfn.yaml"
+    with open(stack_template_path) as stack_template:
+        if request.config.getoption("build_image_roles_stack"):
+            logging.info(
+                "Using an existing build-image roles stack {0} in region {1}".format(
+                    request.config.getoption("build_image_roles_stack"), region
+                )
+            )
+            stack = CfnStack(
+                name=request.config.getoption("build_image_roles_stack"),
+                region=region,
+                template=stack_template.read(),
+            )
+        else:
+            stack_name = generate_stack_name(
+                "integ-tests-build-image-roles", request.config.getoption("stackname_suffix")
+            )
+            stack_parameters = []
+            capabilities = ["CAPABILITY_IAM"]
+            tags = [{"Key": "parallelcluster:integ-tests-stack", "Value": "build-image"}]
+            stack = CfnStack(
+                name=stack_name,
+                region=region,
+                template=stack_template.read(),
+                parameters=stack_parameters,
+                capabilities=capabilities,
+                tags=tags,
+            )
 
-    config_file = pcluster_config_reader(config_file="image.config.yaml", parent_image=base_ami)
+            cfn_stacks_factory.create_stack(stack)
+
+        yield stack
+
+        if not request.config.getoption("no_delete") and not request.config.getoption("build_image_roles_stack"):
+            cfn_stacks_factory.delete_stack(stack.name, region)
+
+
+@pytest.mark.usefixtures("instance")
+def test_custom_image(region, api_client, build_image, os, request, pcluster_config_reader, build_image_roles_stack):
+    base_ami = retrieve_latest_ami(region, os)
+    cleanup_lambda_role = build_image_roles_stack.cfn_outputs["BuildImageLambdaCleanupRole"]
+
+    config_file = pcluster_config_reader(
+        config_file="image.config.yaml",
+        parent_image=base_ami,
+        cleanup_lambda_role=cleanup_lambda_role,
+    )
     with open(config_file, encoding="utf-8") as config_file:
         config = config_file.read()
 

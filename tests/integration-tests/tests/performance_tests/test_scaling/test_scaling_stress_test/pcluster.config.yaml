@@ -1,0 +1,33 @@
+Image:
+  Os: {{ os }}
+HeadNode:
+  {% if shared_headnode_storage_type %}
+  SharedStorageType: {{ shared_headnode_storage_type }}
+  {% endif %}
+  InstanceType: {{ head_node_instance_type }}
+  Networking:
+    SubnetId: {{ public_subnet_id }}
+  Ssh:
+    KeyName: {{ key_name }}
+Scheduling:
+  Scheduler: {{ scheduler }}
+  ScalingStrategy: {{ scaling_strategy }}
+  SlurmSettings:
+    ScaledownIdletime: {{ scaledown_idletime }}
+  SlurmQueues:
+    - Name: queue-0
+      ComputeResources:
+        - Name: compute-resource-0
+          Instances:
+            - InstanceType: {{ instance }}
+            - InstanceType: t3.large
+            - InstanceType: c5.large
+            - InstanceType: c6i.large
+            - InstanceType: m5.large
+            - InstanceType: m6i.large
+          MaxCount: {{ max_cluster_size }}
+      Networking:
+        SubnetIds:
+          {% for private_subnet_id in private_subnet_ids %}
+          - {{ private_subnet_id }}
+          {% endfor %}

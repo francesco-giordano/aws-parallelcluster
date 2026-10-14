@@ -21,8 +21,7 @@ from builtins import str
 from functools import partial
 from typing import List
 
-import argparse
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, Namespace, RawDescriptionHelpFormatter
 
 from pcluster import utils
 from pcluster.cli.commands.common import CliCommand, to_bool
@@ -32,7 +31,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _ssh(args, extra_args):
-    # pylint: disable=import-outside-toplevel
+    # FIXME we should remove the dependency to pipes as it is deprecated (pointed out by PyLint deprecated-module).
+    # pylint: disable=import-outside-toplevel,deprecated-module
     """
     Execute an SSH command to the head node instance, according to the [aliases] section if there.
 
@@ -79,15 +79,13 @@ class SshCommand(CliCommand):
         "Run ssh command with the cluster username and IP address pre-populated. "
         "Arbitrary arguments are appended to the end of the ssh command."
     )
-    epilog = textwrap.dedent(
-        """Example:
+    epilog = textwrap.dedent("""Example:
 
   pcluster ssh --cluster-name mycluster -i ~/.ssh/id_rsa
 
 Returns an ssh command with the cluster username and IP address pre-populated:
 
-  ssh ec2-user@1.1.1.1 -i ~/.ssh/id_rsa"""
-    )
+  ssh ec2-user@1.1.1.1 -i ~/.ssh/id_rsa""")
 
     def __init__(self, subparsers):
         super().__init__(
@@ -96,7 +94,7 @@ Returns an ssh command with the cluster username and IP address pre-populated:
             help=self.help,
             description=self.description,
             epilog=self.epilog,
-            formatter_class=argparse.RawDescriptionHelpFormatter,
+            formatter_class=RawDescriptionHelpFormatter,
             expects_extra_args=True,
         )
 

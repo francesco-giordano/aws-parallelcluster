@@ -20,6 +20,7 @@ from pcluster.api.models.build_image_bad_request_exception_response_content impo
 from pcluster.api.models.build_image_request_content import BuildImageRequestContent
 from pcluster.api.models.build_image_response_content import BuildImageResponseContent
 from pcluster.api.models.change import Change
+from pcluster.api.models.cloud_formation_resource_status import CloudFormationResourceStatus
 from pcluster.api.models.cloud_formation_stack_status import CloudFormationStackStatus
 from pcluster.api.models.cluster_configuration_structure import ClusterConfigurationStructure
 from pcluster.api.models.cluster_info_summary import ClusterInfoSummary
@@ -65,6 +66,8 @@ from pcluster.api.models.list_images_response_content import ListImagesResponseC
 from pcluster.api.models.list_official_images_response_content import ListOfficialImagesResponseContent
 from pcluster.api.models.log_event import LogEvent
 from pcluster.api.models.log_stream import LogStream
+from pcluster.api.models.login_nodes_pool import LoginNodesPool
+from pcluster.api.models.login_nodes_state import LoginNodesState
 from pcluster.api.models.metadata import Metadata
 from pcluster.api.models.node_type import NodeType
 from pcluster.api.models.not_found_exception_response_content import NotFoundExceptionResponseContent

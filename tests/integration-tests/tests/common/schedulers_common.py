@@ -17,6 +17,8 @@ from assertpy import assert_that
 from retrying import retry
 from time_utils import minutes, seconds
 
+from tests.common.utils import is_blank
+
 
 class SchedulerCommands(metaclass=ABCMeta):
     """Define common scheduler commands."""
@@ -26,11 +28,12 @@ class SchedulerCommands(metaclass=ABCMeta):
         self._remote_command_executor = remote_command_executor
 
     @abstractmethod
-    def assert_job_submitted(self, submit_output):
+    def assert_job_submitted(self, submit_output, test_only: bool = False):
         """
         Assert that a job is successfully submitted.
 
         :param submit_output: stdout from the submit command.
+        :param test_only: boolean flag defining whether the job submission was only a test (relevant for Slurm only)
         :return: the job id
         """
         pass
@@ -121,76 +124,9 @@ class SchedulerCommands(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def get_nodes_status(self):
+    def get_nodes_status(self, filter_by_nodes=None):
         """Retrieve node state/status from scheduler"""
         pass
-
-
-class AWSBatchCommands(SchedulerCommands):
-    """Implement commands for awsbatch scheduler."""
-
-    def __init__(self, remote_command_executor):
-        super().__init__(remote_command_executor)
-
-    def wait_job_completed(self, job_id, timeout=None):  # noqa: D102
-        if not timeout:
-            timeout = 15
-
-        @retry(
-            retry_on_result=lambda result: "FAILED" not in result and any(status != "SUCCEEDED" for status in result),
-            wait_fixed=seconds(7),
-            stop_max_delay=minutes(timeout),
-        )
-        def _job_status_retryer():
-            result = self._remote_command_executor.run_remote_command("awsbstat -d {0}".format(job_id), log_output=True)
-            return re.findall(r"status\s+: (.+)", result.stdout)
-
-        return _job_status_retryer()
-
-    def get_job_exit_status(self, job_id):  # noqa: D102
-        return self.wait_job_completed(job_id)
-
-    def assert_job_submitted(self, awsbsub_output):  # noqa: D102
-        __tracebackhide__ = True
-        match = re.search(r"Job ([a-z0-9\-]{36}) \(.+\) has been submitted.", awsbsub_output)
-        assert_that(match).is_not_none()
-        return match.group(1)
-
-    def submit_command(self, command, nodes=1, slots=None, partition=None):  # noqa: D102
-        return self._remote_command_executor.run_remote_command('echo "{0}" | awsbsub -n {1}'.format(command, nodes))
-
-    def submit_script(self, script, script_args=None, nodes=1, additional_files=None, slots=None):  # noqa: D102
-        raise NotImplementedError
-
-    def assert_job_succeeded(self, job_id, children_number=0):  # noqa: D102
-        __tracebackhide__ = True
-        status = self.get_job_exit_status(job_id)
-        assert_that(status).is_length(1 + children_number)
-        assert_that(status).contains_only("SUCCEEDED")
-
-    def compute_nodes_count(self):  # noqa: D102
-        raise NotImplementedError
-
-    def get_compute_nodes(self):  # noqa: D102
-        raise NotImplementedError
-
-    def wait_job_queue_empty(self, timeout):
-        """Waits until the job queue is empty."""
-        raise NotImplementedError
-
-    def wait_for_locked_node(self):  # noqa: D102
-        raise NotImplementedError
-
-    def get_node_cores(self):  # noqa: D102
-        raise NotImplementedError
-
-    def set_nodes_state(self, compute_nodes, state):
-        """Not implemented."""
-        raise NotImplementedError
-
-    def get_nodes_status(self):
-        """Not implemented."""
-        raise NotImplementedError
 
 
 class SlurmCommands(SchedulerCommands):
@@ -251,9 +187,12 @@ class SlurmCommands(SchedulerCommands):
     def get_job_eligible_time(self, job_id):  # noqa: D102
         return self.get_job_info(job_id, field="EligibleTime")
 
-    def assert_job_submitted(self, sbatch_output):  # noqa: D102
+    def assert_job_submitted(self, sbatch_output, test_only: bool = False):  # noqa: D102
         __tracebackhide__ = True
-        match = re.search(r"Submitted batch job ([0-9]+)", sbatch_output)
+        if test_only:
+            match = re.search(r"Job ([0-9]+) to start at", sbatch_output)
+        else:
+            match = re.search(r"Submitted batch job ([0-9]+)", sbatch_output)
         assert_that(match).is_not_none()
         return match.group(1)
 
@@ -267,26 +206,32 @@ class SlurmCommands(SchedulerCommands):
         command,
         nodes=0,
         slots=None,
+        ntasks_per_node=None,
         host=None,
         after_ok=None,
         partition=None,
         constraint=None,
+        prefer=None,
         other_options=None,
         raise_on_error=True,
+        test_only=False,
     ):
         """Submit job with command."""
         job_submit_command = "--wrap='{0}'".format(command)
 
         return self._submit_batch_job(
             job_submit_command,
-            nodes,
-            slots,
-            host,
-            after_ok,
-            partition,
-            constraint,
-            other_options,
+            nodes=nodes,
+            slots=slots,
+            ntasks_per_node=ntasks_per_node,
+            host=host,
+            after_ok=after_ok,
+            partition=partition,
+            constraint=constraint,
+            prefer=prefer,
+            other_options=other_options,
             raise_on_error=raise_on_error,
+            test_only=test_only,
         )
 
     def submit_script(
@@ -295,6 +240,7 @@ class SlurmCommands(SchedulerCommands):
         script_args=None,
         nodes=0,
         slots=None,
+        ntasks_per_node=None,
         host=None,
         after_ok=None,
         partition=None,
@@ -302,6 +248,7 @@ class SlurmCommands(SchedulerCommands):
         other_options=None,
         additional_files=None,
         raise_on_error=True,
+        test_only=False,
     ):
         """Submit job with script."""
         if not additional_files:
@@ -314,35 +261,42 @@ class SlurmCommands(SchedulerCommands):
 
         return self._submit_batch_job(
             job_submit_command,
-            nodes,
-            slots,
-            host,
-            after_ok,
-            partition,
-            constraint,
-            other_options,
-            additional_files,
+            nodes=nodes,
+            slots=slots,
+            ntasks_per_node=ntasks_per_node,
+            host=host,
+            after_ok=after_ok,
+            partition=partition,
+            constraint=constraint,
+            other_options=other_options,
+            additional_files=additional_files,
             raise_on_error=raise_on_error,
+            test_only=test_only,
         )
 
-    def _submit_batch_job(
+    def _submit_batch_job(  # noqa: C901
         self,
         job_submit_command,
         nodes=0,
         slots=None,
+        ntasks_per_node=None,
         host=None,
         after_ok=None,
         partition=None,
         constraint=None,
+        prefer=None,
         other_options=None,
         additional_files=None,
         raise_on_error=True,
+        test_only=False,
     ):
         submission_command = "sbatch"
         if host:
             submission_command += " --nodelist={0}".format(host)
         if slots:
             submission_command += " -n {0}".format(slots)
+        if ntasks_per_node:
+            submission_command += " --ntasks-per-node {0}".format(ntasks_per_node)
         if nodes > 0:
             submission_command += " -N {0}".format(nodes)
         if after_ok:
@@ -351,6 +305,10 @@ class SlurmCommands(SchedulerCommands):
             submission_command += " -p {0}".format(partition)
         if constraint:
             submission_command += " -C '{0}'".format(constraint)
+        if prefer:
+            submission_command += " --prefer='{0}'".format(prefer)
+        if test_only:
+            submission_command += " --test-only"
         if other_options:
             submission_command += " {0}".format(other_options)
         submission_command += " {0}".format(job_submit_command)
@@ -375,17 +333,24 @@ class SlurmCommands(SchedulerCommands):
             if match_stdout:
                 stdout = match_stdout.group(1)
                 logging.info("stdout:" + stdout)
-        if stderr is not None or stdout is not None:
-            if stderr == stdout:
-                result = self._remote_command_executor.run_remote_command(f'echo "stderr/stdout:" && cat {stderr}')
+        dump_timeout = 60
+        if not is_blank(stderr) or not is_blank(stdout):
+            if not is_blank(stderr) and stderr == stdout:
+                result = self._remote_command_executor.run_remote_command(
+                    f'echo "stderr/stdout:" && cat {stderr}', timeout=dump_timeout
+                )
                 logging.error(result.stdout)
             else:
-                if stderr is not None:
-                    stderr_result = self._remote_command_executor.run_remote_command(f'echo "stderr" && cat {stderr}')
+                if not is_blank(stderr):
+                    stderr_result = self._remote_command_executor.run_remote_command(
+                        f'echo "stderr" && cat {stderr}', timeout=dump_timeout
+                    )
                     logging.error(stderr_result.stdout)
 
-                if stdout is not None:
-                    stdout_result = self._remote_command_executor.run_remote_command(f'echo "stdout" && cat {stdout}')
+                if not is_blank(stdout):
+                    stdout_result = self._remote_command_executor.run_remote_command(
+                        f'echo "stdout" && cat {stdout}', timeout=dump_timeout
+                    )
                     logging.error(stdout_result.stdout)
         else:
             logging.error("Unable to retrieve job output.")
@@ -409,13 +374,38 @@ class SlurmCommands(SchedulerCommands):
         command = "sinfo --Node --noheader"
         if filter_by_partition:
             command += " --partition {}".format(filter_by_partition)
-        # Print first and fourth columns to get nodename and state only (default partition contains *)
+        # Get nodename and state only (default partition contains *)
         # Filter out nodes that are not responding or in power saving states
-        command += (
-            " | awk '{print $1, $4}' | grep -v '[*#~%]' | awk '{print $1}'" if not all_nodes else " | awk '{print $1}'"
-        )
+        if not all_nodes:
+            command += " -o '%N %t' | grep -v '[*#~%]'"
+        command += " | awk '{print $1}'"
         result = self._remote_command_executor.run_remote_command(command)
         return result.stdout.splitlines()
+
+    def get_unique_static_nodes(self):
+        """Get list of unique static node names (useful if custom partitions are included in a cluster)"""
+        command = "scontrol show nodes -o  | grep -iE 'State=IDLE\+CLOUD ' | awk '/^NodeName/ {print $1}'"  # noqa: W605
+        result = self._remote_command_executor.run_remote_command(command)
+        logging.info("All running nodes: %s", result.stdout)
+        return result.stdout.splitlines()
+
+    def get_nodename_from_ip(self, ip: str):
+        """Get the nodename from IP address"""
+        command = (
+            f"scontrol show nodes --json | "
+            f'jq -r --arg ip "{ip}" \'.nodes[] | '
+            f"select(.address == $ip) | .hostname'"
+        )  # noqa: W605
+        result = self._remote_command_executor.run_remote_command(command)
+        logging.info(f"Nodename for {ip} is: {result.stdout}")
+        return result.stdout
+
+    def get_batch_host_for_job(self, job_id: str):
+        """Get the node list for a given job."""
+        command = f"scontrol show jobs {job_id} --json | jq -r '.jobs[].batch_host'"  # noqa: W605
+        result = self._remote_command_executor.run_remote_command(command)
+        logging.info(f"Nodename for {job_id} is: {result.stdout}")
+        return result.stdout
 
     @retry(retry_on_result=lambda result: "drain" not in result, wait_fixed=seconds(3), stop_max_delay=minutes(5))
     def wait_for_locked_node(self):  # noqa: D102
@@ -484,7 +474,7 @@ class SlurmCommands(SchedulerCommands):
             else current_node_states
         )
 
-    @retry(wait_fixed=seconds(15), stop_max_delay=minutes(6))
+    @retry(wait_fixed=seconds(15), stop_max_delay=minutes(8))
     def wait_nodes_status(self, status, filter_by_nodes=None):
         """Wait nodes to reach the status specified"""
         nodes_status = self.get_nodes_status(filter_by_nodes)
@@ -506,10 +496,53 @@ class SlurmCommands(SchedulerCommands):
         node_addr = re.search(r"NodeAddr=(.*) NodeHostName", result).group(1)
         return node_addr
 
+    def get_job_instance_id(self, job_id):
+        """Return the id of the EC2 instance the job is running on, as reported by Slurm."""
+        node_name = self._remote_command_executor.run_remote_command(
+            f'scontrol show jobs {job_id} --json | jq -r ".jobs[0].batch_host"'
+        ).stdout.strip()
+        return self._remote_command_executor.run_remote_command(
+            f'scontrol show nodes {node_name} --json | jq -r ".nodes[0].instance_id"'
+        ).stdout.strip()
+
     def submit_command_and_assert_job_accepted(self, submit_command_args):
         """Submit a command and assert the job is accepted by scheduler."""
         result = self.submit_command(**submit_command_args)
-        return self.assert_job_submitted(result.stdout)
+        return self.assert_job_submitted(result.stdout, test_only=submit_command_args.get("test_only", False))
+
+    def submit_command_and_assert_job_succeeded(self, job_command_args):
+        """Submit a command and assert the job succeeded."""
+        result = self.submit_command(**job_command_args)
+        job_id = self.assert_job_submitted(result.stdout)
+        self.wait_job_completed(job_id)
+        self.assert_job_succeeded(job_id)
+
+    def submit_command_and_get_output(self, job_command_args):
+        """Submit a command, assert the job succeeded, and return the job's stdout.
+
+        Reads back `slurm-<job_id>.out`, which sbatch writes to the job's submit directory.
+        """
+        result = self.submit_command(**job_command_args)
+        job_id = self.assert_job_submitted(result.stdout)
+        self.wait_job_completed(job_id)
+        self.assert_job_succeeded(job_id)
+        return self._remote_command_executor.run_remote_command(f"cat slurm-{job_id}.out").stdout
+
+    def run_command_and_assert_job_succeeded(self, command, nodes=1, timeout=12):
+        """Run a command as a step and assert the job succeeded.
+
+        salloc runs srun on the head node rather than on the batch host as sbatch does, so the stdio of a
+        wide step does not aggregate on a compute node.
+        """
+        result = self._remote_command_executor.run_remote_command(
+            f"salloc -N {nodes} srun {command}", timeout=minutes(timeout) // 1000
+        )
+        allocation = re.search(r"Granted job allocation (\d+)", f"{result.stdout}\n{result.stderr}")
+        if not allocation:
+            raise Exception(f"Could not find the job id in the salloc output: {result.stdout} {result.stderr}")
+        job_id = allocation.group(1)
+        self.wait_job_completed(job_id, timeout=timeout)
+        self.assert_job_succeeded(job_id)
 
     def get_partition_state(self, partition):
         """Get the state of the partition."""
@@ -522,6 +555,12 @@ class SlurmCommands(SchedulerCommands):
         """Wait till job starts running."""
         result = self._remote_command_executor.run_remote_command("scontrol show jobs -o {0}".format(job_id))
         assert_that(result.stdout).contains("JobState=RUNNING")
+
+    @retry(wait_fixed=seconds(10), stop_max_delay=minutes(13))
+    def wait_job_requeued(self, job_id, times=1):
+        """Wait till the job has been requeued at least `times` times (Restarts>=times)."""
+        restarts = self.get_job_info(job_id, field="Restarts")
+        assert_that(int(restarts)).is_greater_than_or_equal_to(times)
 
     def get_node_info(self, nodename):
         """Get node info."""
@@ -557,12 +596,16 @@ class SlurmCommands(SchedulerCommands):
         return (dict(zip(fields, columns)) for columns in SlurmCommands._split_accounting_results(users))
 
     def get_accounting_job_records(
-        self, job_id, fields=("jobid", "jobname", "partition", "account", "alloccpus", "state", "exitcode")
+        self,
+        job_id,
+        fields=("jobid", "jobname", "partition", "account", "alloccpus", "state", "exitcode"),
+        clusters=None,
     ):
         """Return job steps of {job_id} as a series of dicts."""
-        records = self._remote_command_executor.run_remote_command(
-            f"sacct -nP -j {job_id} -o {','.join(fields)}"
-        ).stdout
+        command = f"sacct -nP -j {job_id} -o {','.join(fields)}"
+        if clusters:
+            command = command + f" --clusters {clusters}"
+        records = self._remote_command_executor.run_remote_command(command).stdout
         return (dict(zip(fields, columns)) for columns in SlurmCommands._split_accounting_results(records))
 
     @staticmethod
@@ -570,103 +613,8 @@ class SlurmCommands(SchedulerCommands):
         return (result.split("|") for result in results.splitlines())
 
 
-class TorqueCommands(SchedulerCommands):
-    """Implement commands for torque scheduler."""
-
-    def __init__(self, remote_command_executor):
-        super().__init__(remote_command_executor)
-
-    def wait_job_completed(self, job_id, timeout=None):  # noqa: D102
-        if not timeout:
-            timeout = 12
-
-        @retry(
-            retry_on_result=lambda result: "job_state = C" not in result,
-            wait_fixed=seconds(3),
-            stop_max_delay=minutes(timeout),
-        )
-        def _job_status_retryer():
-            result = self._remote_command_executor.run_remote_command("qstat -f {0}".format(job_id))
-            return result.stdout
-
-        return _job_status_retryer()
-
-    def get_job_exit_status(self, job_id):  # noqa: D102
-        result = self._remote_command_executor.run_remote_command("qstat -f {0}".format(job_id))
-        match = re.search(r"exit_status = (\d+)", result.stdout)
-        return match.group(1)
-
-    def assert_job_submitted(self, qsub_output):  # noqa: D102
-        __tracebackhide__ = True
-        # qsub_output is the id of the job in case of successful submissions
-        id = qsub_output
-        # check that the job exists
-        self._remote_command_executor.run_remote_command("qstat -f {0}".format(id))
-        return id
-
-    def submit_command(self, command, nodes=1, slots=None, after_ok=None):  # noqa: D102
-        flags = "-l nodes={0}:ppn={1}".format(nodes or 1, slots or 1)
-        if after_ok:
-            flags += " -W depend=afterok:{0}".format(after_ok)
-        return self._remote_command_executor.run_remote_command(
-            "echo '{0}' | qsub {1}".format(command, flags), raise_on_error=False
-        )
-
-    def submit_script(self, script, script_args=None, nodes=1, slots=None, additional_files=None):  # noqa: D102
-        if not additional_files:
-            additional_files = []
-        script_name = os.path.basename(script)
-        additional_files.append(script)
-        flags = "-l nodes={0}:ppn={1}".format(nodes or 1, slots or 1)
-        if script_args:
-            flags += ' -F "{0}"'.format(" ".join(script_args))
-        return self._remote_command_executor.run_remote_command(
-            "qsub {0} {1}".format(flags, script_name), additional_files=additional_files
-        )
-
-    def assert_job_succeeded(self, job_id, children_number=0):  # noqa: D102
-        __tracebackhide__ = True
-        status = self.get_job_exit_status(job_id)
-        assert_that(status).is_equal_to("0")
-
-    def compute_nodes_count(self):  # noqa: D102
-        result = self._remote_command_executor.run_remote_command("echo $(( $(pbsnodes -l all | wc -l) - 1))")
-        # split()[-1] to extract last line and trim whitespaces
-        return int(result.stdout.split()[-1])
-
-    def get_compute_nodes(self):  # noqa: D102
-        result = self._remote_command_executor.run_remote_command(
-            "pbsnodes -l all | grep -v $(hostname) | awk '{print $1}'"
-        )
-        return result.stdout.splitlines()
-
-    @retry(retry_on_result=lambda result: "offline" not in result, wait_fixed=seconds(5), stop_max_delay=minutes(5))
-    def wait_for_locked_node(self):  # noqa: D102
-        # discard the first node since that is the head node
-        return self._remote_command_executor.run_remote_command(r'pbsnodes | grep -e "\sstate = " | tail -n +2').stdout
-
-    def get_node_cores(self):
-        """Return number of slots from the scheduler."""
-        result = self._remote_command_executor.run_remote_command("pbsnodes | tail -n +10")
-        return re.search(r"np = (\d+)", result.stdout).group(1)
-
-    def set_nodes_state(self, compute_nodes, state):
-        """Not implemented."""
-        raise NotImplementedError
-
-    def get_nodes_status(self):
-        """Not implemented."""
-        raise NotImplementedError
-
-    def wait_job_queue_empty(self, timeout):
-        """Waits until the job queue is empty."""
-        raise NotImplementedError
-
-
 def get_scheduler_commands(remote_command_executor, scheduler):
     scheduler_commands = {
-        "awsbatch": AWSBatchCommands,
         "slurm": SlurmCommands,
-        "torque": TorqueCommands,
     }
     return scheduler_commands[scheduler](remote_command_executor)

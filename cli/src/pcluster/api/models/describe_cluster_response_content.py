@@ -21,6 +21,7 @@ from pcluster.api.models.cluster_status import ClusterStatus
 from pcluster.api.models.compute_fleet_status import ComputeFleetStatus
 from pcluster.api.models.ec2_instance import EC2Instance
 from pcluster.api.models.failure import Failure
+from pcluster.api.models.login_nodes_pool import LoginNodesPool
 from pcluster.api.models.scheduler import Scheduler
 from pcluster.api.models.tag import Tag
 
@@ -46,6 +47,7 @@ class DescribeClusterResponseContent(Model):
         region=None,
         cluster_status=None,
         scheduler=None,
+        login_nodes=None,
         failures=None,
     ):
         """DescribeClusterResponseContent - a model defined in OpenAPI
@@ -76,6 +78,9 @@ class DescribeClusterResponseContent(Model):
         :type cluster_status: ClusterStatus
         :param scheduler: The scheduler of this DescribeClusterResponseContent.  # noqa: E501
         :type scheduler: Scheduler
+        :param login_nodes: The login_nodes of this DescribeClusterResponseContent.  # noqa: E501
+        :type login_nodes: List[LoginNodesPool]
+        :param failures: The failures of this DescribeClusterResponseContent.  # noqa: E501
         :type failures: List[Failure]
         """
         self.openapi_types = {
@@ -92,6 +97,7 @@ class DescribeClusterResponseContent(Model):
             "region": str,
             "cluster_status": ClusterStatus,
             "scheduler": Scheduler,
+            "login_nodes": List[LoginNodesPool],
             "failures": List[Failure],
         }
 
@@ -109,6 +115,7 @@ class DescribeClusterResponseContent(Model):
             "region": "region",
             "cluster_status": "clusterStatus",
             "scheduler": "scheduler",
+            "login_nodes": "loginNodes",
             "failures": "failures",
         }
 
@@ -125,6 +132,7 @@ class DescribeClusterResponseContent(Model):
         self._region = region
         self._cluster_status = cluster_status
         self._head_node = head_node
+        self._login_nodes = login_nodes
         self._scheduler = scheduler
 
     @classmethod
@@ -456,10 +464,31 @@ class DescribeClusterResponseContent(Model):
         self._cluster_status = cluster_status
 
     @property
+    def login_nodes(self):
+        """Gets the login_nodes of this DescribeClusterResponseContent.
+
+
+        :return: The login_nodes of this DescribeClusterResponseContent.
+        :rtype: List[LoginNodesPool]
+        """
+        return self._login_nodes
+
+    @login_nodes.setter
+    def login_nodes(self, login_nodes):
+        """Sets the login_nodes of this DescribeClusterResponseContent.
+
+
+        :param login_nodes: The login_nodes of this DescribeClusterResponseContent.
+        :type login_nodes: List[LoginNodesPool]
+        """
+
+        self._login_nodes = login_nodes
+
+    @property
     def failures(self):
         """Gets the failures of this DescribeClusterResponseContent.
 
-        Failures reason and code when the stack is in CREATE_FAILED status.  # noqa: E501
+        Failures array containing failures reason and code when the stack is in CREATE_FAILED status.  # noqa: E501
 
         :return: The failures of this DescribeClusterResponseContent.
         :rtype: List[Failure]
@@ -470,7 +499,7 @@ class DescribeClusterResponseContent(Model):
     def failures(self, failures):
         """Sets the failures of this DescribeClusterResponseContent.
 
-        Failures reason and code when the stack is in CREATE_FAILED status.  # noqa: E501
+        Failures array containing failures reason and code when the stack is in CREATE_FAILED status.  # noqa: E501
 
         :param failures: The failures of this DescribeClusterResponseContent.
         :type failures: List[Failure]

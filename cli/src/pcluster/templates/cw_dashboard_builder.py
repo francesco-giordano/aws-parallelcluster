@@ -9,17 +9,26 @@
 # OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict, namedtuple
-from typing import Iterable
+from typing import Iterable, List
 
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_logs as logs
+from aws_cdk.aws_cloudwatch import IAlarm
 from aws_cdk.core import Construct, Duration, Stack
 
-from pcluster.aws.common import get_region
-from pcluster.config.cluster_config import BaseClusterConfig, ExistingFsxFileCache, SharedFsxLustre, SharedStorageType
+from pcluster.config.cluster_config import BaseClusterConfig, ExistingFileCache, SharedFsxLustre
+from pcluster.config.common import SharedStorageType
+from pcluster.constants import (
+    CW_METRICS_CLUSTERMGTD_HEARTBEAT,
+    CW_METRICS_DIMENSION_CLUSTER_NAME,
+    CW_METRICS_NAMESPACE,
+    Feature,
+)
+from pcluster.utils import is_feature_supported
 
 MAX_WIDTH = 24
+MIN_HEIGHT = 1
 
 
 class Coord:
@@ -48,10 +57,6 @@ _HealthMetric = namedtuple(
 )
 
 
-def is_region_supported(region: str):
-    return not region.startswith("us-iso")
-
-
 def new_pcluster_metric(title=None, metrics=None, supported_vol_types=None, namespace=None, additional_dimensions=None):
     return _PclusterMetric(title, metrics, supported_vol_types, namespace, additional_dimensions)
 
@@ -69,6 +74,7 @@ class CWDashboardConstruct(Construct):
         shared_storage_infos: dict,
         cw_log_group_name: str,
         cw_log_group: logs.CfnLogGroup,
+        head_node_alarms: List[IAlarm],
     ):
         super().__init__(scope, id)
         self.stack_scope = scope
@@ -78,6 +84,7 @@ class CWDashboardConstruct(Construct):
         self.shared_storage_infos = shared_storage_infos
         self.cw_log_group_name = cw_log_group_name
         self.cw_log_group = cw_log_group
+        self.head_node_alarms = head_node_alarms
 
         self.dashboard_name = self.stack_name + "-" + self._stack_region
         self.coord = Coord(x_value=0, y_value=0)
@@ -103,6 +110,11 @@ class CWDashboardConstruct(Construct):
         self.cloudwatch_dashboard = cloudwatch.Dashboard(
             self.stack_scope, "CloudwatchDashboard", dashboard_name=self.dashboard_name
         )
+
+        # Cluster Alarms
+        if self.config.monitoring.alarms.enabled:
+            self._add_text_widget("# Cluster Alarms")
+            self._add_cluster_alarms()
 
         # Create a text widget for title "Head Node EC2 metrics"
         self._add_text_widget("# Head Node EC2 Metrics")
@@ -152,7 +164,7 @@ class CWDashboardConstruct(Construct):
 
         # Head Node logs add custom metrics if cw_log and metrics are enabled
         if self.config.is_cw_logging_enabled:
-            if self.config.scheduling.scheduler == "slurm" and is_region_supported(get_region()):
+            if is_feature_supported(Feature.CLUSTER_HEALTH_METRICS):
                 self._add_custom_health_metrics()
             self._add_cw_log()
 
@@ -190,6 +202,19 @@ class CWDashboardConstruct(Construct):
         text_widget.position(x=self.coord.x_value, y=self.coord.y_value)
         self.cloudwatch_dashboard.add_widgets(text_widget)
         self._update_coord_after_section(d_y=1)
+
+    def _generate_alarms_widget(self, title: str, alarms_list: List[IAlarm], **widget_kwargs):
+        """Generate an alarms widget and update the coordinates."""
+        widget = cloudwatch.AlarmStatusWidget(
+            title=title,
+            alarms=alarms_list,
+            width=MAX_WIDTH,
+            height=MIN_HEIGHT * 2,
+            **widget_kwargs,
+        )
+        widget.position(x=self.coord.x_value, y=self.coord.y_value)
+        self._update_coord(self.graph_width, self.graph_height)
+        return widget
 
     def _generate_graph_widget(self, title, metric_list, **widget_kwargs):
         """Generate a graph widget and update the coordinates."""
@@ -245,7 +270,7 @@ class CWDashboardConstruct(Construct):
     def _add_custom_pcluster_metric_filter(
         self, metric_name, filter_pattern, custom_namespace, metric_value, metric_unit=None
     ):
-        """Adding custom metric filter from named tuple."""
+        """Add custom metric filter from named tuple."""
         metric_filter = logs.CfnMetricFilter(
             scope=self.stack_scope,
             id=metric_name + " Filter",
@@ -472,7 +497,7 @@ class CWDashboardConstruct(Construct):
             if isinstance(storage.config, SharedFsxLustre):
                 metrics = lustre_metrics
                 dimensions_map = {"FileSystemId": storage.id}
-            elif isinstance(storage.config, ExistingFsxFileCache):
+            elif isinstance(storage.config, ExistingFileCache):
                 metrics = lustre_metrics
                 dimensions_map = {"FileCacheId": storage.config.file_cache_id}
             else:
@@ -511,6 +536,12 @@ class CWDashboardConstruct(Construct):
             widgets_list.append(self._generate_graph_widget(title, metric_list))
         return widgets_list
 
+    def _add_cluster_alarms(self):
+        widgets_list = [self._generate_alarms_widget(title="Head Node Alarms", alarms_list=self.head_node_alarms)]
+
+        self.cloudwatch_dashboard.add_widgets(*widgets_list)
+        self._update_coord_after_section(self.graph_height)
+
     def _add_head_node_instance_metrics_graphs(self):
         # Create a text widget for subtitle "Head Node Instance Metrics"
         self._add_text_widget("## Head Node Instance Metrics")
@@ -541,9 +572,21 @@ class CWDashboardConstruct(Construct):
             new_pcluster_metric(title="Memory Used Percent", metrics=["mem_used_percent"], namespace="CWAgent"),
         ]
 
+        # Custom Metrics
+        pcluster_metrics = []
+        if self.config.is_cw_logging_enabled:
+            pcluster_metrics.append(
+                new_pcluster_metric(
+                    title="Daemons Heartbeats",
+                    metrics=[CW_METRICS_CLUSTERMGTD_HEARTBEAT],
+                    namespace=CW_METRICS_NAMESPACE,
+                    additional_dimensions={CW_METRICS_DIMENSION_CLUSTER_NAME: self.config.cluster_name},
+                )
+            )
+
         # Create graphs for EC2 metrics and CW Agent metrics and update coordinates
         widgets_list = []
-        for metrics_param in ec2_metrics + cwagent_metrics:
+        for metrics_param in ec2_metrics + cwagent_metrics + pcluster_metrics:
             metrics_list = self._generate_metrics_list(metrics_param)
             graph_widget = self._generate_graph_widget(metrics_param.title, metrics_list)
             widgets_list.append(graph_widget)
@@ -625,7 +668,6 @@ class CWDashboardConstruct(Construct):
         self._add_text_widget("# Head Node Logs")
 
         dcv_enabled = self.config.is_dcv_enabled
-        scheduler = self.config.scheduling.scheduler
         base_os = self.config.image.os
         head_private_ip = self.head_node_instance.attr_private_ip
 
@@ -638,17 +680,14 @@ class CWDashboardConstruct(Construct):
                 [
                     self._new_cw_log_widget(
                         title="clustermgtd",
-                        conditions=[Condition(["slurm"], scheduler)],
                         filters=[self._new_filter(pattern=f"{head_private_ip}.*clustermgtd")],
                     ),
                     self._new_cw_log_widget(
                         title="slurm_resume",
-                        conditions=[Condition(["slurm"], scheduler)],
                         filters=[self._new_filter(pattern=f"{head_private_ip}.*slurm_resume")],
                     ),
                     self._new_cw_log_widget(
                         title="slurm_suspend",
-                        conditions=[Condition(["slurm"], scheduler)],
                         filters=[self._new_filter(pattern=f"{head_private_ip}.*slurm_suspend")],
                     ),
                 ],
@@ -658,13 +697,12 @@ class CWDashboardConstruct(Construct):
                 [
                     self._new_cw_log_widget(
                         title="slurmctld",
-                        conditions=[Condition(["slurm"], scheduler)],
                         filters=[self._new_filter(pattern=f"{head_private_ip}.*slurmctld")],
                     ),
                 ],
             ),
             SectionWidgets(
-                "NICE DCV integration logs",
+                "Amazon DCV integration logs",
                 [
                     self._new_cw_log_widget(
                         title="dcv-ext-authenticator",
@@ -708,12 +746,12 @@ class CWDashboardConstruct(Construct):
                 [
                     self._new_cw_log_widget(
                         title="system-messages",
-                        conditions=[Condition(["alinux2", "centos7", "rhel8"], base_os)],
+                        conditions=[Condition(["alinux2023", "rhel8", "rocky8", "rhel9", "rocky9"], base_os)],
                         filters=[self._new_filter(pattern=f"{head_private_ip}.*system-messages")],
                     ),
                     self._new_cw_log_widget(
                         title="syslog",
-                        conditions=[Condition(["ubuntu1804", "ubuntu2004"], base_os)],
+                        conditions=[Condition(["ubuntu2204", "ubuntu2404"], base_os)],
                         filters=[self._new_filter(pattern=f"{head_private_ip}.*syslog")],
                     ),
                     self._new_cw_log_widget(

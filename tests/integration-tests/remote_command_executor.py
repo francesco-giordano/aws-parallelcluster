@@ -14,8 +14,11 @@ import os
 import shlex
 
 from fabric import Connection
+from paramiko.ssh_exception import NoValidConnectionsError, SSHException
 from retrying import retry
 from utils import get_username_for_os, run_command
+
+SSH_RETRY_EXCEPTIONS = (SSHException, NoValidConnectionsError, EOFError, OSError)
 
 
 class RemoteCommandExecutionError(Exception):
@@ -28,52 +31,131 @@ class RemoteCommandExecutionError(Exception):
 class RemoteCommandExecutor:
     """Execute remote commands on the cluster head node."""
 
-    def __init__(self, cluster, compute_node_ip=None, username=None, bastion=None, alternate_ssh_key=None):
+    def __init__(
+        self,
+        cluster,
+        compute_node_ip=None,
+        login_node_ip=None,
+        username=None,
+        bastion=None,
+        alternate_ssh_key=None,
+        use_login_node=False,
+    ):
         """
         Initiate SSH connection
 
-        By default, commands are executed on head node. If `compute_node_ip` is specified, execute commands on compute.
+        By default, commands are executed on head node.
+        If `compute_node_ip` is specified, execute commands on compute.
+        If `login_node_ip` is specified, execute commands on a specific login node.
+        If `use_login_node` is set to True, execute commands on the first healthy login node.
         """
         if not username:
             username = get_username_for_os(cluster.os)
         if compute_node_ip:
             # Since compute nodes may not be publicly accessible, always use head node as the bastion.
+            self.target = "ComputeNode"
             node_ip = compute_node_ip
             bastion = f"{username}@{cluster.head_node_ip}"
+        elif use_login_node or login_node_ip:
+            self.target = "LoginNode"
+            if login_node_ip:
+                node_ip = login_node_ip
+            else:
+                # If a login node IP is not supplied, get the public or private IP address of the
+                # first healthy login node if it exists.
+                if bastion:
+                    node_ip = cluster.get_login_node_private_ip()
+                else:
+                    node_ip = cluster.get_login_node_public_ip()
+                if node_ip is None:
+                    raise RemoteCommandExecutionError("Unable to retrieve a valid LoginNode IP Address.")
         else:
+            self.target = "HeadNode"
             node_ip = cluster.head_node_ip
+
         connection_kwargs = {
             "host": node_ip,
             "user": username,
             "forward_agent": False,
-            "connect_kwargs": {"key_filename": [alternate_ssh_key if alternate_ssh_key else cluster.ssh_key]},
+            "connect_kwargs": {
+                "key_filename": [alternate_ssh_key if alternate_ssh_key else cluster.ssh_key],
+                "look_for_keys": False,
+            },
         }
         if bastion:
+            ssh_opts = f"-i {cluster.ssh_key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
             # Need to execute simple ssh command before using Connection to avoid Paramiko _check_banner error
-            run_command(
-                "ssh -tt -i {key_path} -o StrictHostKeyChecking=no "
-                '-o ProxyCommand="ssh -tt -o StrictHostKeyChecking=no -W %h:%p -A {bastion}" '
-                "-A {user}@{head_node} hostname".format(
-                    key_path=cluster.ssh_key, bastion=bastion, user=username, head_node=node_ip
-                ),
-                timeout=30,
-                shell=True,
-            )
-            connection_kwargs["gateway"] = f"ssh -W %h:%p -A {bastion}"
+            run_command(f"ssh {ssh_opts} {bastion} hostname", timeout=30, shell=True)
+            connection_kwargs["gateway"] = f"ssh -W %h:%p -A {ssh_opts} {bastion}"
             connection_kwargs["forward_agent"] = True
+            connection_kwargs["connect_kwargs"]["banner_timeout"] = 60
+        logging.info(
+            f"Connecting to {connection_kwargs['host']} as {connection_kwargs['user']} with "
+            f"{connection_kwargs['connect_kwargs']['key_filename']}"
+        )
+        self.__connection_kwargs = connection_kwargs
         self.__connection = Connection(**connection_kwargs)
         self.__user_at_hostname = "{0}@{1}".format(username, node_ip)
 
     def __del__(self):
+        self.close_connection()
+
+    def close_connection(self):
+        """Close SSH connection."""
         try:
             self.__connection.close()
         except Exception as e:
             # Catch all exceptions if we fail to close the clients
             logging.warning("Exception raised when closing remote ssh client: {0}".format(e))
 
-    @retry(wait_exponential_multiplier=1000, stop_max_attempt_number=5)
+    def get_target_host_type(self):
+        """Get target host type. ComputeNode, LoginNode or HeadNode."""
+        return self.target
+
+    def reset_connection(self):
+        """Reset SSH connection."""
+        self.close_connection()
+        if self.__connection_kwargs:
+            self.__connection = Connection(**self.__connection_kwargs)
+
+    @retry(
+        retry_on_exception=lambda exc: isinstance(exc, SSH_RETRY_EXCEPTIONS),
+        wait_exponential_multiplier=1000,
+        stop_max_attempt_number=5,
+    )
     def _run_command(self, command, **kwargs):
-        return self.__connection.run(command, **kwargs)
+        try:
+            return self.__connection.run(command, **kwargs)
+        except SSH_RETRY_EXCEPTIONS as e:
+            logging.warning("SSH session error during command execution: %s. Resetting connection before retry.", e)
+            self.reset_connection()
+            raise
+
+    @retry(
+        retry_on_exception=lambda exc: isinstance(exc, SSH_RETRY_EXCEPTIONS),
+        wait_exponential_multiplier=1000,
+        stop_max_attempt_number=5,
+    )
+    def _put_file(self, *args, **kwargs):
+        try:
+            return self.__connection.put(*args, **kwargs)
+        except SSH_RETRY_EXCEPTIONS as e:
+            logging.warning("SSH session error during file upload: %s. Resetting connection before retry.", e)
+            self.reset_connection()
+            raise
+
+    @retry(
+        retry_on_exception=lambda exc: isinstance(exc, SSH_RETRY_EXCEPTIONS),
+        wait_exponential_multiplier=1000,
+        stop_max_attempt_number=5,
+    )
+    def _get_file(self, *args, **kwargs):
+        try:
+            return self.__connection.get(*args, **kwargs)
+        except SSH_RETRY_EXCEPTIONS as e:
+            logging.warning("SSH session error during file download: %s. Resetting connection before retry.", e)
+            self.reset_connection()
+            raise
 
     def run_remote_command(
         self,
@@ -151,7 +233,7 @@ class RemoteCommandExecutor:
         :return: result of the execution.
         """
         script_name = os.path.basename(script_file)
-        self.__connection.put(script_file, script_name)
+        self._put_file(script_file, script_name)
         if not args:
             args = []
         cmd = ["/bin/bash", script_name] + args
@@ -177,7 +259,7 @@ class RemoteCommandExecutor:
             local_remote_paths = [{"local": local, "remote": remote} for local, remote in files.items()]
         for local_remote_path in local_remote_paths or []:
             logging.info("Copying file to remote location: %s", local_remote_path)
-            self.__connection.put(**local_remote_path)
+            self._put_file(**local_remote_path)
 
     def get_remote_files(self, *args, **kwargs):
         """
@@ -196,4 +278,34 @@ class RemoteCommandExecutor:
             file's mode (default: ``True``).
         :returns: A `.Result` object.
         """
-        return self.__connection.get(*args, **kwargs)
+        return self._get_file(*args, **kwargs)
+
+    def clear_log_file(self, path: str):
+        """Clear a log file in a specific path."""
+
+        self.run_remote_command(f"sudo -u {self.get_user_to_operate_on_file(path)} truncate -s 0 {path}")
+
+    def clear_clustermgtd_log(self):
+        """Clear clustermgtd log file."""
+
+        self.clear_log_file("/var/log/parallelcluster/clustermgtd")
+
+    def clear_slurm_resume_log(self):
+        """Clear slurm_resume log file."""
+
+        self.clear_log_file("/var/log/parallelcluster/slurm_resume.log")
+
+    def clear_slurmctld_log(self):
+        """Clear slurmctld log file."""
+
+        self.clear_log_file("/var/log/slurmctld.log")
+
+    def get_user_to_operate_on_file(self, path):
+        """Get the user to operate on the file."""
+
+        file_owner_result = self.run_remote_command(f"stat -c '%U' {path}", raise_on_error=False)
+        if file_owner_result.failed:
+            # If failed, it means the `path` does not contain files/directories. Use root as the default owner.
+            return "root"
+        else:
+            return file_owner_result.stdout.strip()

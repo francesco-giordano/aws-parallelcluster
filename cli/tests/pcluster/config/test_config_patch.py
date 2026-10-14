@@ -30,7 +30,7 @@ default_cluster_params = {
     "compute_subnet_id": "subnet-12345678",
     "additional_sg": "sg-12345678",
     "max_count": 10,
-    "compute_instance_type": "t2.micro",
+    "compute_instance_type": "t3.micro",
     "shared_dir": "mountdir1",
     "ebs_encrypted": True,
 }
@@ -59,12 +59,18 @@ def _compare_changes(changes, expected_changes):
         is_old_value_equal = (
             source.old_value["Name"] == target.old_value["Name"]
             if isinstance(source.old_value, dict) and "Name" in source.old_value
-            else source.old_value == target.old_value
+            else (
+                source.old_value == target.old_value
+                or (source.old_value in ["-", None] and target.old_value in ["-", None])
+            )
         )
         is_new_value_equal = (
             source.new_value["Name"] == target.new_value["Name"]
             if isinstance(source.new_value, dict) and "Name" in source.new_value
-            else source.new_value == target.new_value
+            else (
+                source.new_value == target.new_value
+                or (source.new_value in ["-", None] and target.new_value in ["-", None])
+            )
         )
 
         return (
@@ -80,7 +86,7 @@ def _compare_changes(changes, expected_changes):
     def _sorting_func(change):
         if change.is_list:
             if isinstance(change.new_value, dict):
-                return change.new_value["Name"]
+                return change.new_value.get("Name") or change.new_value.get("Key", "")
             else:
                 return "-"
         else:
@@ -89,6 +95,7 @@ def _compare_changes(changes, expected_changes):
     sorted_changes = sorted(changes, key=_sorting_func)
     sorted_expected_changes = sorted(expected_changes, key=_sorting_func)
 
+    assert_that(sorted_changes).is_length(len(expected_changes))
     assert_that(
         all([_compare_change(source, target) for source, target in zip(sorted_changes, sorted_expected_changes)])
     ).is_true()
@@ -163,7 +170,7 @@ def _compare_changes(changes, expected_changes):
             "MaxCount",
             1,
             2,
-            UpdatePolicy.MAX_COUNT,
+            UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
             False,
             id="change compute resources max count",
         ),
@@ -171,7 +178,7 @@ def _compare_changes(changes, expected_changes):
             ["Scheduling", "SlurmQueues[queue1]", "ComputeResources[compute-resource1]"],
             "compute_instance_type",
             "InstanceType",
-            "t2.micro",
+            "t3.micro",
             "c4.xlarge",
             UpdatePolicy.COMPUTE_FLEET_STOP,
             False,
@@ -332,7 +339,7 @@ def _test_compute_resources(base_conf, target_conf):
                 "ComputeResources",
                 {"Name": "compute-removed", "InstanceType": "c5.9xlarge", "MaxCount": 20},
                 None,
-                UpdatePolicy.COMPUTE_FLEET_STOP_ON_REMOVE,
+                UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
                 is_list=True,
             ),
             Change(
@@ -340,11 +347,11 @@ def _test_compute_resources(base_conf, target_conf):
                 "ComputeResources",
                 None,
                 {"Name": "new-compute", "InstanceType": "c5.large", "MinCount": 1},
-                UpdatePolicy.COMPUTE_FLEET_STOP_ON_REMOVE,
+                UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
                 is_list=True,
             ),
         ],
-        UpdatePolicy.COMPUTE_FLEET_STOP_ON_REMOVE,
+        UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
     )
 
 
@@ -381,7 +388,7 @@ def _test_queues(base_conf, target_conf):
                     "ComputeResources": {"Name": "compute-removed", "InstanceType": "c5.9xlarge"},
                 },
                 None,
-                UpdatePolicy.COMPUTE_FLEET_STOP_ON_REMOVE,
+                UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
                 is_list=True,
             ),
             Change(
@@ -393,11 +400,11 @@ def _test_queues(base_conf, target_conf):
                     "Networking": {"SubnetIds": "subnet-987654321"},
                     "ComputeResources": {"Name": "new-compute", "InstanceType": "c5.xlarge"},
                 },
-                UpdatePolicy.COMPUTE_FLEET_STOP_ON_REMOVE,
+                UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
                 is_list=True,
             ),
         ],
-        UpdatePolicy.COMPUTE_FLEET_STOP_ON_REMOVE,
+        UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
     )
 
 
@@ -431,6 +438,35 @@ def _test_no_updatable_custom_actions(base_conf, target_conf):
                 "Args",
                 ["1", "2"],
                 ["2"],
+                UpdatePolicy.UNSUPPORTED,
+                is_list=False,
+            ),
+        ],
+        UpdatePolicy.UNSUPPORTED,
+    )
+
+
+def _test_no_updatable_custom_actions_sequence(base_conf, target_conf):
+    base_conf["HeadNode"].update(
+        {
+            "CustomActions": {
+                "OnNodeConfigured": {"Sequence": [{"Script": "test-to-edit.sh", "Args": ["1", "2"]}]},
+            }
+        }
+    )
+    target_conf["HeadNode"].update(
+        {"CustomActions": {"OnNodeConfigured": {"Sequence": [{"Script": "test-to-edit.sh", "Args": ["2"]}]}}}
+    )
+
+    _check_patch(
+        base_conf,
+        target_conf,
+        [
+            Change(
+                ["HeadNode", "CustomActions", "OnNodeConfigured"],
+                "Sequence",
+                [{"Script": "test-to-edit.sh", "Args": ["1", "2"]}],
+                [{"Script": "test-to-edit.sh", "Args": ["2"]}],
                 UpdatePolicy.UNSUPPORTED,
                 is_list=False,
             ),
@@ -483,6 +519,94 @@ def _test_updatable_custom_actions(base_conf, target_conf):
                 "OnNodeUpdated",
                 {"Script": "test-to-remove.sh"},
                 "-",
+                UpdatePolicy.SUPPORTED,
+                is_list=False,
+            ),
+        ],
+        UpdatePolicy.SUPPORTED,
+    )
+
+
+def _test_updatable_custom_actions_sequence_add(base_conf, target_conf):
+    target_conf["HeadNode"].update(
+        {"CustomActions": {"OnNodeUpdated": {"Sequence": [{"Script": "test-to-remove.sh"}]}}}
+    )
+
+    _check_patch(
+        base_conf,
+        target_conf,
+        [
+            Change(
+                ["HeadNode", "CustomActions"],
+                "OnNodeUpdated",
+                "-",
+                {"Sequence": [{"Script": "test-to-remove.sh"}]},
+                UpdatePolicy.SUPPORTED,
+                is_list=False,
+            ),
+        ],
+        UpdatePolicy.SUPPORTED,
+    )
+
+
+def _test_updatable_custom_actions_sequence_change(base_conf, target_conf):
+    base_conf["HeadNode"].update({"CustomActions": {"OnNodeUpdated": {"Sequence": [{"Script": "test-to-remove.sh"}]}}})
+    target_conf["HeadNode"].update(
+        {"CustomActions": {"OnNodeUpdated": {"Sequence": [{"Script": "another-script.sh"}]}}}
+    )
+
+    _check_patch(
+        base_conf,
+        target_conf,
+        [
+            Change(
+                ["HeadNode", "CustomActions", "OnNodeUpdated"],
+                "Sequence",
+                [{"Script": "test-to-remove.sh"}],
+                [{"Script": "another-script.sh"}],
+                UpdatePolicy.SUPPORTED,
+                is_list=False,
+            ),
+        ],
+        UpdatePolicy.SUPPORTED,
+    )
+
+
+def _test_updatable_custom_actions_sequence_remove(base_conf, target_conf):
+    base_conf["HeadNode"].update({"CustomActions": {"OnNodeUpdated": {"Sequence": [{"Script": "test-to-remove.sh"}]}}})
+
+    _check_patch(
+        base_conf,
+        target_conf,
+        [
+            Change(
+                ["HeadNode", "CustomActions"],
+                "OnNodeUpdated",
+                {"Sequence": [{"Script": "test-to-remove.sh"}]},
+                "-",
+                UpdatePolicy.SUPPORTED,
+                is_list=False,
+            ),
+        ],
+        UpdatePolicy.SUPPORTED,
+    )
+
+
+def _test_updatable_custom_actions_single_to_sequence(base_conf, target_conf):
+    base_conf["HeadNode"].update({"CustomActions": {"OnNodeUpdated": {"Script": "test-to-remove.sh"}}})
+    target_conf["HeadNode"].update(
+        {"CustomActions": {"OnNodeUpdated": {"Sequence": [{"Script": "another-script.sh"}]}}}
+    )
+
+    _check_patch(
+        base_conf,
+        target_conf,
+        [
+            Change(
+                ["HeadNode", "CustomActions"],
+                "OnNodeUpdated",
+                {"Script": "test-to-remove.sh"},
+                {"Sequence": [{"Script": "another-script.sh"}]},
                 UpdatePolicy.SUPPORTED,
                 is_list=False,
             ),
@@ -566,7 +690,7 @@ def _test_less_target_sections(base_conf, target_conf):
                 "MinCount",
                 1,
                 None,
-                UpdatePolicy.COMPUTE_FLEET_STOP,
+                UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
                 is_list=False,
             ),
             Change(
@@ -670,7 +794,7 @@ def _test_more_target_sections(base_conf, target_conf):
                 "MinCount",
                 None,
                 1,
-                UpdatePolicy.COMPUTE_FLEET_STOP,
+                UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE,
                 is_list=False,
             ),
             Change(
@@ -780,9 +904,9 @@ def _test_storage(base_conf, target_conf):
                 "Name": f"{storage_name}4",
                 "MountDir": f"/{storage_name}4",
                 "StorageType": storage_type,
-                f"{storage_type}Settings": {"Encrypted": True}
-                if storage_type in ("Ebs", "Efs")
-                else {"DeploymentType": "PERSISTENT_2"},
+                f"{storage_type}Settings": (
+                    {"Encrypted": True} if storage_type in ("Ebs", "Efs") else {"DeploymentType": "PERSISTENT_2"}
+                ),
             }
         )
 
@@ -859,11 +983,11 @@ def _test_iam(base_conf, target_conf):
     # Check the update of Iam section with both updatable and not updatable keys
     for iam_section_child_key, iam_section_child_value in {
         "ResourcePrefix": {"old_config_value": "/path/name-prefix", "expected_update_policy": UpdatePolicy.UNSUPPORTED},
-        "PermissionBoundary": {
+        "PermissionsBoundary": {
             "old_config_value": "arn:aws:iam::aws:policy/some_old_permission_boundary",
             "expected_update_policy": UpdatePolicy.SUPPORTED,
         },
-        "Role": {
+        "Roles": {
             "old_config_value": {"LambdaFunctionsRole": "arn:aws:iam::aws:role/some_old_role"},
             "expected_update_policy": UpdatePolicy.SUPPORTED,
         },
@@ -905,8 +1029,13 @@ def _test_iam(base_conf, target_conf):
         _test_compute_resources,
         _test_queues,
         _test_no_updatable_custom_actions,
+        _test_no_updatable_custom_actions_sequence,
         _test_updatable_custom_actions,
         _test_updatable_custom_actions_attributes,
+        _test_updatable_custom_actions_sequence_add,
+        _test_updatable_custom_actions_sequence_change,
+        _test_updatable_custom_actions_sequence_remove,
+        _test_updatable_custom_actions_single_to_sequence,
         _test_storage,
         _test_iam,
     ],
@@ -1004,3 +1133,105 @@ def test_patch_check_cluster_resource_bucket(
         line = ["{0}".format(element) if isinstance(element, str) else element for element in line]
         assert_that(expected_message_rows).contains(line)
     assert_that(patch_allowed).is_equal_to(not expected_error_row)
+
+
+@pytest.mark.parametrize(
+    "base_tags, target_tags, expected_changes, expected_policy",
+    [
+        pytest.param(
+            [{"Key": "test1", "Value": "val1"}, {"Key": "test2", "Value": "val2"}],
+            [{"Key": "test2", "Value": "val2"}, {"Key": "test1", "Value": "val1"}],
+            [],
+            UpdatePolicy.SUPPORTED,
+            id="order_only_change",
+        ),
+        pytest.param(
+            [{"Key": "test1", "Value": "val1"}, {"Key": "test2", "Value": "val2"}],
+            [{"Key": "test1", "Value": "val1"}, {"Key": "test2", "Value": "val2"}, {"Key": "test3", "Value": "val3"}],
+            [
+                Change(
+                    [],
+                    "Tags",
+                    None,
+                    {"Key": "test3", "Value": "val3"},
+                    UpdatePolicy.SUPPORTED_UNLESS_ADC,
+                    is_list=True,
+                )
+            ],
+            UpdatePolicy.SUPPORTED_UNLESS_ADC,
+            id="tag_addition",
+        ),
+        pytest.param(
+            [{"Key": "test1", "Value": "val1"}, {"Key": "test2", "Value": "val2"}],
+            [{"Key": "test1", "Value": "val1"}],
+            [
+                Change(
+                    [],
+                    "Tags",
+                    {"Key": "test2", "Value": "val2"},
+                    None,
+                    UpdatePolicy.SUPPORTED_UNLESS_ADC,
+                    is_list=True,
+                )
+            ],
+            UpdatePolicy.SUPPORTED_UNLESS_ADC,
+            id="tag_removal",
+        ),
+        pytest.param(
+            [{"Key": "test1", "Value": "old_value"}],
+            [{"Key": "test1", "Value": "new_value"}],
+            [
+                Change(
+                    ["Tags[test1]"],
+                    "Value",
+                    "old_value",
+                    "new_value",
+                    UpdatePolicy.SUPPORTED_UNLESS_ADC,
+                    is_list=False,
+                )
+            ],
+            UpdatePolicy.SUPPORTED_UNLESS_ADC,
+            id="tag_value_modification",
+        ),
+        pytest.param(
+            [{"Key": "test1", "Value": "val1"}, {"Key": "test2", "Value": "val2"}],
+            [{"Key": "test3", "Value": "val3"}, {"Key": "test2", "Value": "val2"}, {"Key": "test1", "Value": "val1"}],
+            [
+                Change(
+                    [],
+                    "Tags",
+                    None,
+                    {"Key": "test3", "Value": "val3"},
+                    UpdatePolicy.SUPPORTED_UNLESS_ADC,
+                    is_list=True,
+                )
+            ],
+            UpdatePolicy.SUPPORTED_UNLESS_ADC,
+            id="order_change_plus_addition",
+        ),
+        pytest.param(
+            [{"Key": "test1", "Value": "val1"}, {"Key": "test2", "Value": "val2"}],
+            [{"Key": "test1", "Value": "val1"}, {"Key": "test2", "Value": "val2"}],
+            [],
+            UpdatePolicy.SUPPORTED,
+            id="no_change_identical_tags",
+        ),
+    ],
+)
+def test_tag_updates(
+    mocker, test_datadir, pcluster_config_reader, base_tags, target_tags, expected_changes, expected_policy
+):
+    """Test various tag update scenarios including order changes, additions, and modifications."""
+    mock_aws_api(mocker)
+    dst_config_file = "pcluster.config.dst.yaml"
+    _duplicate_config_file(dst_config_file, test_datadir)
+
+    src_dict = {"tags": base_tags}
+    src_config_file = pcluster_config_reader(**src_dict)
+    src_conf = _load_config(src_config_file)
+
+    dst_dict = {"tags": target_tags}
+    dst_config_file = pcluster_config_reader(dst_config_file, **dst_dict)
+    dst_conf = _load_config(dst_config_file)
+
+    _check_patch(src_conf.source_config, dst_conf.source_config, expected_changes, expected_policy)

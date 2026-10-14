@@ -30,15 +30,13 @@ Scheduling:
           CustomSlurmSettings:
             Port: 10000
             RealMemory: 2000
-            Weight: 50
           Instances:
-            - InstanceType: t2.large
+            - InstanceType: t3.large
           MinCount: 0
         - Name: cr2
           CustomSlurmSettings:
             Port: 10010
             RealMemory: 2500
-            Weight: 150
           Instances:
-            - InstanceType: t2.large
+            - InstanceType: t3.large
           MinCount: 0

@@ -1,3 +1,4 @@
+import json
 from typing import Dict, List
 
 from aws_cdk import aws_ec2 as ec2
@@ -5,19 +6,17 @@ from aws_cdk import aws_logs as logs
 from aws_cdk.core import CfnTag, Fn, NestedStack, Stack
 from constructs import Construct
 
-from pcluster.config.cluster_config import (
-    SchedulerPluginQueue,
-    SharedStorageType,
-    SlurmClusterConfig,
-    SlurmComputeResource,
-    SlurmQueue,
-)
+from pcluster.aws.aws_api import AWSApi
+from pcluster.config.cluster_config import SlurmClusterConfig, SlurmComputeResource, SlurmQueue
+from pcluster.config.common import DefaultUserHomeType, SharedStorageType, merge_tags
 from pcluster.constants import (
     DEFAULT_EPHEMERAL_DIR,
     NODE_BOOTSTRAP_TIMEOUT,
     OS_MAPPING,
+    P6E_GB200,
     PCLUSTER_COMPUTE_RESOURCE_NAME_TAG,
     PCLUSTER_QUEUE_NAME_TAG,
+    PCLUSTER_S3_ARTIFACTS_DICT,
 )
 from pcluster.templates.cdk_builder_utils import (
     CdkLaunchTemplateBuilder,
@@ -25,17 +24,40 @@ from pcluster.templates.cdk_builder_utils import (
     create_hash_suffix,
     dict_to_cfn_tags,
     get_common_user_data_env,
-    get_custom_tags,
     get_default_instance_tags,
     get_default_volume_tags,
     get_queue_security_groups_full,
     get_shared_storage_ids_by_type,
     get_user_data_content,
-    scheduler_is_slurm,
     to_comma_separated_string,
 )
 from pcluster.templates.slurm_builder import SlurmConstruct
 from pcluster.utils import get_attr, get_http_tokens_setting
+
+
+def _apply_launch_template_overrides(launch_template, compute_resource):
+    """
+    Apply user-specified launch template overrides to the generated launch template.
+
+    For each property in the user's launch template, applies it using add_property_override.
+    This replaces the specific property while CDK handles the rest normally.
+
+    Args:
+        launch_template: The CDK CfnLaunchTemplate construct
+        compute_resource: The compute resource configuration
+    """
+    launch_template_overrides = getattr(compute_resource, "launch_template_overrides", None)
+    if not launch_template_overrides or not launch_template_overrides.launch_template_id:
+        return
+
+    version = str(launch_template_overrides.version)
+    override_lt_data = AWSApi.instance().ec2.describe_launch_template_version(
+        launch_template_overrides.launch_template_id, version
+    )
+
+    # Apply each property from the override launch template
+    for key, value in override_lt_data.items():
+        launch_template.add_property_override(f"LaunchTemplateData.{key}", value)
 
 
 class QueuesStack(NestedStack):
@@ -56,6 +78,7 @@ class QueuesStack(NestedStack):
         cluster_hosted_zone,
         dynamodb_table,
         head_eni,
+        cluster_bucket,
     ):
         super().__init__(scope, id)
         self._queues = queues
@@ -69,6 +92,7 @@ class QueuesStack(NestedStack):
         self._cluster_hosted_zone = cluster_hosted_zone
         self._dynamodb_table = dynamodb_table
         self._head_eni = head_eni
+        self._cluster_bucket = cluster_bucket
         self._launch_template_builder = CdkLaunchTemplateBuilder()
         self._add_resources()
 
@@ -112,11 +136,10 @@ class QueuesStack(NestedStack):
             )
         self._compute_instance_profiles = {k: v.instance_profile for k, v in iam_resources.items()}
         self.managed_compute_instance_roles = {k: v.instance_role for k, v in iam_resources.items()}
-        if scheduler_is_slurm(self._config):
-            self._slurm_construct.register_policies_with_role(
-                scope=Stack.of(self),
-                managed_compute_instance_roles=self.managed_compute_instance_roles,
-            )
+        self._slurm_construct.register_policies_with_role(
+            scope=Stack.of(self),
+            managed_compute_instance_roles=self.managed_compute_instance_roles,
+        )
 
     def _add_launch_templates(self):
         self.compute_launch_templates = {}
@@ -136,10 +159,8 @@ class QueuesStack(NestedStack):
 
     def _get_custom_compute_resource_tags(self, queue_config, compute_resource_config):
         """Compute resource tags and Queue Tags value on Cluster level tags if there are duplicated keys."""
-        tags = get_custom_tags(self._config, raw_dict=True)
-        queue_tags = get_custom_tags(queue_config, raw_dict=True)
-        compute_resource_tags = get_custom_tags(compute_resource_config, raw_dict=True)
-        return dict_to_cfn_tags({**tags, **queue_tags, **compute_resource_tags})
+        merged = merge_tags(self._config.get_tags(), queue_config.get_tags(), compute_resource_config.get_tags())
+        return dict_to_cfn_tags({tag.key: tag.value for tag in merged})
 
     def _add_compute_resource_launch_template(
         self,
@@ -150,49 +171,135 @@ class QueuesStack(NestedStack):
         instance_profiles,
         is_detailed_monitoring_enabled,
     ):
-        # LT network interfaces
-        compute_lt_nw_interfaces = [
-            ec2.CfnLaunchTemplate.NetworkInterfaceProperty(
-                device_index=0,
-                associate_public_ip_address=queue.networking.assign_public_ip
-                if compute_resource.max_network_interface_count == 1
-                else None,  # parameter not supported for instance types with multiple network interfaces
-                interface_type="efa" if compute_resource.efa and compute_resource.efa.enabled else None,
-                groups=queue_lt_security_groups,
-                subnet_id=queue.networking.subnet_ids[0]
-                if isinstance(compute_resource, SlurmComputeResource)
-                else None,
-            )
-        ]
-
-        for network_interface_index in range(1, compute_resource.max_network_interface_count):
-            compute_lt_nw_interfaces.append(
-                ec2.CfnLaunchTemplate.NetworkInterfaceProperty(
-                    device_index=0,
-                    network_card_index=network_interface_index,
-                    interface_type="efa" if compute_resource.efa and compute_resource.efa.enabled else None,
-                    groups=queue_lt_security_groups,
-                    subnet_id=queue.networking.subnet_ids[0]
-                    if isinstance(compute_resource, SlurmComputeResource)
-                    else None,
-                )
-            )
+        compute_lt_nw_interfaces = add_network_interfaces(
+            queue,
+            compute_resource,
+            queue_lt_security_groups,
+            efa_interface_type=get_attr(self._config, "dev_settings.efa_interface_type"),
+        )
 
         conditional_template_properties = {}
         if compute_resource.is_ebs_optimized:
             conditional_template_properties.update({"ebs_optimized": True})
         if isinstance(compute_resource, SlurmComputeResource):
-            conditional_template_properties.update({"instance_type": compute_resource.instance_type})
+            conditional_template_properties.update({"instance_type": compute_resource.instance_types[0]})
 
-        return ec2.CfnLaunchTemplate(
+        launch_template_id = f"LaunchTemplate{create_hash_suffix(queue.name + compute_resource.name)}"
+
+        dna_json = json.dumps(
+            {
+                "cluster": {
+                    "cluster_name": self.stack_name,
+                    "stack_name": self.stack_name,
+                    "stack_arn": self.stack_id,
+                    "cluster_s3_bucket": self._cluster_bucket.name,
+                    "cluster_config_s3_key": "{0}/configs/{1}".format(
+                        self._cluster_bucket.artifact_directory, PCLUSTER_S3_ARTIFACTS_DICT.get("config_name")
+                    ),
+                    "cluster_config_version": self._config.config_version,
+                    "enable_efa": "efa" if compute_resource.efa and compute_resource.efa.enabled else "NONE",
+                    "raid_shared_dir": to_comma_separated_string(
+                        self._shared_storage_mount_dirs[SharedStorageType.RAID]
+                    ),
+                    "raid_type": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.RAID]["Type"]
+                    ),
+                    "base_os": self._config.image.os,
+                    "region": self._config.region,
+                    "shared_storage_type": self._config.head_node.shared_storage_type.lower(),  # noqa: E501  pylint: disable=line-too-long
+                    "default_user_home": (
+                        self._config.deployment_settings.default_user_home.lower()
+                        if (
+                            self._config.deployment_settings is not None
+                            and self._config.deployment_settings.default_user_home is not None
+                        )
+                        else DefaultUserHomeType.SHARED.value.lower()
+                    ),
+                    "efs_fs_ids": get_shared_storage_ids_by_type(self._shared_storage_infos, SharedStorageType.EFS),
+                    "efs_shared_dirs": to_comma_separated_string(
+                        self._shared_storage_mount_dirs[SharedStorageType.EFS]
+                    ),
+                    "efs_encryption_in_transits": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.EFS]["EncryptionInTransits"],
+                        use_lower_case=True,
+                    ),
+                    "efs_iam_authorizations": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.EFS]["IamAuthorizations"],
+                        use_lower_case=True,
+                    ),
+                    "efs_access_point_ids": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.EFS]["AccessPointIds"],
+                        use_lower_case=True,
+                    ),
+                    "fsx_fs_ids": get_shared_storage_ids_by_type(self._shared_storage_infos, SharedStorageType.FSX),
+                    "fsx_mount_names": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.FSX]["MountNames"]
+                    ),
+                    "fsx_dns_names": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.FSX]["DNSNames"]
+                    ),
+                    "fsx_volume_junction_paths": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.FSX]["VolumeJunctionPaths"]
+                    ),
+                    "fsx_fs_types": to_comma_separated_string(
+                        self._shared_storage_attributes[SharedStorageType.FSX]["FileSystemTypes"]
+                    ),
+                    "fsx_shared_dirs": to_comma_separated_string(
+                        self._shared_storage_mount_dirs[SharedStorageType.FSX]
+                    ),
+                    "scheduler": self._config.scheduling.scheduler,
+                    "ephemeral_dir": (
+                        queue.compute_settings.local_storage.ephemeral_volume.mount_dir
+                        if isinstance(queue, SlurmQueue) and queue.compute_settings.local_storage.ephemeral_volume
+                        else DEFAULT_EPHEMERAL_DIR
+                    ),
+                    "ebs_shared_dirs": to_comma_separated_string(
+                        self._shared_storage_mount_dirs[SharedStorageType.EBS]
+                    ),
+                    "proxy": queue.networking.proxy.http_proxy_address if queue.networking.proxy else "NONE",
+                    "slurm_ddb_table": self._dynamodb_table.ref if self._dynamodb_table else "NONE",
+                    "log_group_name": (
+                        self._log_group.log_group_name if self._config.monitoring.logs.cloud_watch.enabled else "NONE"
+                    ),
+                    "dns_domain": str(self._cluster_hosted_zone.name) if self._cluster_hosted_zone else "",
+                    "hosted_zone": str(self._cluster_hosted_zone.ref) if self._cluster_hosted_zone else "",
+                    "node_type": "ComputeFleet",
+                    "cluster_user": OS_MAPPING[self._config.image.os]["user"],
+                    "enable_intel_hpc_platform": "true" if self._config.is_intel_hpc_platform_enabled else "false",
+                    "cw_logging_enabled": "true" if self._config.is_cw_logging_enabled else "false",
+                    "log_rotation_enabled": "true" if self._config.is_log_rotation_enabled else "false",
+                    "scheduler_queue_name": queue.name,
+                    "scheduler_compute_resource_name": compute_resource.name,
+                    "enable_efa_gdr": (
+                        "compute" if compute_resource.efa and compute_resource.efa.gdr_support else "NONE"
+                    ),
+                    "custom_node_package": self._config.custom_node_package or "",
+                    "use_private_hostname": str(
+                        get_attr(self._config, "scheduling.settings.dns.use_ec2_hostnames", default=False)
+                    ).lower(),
+                    "head_node_private_ip": self._head_eni.attr_primary_private_ip_address,
+                    "directory_service": {"enabled": str(self._config.directory_service is not None).lower()},
+                    "disable_sudo_access_for_default_user": (
+                        "true"
+                        if self._config.deployment_settings
+                        and self._config.deployment_settings.disable_sudo_access_default_user
+                        else "false"
+                    ),
+                    "launch_template_id": launch_template_id,
+                }
+            },
+            indent=None,  # Keep indent as None for compact sizing and proper parsing in user_data.sh
+        )
+
+        launch_template = ec2.CfnLaunchTemplate(
             self,
-            f"LaunchTemplate{create_hash_suffix(queue.name + compute_resource.name)}",
+            launch_template_id,
             launch_template_name=f"{self.stack_name}-{queue.name}-{compute_resource.name}",
             launch_template_data=ec2.CfnLaunchTemplate.LaunchTemplateDataProperty(
                 block_device_mappings=self._launch_template_builder.get_block_device_mappings(
-                    queue.compute_settings.local_storage.root_volume, self._config.image.os
+                    queue.compute_settings.local_storage.root_volume,
+                    AWSApi.instance().ec2.describe_image(self._config.image_dict[queue.name]).device_name,
                 ),
-                # key_name=,
                 network_interfaces=compute_lt_nw_interfaces,
                 placement=ec2.CfnLaunchTemplate.PlacementProperty(group_name=placement_group),
                 image_id=self._config.image_dict[queue.name],
@@ -215,85 +322,23 @@ class QueuesStack(NestedStack):
                         get_user_data_content("../resources/compute_node/user_data.sh"),
                         {
                             **{
-                                "EnableEfa": "efa" if compute_resource.efa and compute_resource.efa.enabled else "NONE",
-                                "RAIDSharedDir": to_comma_separated_string(
-                                    self._shared_storage_mount_dirs[SharedStorageType.RAID]
+                                # Disable multithreading using logic from
+                                # https://aws.amazon.com/blogs/compute/disabling-intel-hyper-threading-technology-on-amazon-linux/
+                                # thread_siblings_list contains a comma (,) or dash (-) separated list of CPU hardware
+                                # threads within the same core as cpu
+                                # e.g. 0-1 or 0,1
+                                # cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list
+                                #     | tr '-' ','       # convert hyphen (-) to comma (,), to account that
+                                #                        # some kernels and CPU architectures use a hyphen
+                                #                        # instead of a comma
+                                #     | cut -s -d, -f2-  # split over comma (,) and take the right part
+                                #     | tr ',' '\n'      # convert remaining comma (,) into new lines
+                                #     | sort -un         # sort and unique
+                                "DisableMultiThreadingManually": (
+                                    "true" if compute_resource.disable_simultaneous_multithreading_manually else "false"
                                 ),
-                                "RAIDType": to_comma_separated_string(
-                                    self._shared_storage_attributes[SharedStorageType.RAID]["Type"]
-                                ),
-                                "DisableMultiThreadingManually": "true"
-                                if compute_resource.disable_simultaneous_multithreading_manually
-                                else "false",
                                 "BaseOS": self._config.image.os,
-                                "EFSIds": get_shared_storage_ids_by_type(
-                                    self._shared_storage_infos, SharedStorageType.EFS
-                                ),
-                                "EFSSharedDirs": to_comma_separated_string(
-                                    self._shared_storage_mount_dirs[SharedStorageType.EFS]
-                                ),
-                                "EFSEncryptionInTransits": to_comma_separated_string(
-                                    self._shared_storage_attributes[SharedStorageType.EFS]["EncryptionInTransits"],
-                                    use_lower_case=True,
-                                ),
-                                "EFSIamAuthorizations": to_comma_separated_string(
-                                    self._shared_storage_attributes[SharedStorageType.EFS]["IamAuthorizations"],
-                                    use_lower_case=True,
-                                ),
-                                "FSXIds": get_shared_storage_ids_by_type(
-                                    self._shared_storage_infos, SharedStorageType.FSX
-                                ),
-                                "FSXMountNames": to_comma_separated_string(
-                                    self._shared_storage_attributes[SharedStorageType.FSX]["MountNames"]
-                                ),
-                                "FSXDNSNames": to_comma_separated_string(
-                                    self._shared_storage_attributes[SharedStorageType.FSX]["DNSNames"]
-                                ),
-                                "FSXVolumeJunctionPaths": to_comma_separated_string(
-                                    self._shared_storage_attributes[SharedStorageType.FSX]["VolumeJunctionPaths"]
-                                ),
-                                "FSXFileSystemTypes": to_comma_separated_string(
-                                    self._shared_storage_attributes[SharedStorageType.FSX]["FileSystemTypes"]
-                                ),
-                                "FSXSharedDirs": to_comma_separated_string(
-                                    self._shared_storage_mount_dirs[SharedStorageType.FSX]
-                                ),
-                                "Scheduler": self._config.scheduling.scheduler,
-                                "EphemeralDir": queue.compute_settings.local_storage.ephemeral_volume.mount_dir
-                                if isinstance(queue, (SlurmQueue, SchedulerPluginQueue))
-                                and queue.compute_settings.local_storage.ephemeral_volume
-                                else DEFAULT_EPHEMERAL_DIR,
-                                "EbsSharedDirs": to_comma_separated_string(
-                                    self._shared_storage_mount_dirs[SharedStorageType.EBS]
-                                ),
-                                "ClusterDNSDomain": str(self._cluster_hosted_zone.name)
-                                if self._cluster_hosted_zone
-                                else "",
-                                "ClusterHostedZone": str(self._cluster_hosted_zone.ref)
-                                if self._cluster_hosted_zone
-                                else "",
-                                "OSUser": OS_MAPPING[self._config.image.os]["user"],
                                 "ClusterName": self.stack_name,
-                                "SlurmDynamoDBTable": self._dynamodb_table.ref if self._dynamodb_table else "NONE",
-                                "LogGroupName": self._log_group.log_group_name
-                                if self._config.monitoring.logs.cloud_watch.enabled
-                                else "NONE",
-                                "IntelHPCPlatform": "true" if self._config.is_intel_hpc_platform_enabled else "false",
-                                "CWLoggingEnabled": "true" if self._config.is_cw_logging_enabled else "false",
-                                "LogRotationEnabled": "true" if self._config.is_log_rotation_enabled else "false",
-                                "QueueName": queue.name,
-                                "ComputeResourceName": compute_resource.name,
-                                "EnableEfaGdr": "compute"
-                                if compute_resource.efa and compute_resource.efa.gdr_support
-                                else "NONE",
-                                "CustomNodePackage": self._config.custom_node_package or "",
-                                "CustomAwsBatchCliPackage": self._config.custom_aws_batch_cli_package or "",
-                                "ExtraJson": self._config.extra_chef_attributes,
-                                "UsePrivateHostname": str(
-                                    get_attr(self._config, "scheduling.settings.dns.use_ec2_hostnames", default=False)
-                                ).lower(),
-                                "HeadNodePrivateIp": self._head_eni.attr_primary_private_ip_address,
-                                "DirectoryServiceEnabled": str(self._config.directory_service is not None).lower(),
                                 "Timeout": str(
                                     get_attr(
                                         self._config,
@@ -301,6 +346,15 @@ class QueuesStack(NestedStack):
                                         NODE_BOOTSTRAP_TIMEOUT,
                                     )
                                 ),
+                                "ComputeStartupTimeMetricEnabled": str(
+                                    get_attr(
+                                        self._config,
+                                        "dev_settings.compute_startup_time_metric_enabled",
+                                        default=False,
+                                    )
+                                ),
+                                "DnaJson": dna_json,
+                                "ExtraJson": self._config.extra_chef_attributes,
                             },
                             **get_common_user_data_env(queue, self._config),
                         },
@@ -328,3 +382,118 @@ class QueuesStack(NestedStack):
                 **conditional_template_properties,
             ),
         )
+
+        _apply_launch_template_overrides(launch_template, compute_resource)
+
+        return launch_template
+
+
+def add_network_interfaces(
+    queue,
+    compute_resource,
+    queue_lt_security_groups,
+    efa_interface_type=None,
+):
+    """Generate launch template network interfaces list.
+
+    When EFA is enabled, use `interface` + `efa-only` on NCI-0 and `efa-only` on NCI-1+.
+    The legacy `efa` combined type is only used as a fallback when NCI-0 cannot hold 2 ENIs (MaxENIs=1),
+    or when the DevSettings opt-out `EfaInterfaceType: efa` is set.
+
+    Whether NCI-0 supports EFA is inferred from the DescribeInstanceTypes API:
+    - MaximumEfaInterfaces == MaximumNetworkCards → NCI-0 supports EFA
+    - MaximumEfaInterfaces < MaximumNetworkCards → NCI-0 does NOT support EFA (e.g., B300, GB200)
+
+    GB200 retains hardcoded secondary card configuration (odd/even pattern).
+    """
+    instance_family = compute_resource.instance_types[0].split(".")[0]
+    is_gb200 = instance_family == P6E_GB200
+    efa_enabled = compute_resource.efa and compute_resource.efa.enabled
+    use_legacy_efa = efa_interface_type == "efa"
+
+    # Determine NCI-0 MaxENIs to decide if we can fit 2 ENIs (interface + efa-only)
+    nci0_max_enis = (
+        compute_resource.network_cards_list[0].maximum_network_interfaces()
+        if compute_resource.network_cards_list
+        else 1
+    )
+
+    # Infer whether NCI-0 supports EFA from API data
+    max_efa = compute_resource.max_efa_interfaces
+    max_cards = compute_resource.max_network_cards
+    nci0_supports_efa = max_efa == max_cards
+
+    # --- NCI-0 configuration ---
+    if efa_enabled and use_legacy_efa and nci0_supports_efa:
+        # Legacy opt-out: use combined efa on NCI-0 (only when NCI-0 actually supports EFA)
+        nci0_interface_type = "efa"
+    elif efa_enabled and not use_legacy_efa and nci0_supports_efa and nci0_max_enis < 2:
+        # NCI-0 supports EFA but can't hold 2 ENIs — fall back to combined efa
+        # (known to be misconfigured API limits on hpc5a/hpc6id, per EFA team)
+        nci0_interface_type = "efa"
+    else:
+        # New default and instances where NCI-0 doesn't support EFA: NCI-0 is always `interface` (None in CDK = ENA)
+        nci0_interface_type = None
+
+    compute_lt_nw_interfaces = [
+        ec2.CfnLaunchTemplate.NetworkInterfaceProperty(
+            device_index=0,
+            network_card_index=0,
+            associate_public_ip_address=queue.networking.assign_public_ip,
+            interface_type=nci0_interface_type,
+            groups=queue_lt_security_groups,
+            subnet_id=(queue.networking.subnet_ids[0] if isinstance(compute_resource, SlurmComputeResource) else None),
+        )
+    ]
+
+    # --- NCI-0 additional efa-only ENI (new default) ---
+    # Add efa-only on NCI-0 when: EFA enabled, not legacy opt-out, NCI-0 supports EFA,
+    # and NCI-0 can hold 2 ENIs
+    if efa_enabled and not use_legacy_efa and nci0_supports_efa and nci0_max_enis >= 2:
+        compute_lt_nw_interfaces.append(
+            ec2.CfnLaunchTemplate.NetworkInterfaceProperty(
+                device_index=1,
+                network_card_index=0,
+                associate_public_ip_address=False,
+                interface_type="efa-only",
+                groups=queue_lt_security_groups,
+                subnet_id=(
+                    queue.networking.subnet_ids[0] if isinstance(compute_resource, SlurmComputeResource) else None
+                ),
+            )
+        )
+
+    # --- NCI-1+ configuration ---
+    for network_card in compute_resource.network_cards_list[1:]:
+        even = network_card.network_card_index() % 2 == 0
+
+        # GB200 EFA-disabled: skip odd cards (they only support efa-only)
+        if is_gb200 and not efa_enabled and not even:
+            continue
+
+        if efa_enabled:
+            if use_legacy_efa and is_gb200:
+                # Legacy opt-out for GB200: restore PC 3.14 behavior (even=efa, odd=efa-only)
+                interface_type = "efa" if even else "efa-only"
+            elif use_legacy_efa:
+                # Legacy opt-out: all secondary cards get combined efa
+                interface_type = "efa"
+            else:
+                # New default: all secondary cards get efa-only
+                interface_type = "efa-only"
+        else:
+            interface_type = None
+
+        compute_lt_nw_interfaces.append(
+            ec2.CfnLaunchTemplate.NetworkInterfaceProperty(
+                device_index=0 if network_card.maximum_network_interfaces() == 1 else 1,
+                network_card_index=network_card.network_card_index(),
+                associate_public_ip_address=False,
+                interface_type=interface_type,
+                groups=queue_lt_security_groups,
+                subnet_id=(
+                    queue.networking.subnet_ids[0] if isinstance(compute_resource, SlurmComputeResource) else None
+                ),
+            )
+        )
+    return compute_lt_nw_interfaces

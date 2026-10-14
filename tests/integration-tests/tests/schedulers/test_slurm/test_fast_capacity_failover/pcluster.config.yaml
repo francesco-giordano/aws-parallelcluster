@@ -8,14 +8,27 @@ HeadNode:
     KeyName: {{ key_name }}
 Scheduling:
   Scheduler: slurm
+  {% if scheduler =="slurm" %}
+  ScalingStrategy: {{ scaling_strategy }}
+  {% endif %}
   SlurmQueues:
-    - Name: queue1
+    - Name: queue
       Networking:
         SubnetIds:
           - {{ private_subnet_id }}
       ComputeResources:
         - Name: ice-compute-resource
           InstanceType: c5.large
+          MinCount: 1
+        - Name: ice-cr-multiple
+          Instances:
+            - InstanceType: t3.xlarge
+            - InstanceType: m5.xlarge
+          MinCount: 1
+        - Name: exception-cr-multiple
+          Instances:
+            - InstanceType: t3.xlarge
+            - InstanceType: m5.xlarge
           MinCount: 1
         - Name: ondemand1-i1
           InstanceType: {{ instance }}

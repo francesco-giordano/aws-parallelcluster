@@ -15,11 +15,11 @@ import pytest
 import yaml
 from assertpy import assert_that
 
-from pcluster.config.cluster_config import SharedStorageType
+from pcluster.config.common import SharedStorageType
+from pcluster.constants import Feature
 from pcluster.schemas.cluster_schema import ClusterSchema
 from pcluster.templates.cdk_builder import CDKTemplateBuilder
-from pcluster.templates.cw_dashboard_builder import is_region_supported
-from pcluster.utils import load_yaml_dict
+from pcluster.utils import is_feature_supported, load_yaml_dict
 from tests.pcluster.aws.dummy_aws_api import mock_aws_api
 from tests.pcluster.models.dummy_s3_bucket import dummy_cluster_bucket, mock_bucket, mock_bucket_object_utils
 
@@ -27,14 +27,11 @@ from tests.pcluster.models.dummy_s3_bucket import dummy_cluster_bucket, mock_buc
 @pytest.mark.parametrize(
     "config_file_name, region",
     [
-        ("centos7.slurm.full.yaml", "us-east-1"),
         ("rhel8.slurm.full.yaml", "us-east-1"),
-        ("alinux2.slurm.conditional_vol.yaml", "us-east-1"),
-        ("ubuntu18.slurm.simple.yaml", "us-east-1"),
-        ("alinux2.batch.no_head_node_log.yaml", "us-east-1"),
-        ("ubuntu18.slurm.no_dashboard.yaml", "us-east-1"),
-        ("alinux2.batch.head_node_log.yaml", "us-east-1"),
-        ("ubuntu18.slurm.simple.yaml", "us-iso-WHATEVER"),
+        ("alinux2023.slurm.conditional_vol.yaml", "us-east-1"),
+        ("ubuntu24.slurm.simple.yaml", "us-east-1"),
+        ("ubuntu24.slurm.no_dashboard.yaml", "us-east-1"),
+        ("ubuntu24.slurm.simple.yaml", "us-iso-WHATEVER"),
     ],
 )
 def test_cw_dashboard_builder(mocker, test_datadir, set_env, config_file_name, region):
@@ -59,7 +56,12 @@ def test_cw_dashboard_builder(mocker, test_datadir, set_env, config_file_name, r
     if cluster_config.is_cw_dashboard_enabled:
         assert_that(output_yaml).contains("CloudwatchDashboard")
         assert_that(output_yaml).contains("Head Node EC2 Metrics")
-        _verify_head_node_instance_metrics_graphs(output_yaml)
+        _verify_head_node_instance_metrics_graphs(
+            output_yaml, cluster_config.scheduling.scheduler, cluster_config.is_cw_logging_enabled
+        )
+
+        if cluster_config.are_alarms_enabled:
+            assert_that(output_yaml).contains("Cluster Alarms")
 
         if cluster_config.shared_storage:
             _verify_ec2_metrics_conditions(cluster_config, output_yaml)
@@ -76,6 +78,44 @@ def test_cw_dashboard_builder(mocker, test_datadir, set_env, config_file_name, r
     else:
         assert_that(output_yaml).does_not_contain("CloudwatchDashboard")
         assert_that(output_yaml).does_not_contain("Head Node EC2 Metrics")
+
+    _verify_alarms(
+        output_yaml,
+        cluster_config.are_alarms_enabled,
+        cluster_config.scheduling.scheduler,
+        cluster_config.is_cw_logging_enabled,
+    )
+
+    if cluster_config.is_cw_logging_enabled:
+        assert_that(output_yaml).contains("ClusterCWLogGroup")
+    else:
+        assert_that(output_yaml).does_not_contain("ClusterCWLogGroup")
+
+
+def _verify_alarms(output_yaml, alarms_enabled, scheduler, is_cw_logging_enabled):
+    if alarms_enabled:
+        assert_that(output_yaml).contains("HeadNodeHealthAlarm")
+        assert_that(output_yaml).contains("StatusCheckFailed")
+
+        assert_that(output_yaml).contains("HeadNodeCpuAlarm")
+        assert_that(output_yaml).contains("CPUUtilization")
+
+        assert_that(output_yaml).contains("HeadNodeMemAlarm")
+        assert_that(output_yaml).contains("mem_used_percent")
+
+        assert_that(output_yaml).contains("HeadNodeDiskAlarm")
+        assert_that(output_yaml).contains("disk_used_percent")
+
+        # ClustermgtdHeartbeat alarm is only created for Slurm scheduler
+        if is_cw_logging_enabled:
+            assert_that(output_yaml).contains("HeadNodeClustermgtdHeartbeatAlarm")
+            assert_that(output_yaml).contains("ClustermgtdHeartbeat")
+        else:
+            assert_that(output_yaml).does_not_contain("HeadNodeClustermgtdHeartbeatAlarm")
+
+    else:
+        assert_that(output_yaml).does_not_contain("Cluster Alarms")
+        assert_that(output_yaml).does_not_contain("AWS::CloudWatch::Alarm")
 
 
 def _extract_metric_filters(generated_template):
@@ -95,13 +135,15 @@ def _verify_metric_filter_dimensions(metric_filters):
         )
 
         expected_dimensions = [{"Key": "ClusterName", "Value": "$.cluster-name"}]
+        if name == "ClustermgtdHeartbeatFilter":
+            expected_dimensions.append({"Key": "InstanceId", "Value": "$.instance-id"})
 
         assert_that(dimensions, description=f"{name} should have dimensions {expected_dimensions}").is_equal_to(
             expected_dimensions
         )
 
 
-def _verify_head_node_instance_metrics_graphs(output_yaml):
+def _verify_head_node_instance_metrics_graphs(output_yaml, scheduler, is_cw_logging_enabled):
     """Verify CloudWatch graphs within the Head Node Instance Metrics section."""
     assert_that(output_yaml).contains("Head Node Instance Metrics")
     assert_that(output_yaml).contains("CPU Utilization")
@@ -111,6 +153,12 @@ def _verify_head_node_instance_metrics_graphs(output_yaml):
     assert_that(output_yaml).contains("Disk Read/Write Ops")
     assert_that(output_yaml).contains("Disk Used Percent")
     assert_that(output_yaml).contains("Memory Used Percent")
+    # Daemons Heartbeats widget is only created for Slurm scheduler with logging enabled
+    if is_cw_logging_enabled:
+        assert_that(output_yaml).contains("Daemons Heartbeats")
+        assert_that(output_yaml).contains("ClustermgtdHeartbeat")
+    else:
+        assert_that(output_yaml).does_not_contain("Daemons Heartbeats")
 
 
 def _verify_ec2_metrics_conditions(cluster_config, output_yaml):
@@ -168,21 +216,14 @@ def _verify_head_node_logs_conditions(cluster_config, output_yaml):
     assert_that(output_yaml).contains("Head Node Logs")
 
     # Conditional Scheduler logs
-    scheduler = cluster_config.scheduling.scheduler
-    if scheduler == "slurm":
-        assert_that(output_yaml).contains("clustermgtd")
-        assert_that(output_yaml).contains("slurm_resume")
-        assert_that(output_yaml).contains("slurm_suspend")
-        assert_that(output_yaml).contains("slurmctld")
-    else:  # scheduler == "awsbatch"
-        assert_that(output_yaml).does_not_contain("clustermgtd")
-        assert_that(output_yaml).does_not_contain("slurm_resume")
-        assert_that(output_yaml).does_not_contain("slurm_suspend")
-        assert_that(output_yaml).does_not_contain("slurmctld")
+    assert_that(output_yaml).contains("clustermgtd")
+    assert_that(output_yaml).contains("slurm_resume")
+    assert_that(output_yaml).contains("slurm_suspend")
+    assert_that(output_yaml).contains("slurmctld")
 
     # conditional DCV logs
     if cluster_config.head_node.dcv and cluster_config.head_node.dcv.enabled:
-        assert_that(output_yaml).contains("NICE DCV integration logs")
+        assert_that(output_yaml).contains("Amazon DCV integration logs")
         assert_that(output_yaml).contains("dcv-ext-authenticator")
         assert_that(output_yaml).contains("dcv-authenticator")
         assert_that(output_yaml).contains("dcv-agent")
@@ -191,13 +232,13 @@ def _verify_head_node_logs_conditions(cluster_config, output_yaml):
         assert_that(output_yaml).contains("dcv-session-launcher")
         assert_that(output_yaml).contains("Xdcv")
     else:
-        assert_that(output_yaml).does_not_contain("NICE DCV integration logs")
+        assert_that(output_yaml).does_not_contain("Amazon DCV integration logs")
 
     # Conditional System logs
-    if cluster_config.image.os in ["alinux2", "centos7", "rhel8"]:
+    if cluster_config.image.os in ["alinux2023", "rhel8"]:
         assert_that(output_yaml).contains("system-messages")
         assert_that(output_yaml).does_not_contain("syslog")
-    elif cluster_config.image.os in ["ubuntu1804"]:
+    elif "ubuntu" in cluster_config.image.os:
         assert_that(output_yaml).contains("syslog")
         assert_that(output_yaml).does_not_contain("system-messages")
 
@@ -209,7 +250,6 @@ def _verify_head_node_logs_conditions(cluster_config, output_yaml):
 
 def _verify_common_error_metrics_graphs(cluster_config, output_yaml, region):
     """Verify conditions related to the common error section."""
-    scheduler = cluster_config.scheduling.scheduler
     slurm_related_metrics = [
         "IamPolicyErrors",
         "VcpuLimitErrors",
@@ -230,7 +270,7 @@ def _verify_common_error_metrics_graphs(cluster_config, output_yaml, region):
     ]
     health_check_failure_metrics = ["GpuHealthCheckFailures"]
     idle_node_metrics = ["MaxDynamicNodeIdleTime"]
-    if scheduler == "slurm" and is_region_supported(region):
+    if is_feature_supported(Feature.CLUSTER_HEALTH_METRICS, region):
         # Contains error metric title
         assert_that(output_yaml).contains("Cluster Health Metrics")
         for metric in slurm_related_metrics:

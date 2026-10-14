@@ -22,8 +22,9 @@ from yaml.constructor import ConstructorError
 import pcluster.aws.common
 import pcluster.utils as utils
 from pcluster.aws.aws_api import AWSApi
-from pcluster.aws.aws_resources import InstanceTypeInfo
+from pcluster.aws.aws_resources import CapacityReservationInfo, InstanceTypeInfo
 from pcluster.aws.common import Cache
+from pcluster.constants import Feature
 from pcluster.models.cluster import Cluster, ClusterStack
 from pcluster.utils import batch_by_property_callback, yaml_load
 from tests.pcluster.aws.dummy_aws_api import mock_aws_api
@@ -85,27 +86,19 @@ def test_generate_random_prefix():
 @pytest.mark.parametrize(
     "architecture, supported_oses",
     [
-        ("x86_64", ["alinux2", "centos7", "ubuntu1804", "ubuntu2004", "rhel8"]),
-        ("arm64", ["alinux2", "centos7", "ubuntu1804", "ubuntu2004", "rhel8"]),
+        (
+            "x86_64",
+            ["alinux2023", "ubuntu2204", "ubuntu2404", "rhel8", "rocky8", "rhel9", "rocky9"],
+        ),
+        (
+            "arm64",
+            ["alinux2023", "ubuntu2204", "ubuntu2404", "rhel8", "rocky8", "rhel9", "rocky9"],
+        ),
     ],
 )
 def test_get_supported_os_for_architecture(architecture, supported_oses):
     """Verify that the expected OSes are supported based on a given architecture."""
     assert_that(utils.get_supported_os_for_architecture(architecture)).contains_only(
-        *supported_oses
-    ).does_not_contain_duplicates()
-
-
-@pytest.mark.parametrize(
-    "scheduler, supported_oses",
-    [
-        ("slurm", ["alinux2", "centos7", "ubuntu1804", "ubuntu2004", "rhel8"]),
-        ("awsbatch", ["alinux2"]),
-    ],
-)
-def test_get_supported_os_for_scheduler(scheduler, supported_oses):
-    """Verify that the expected OSes are supported based on a given architecture."""
-    assert_that(utils.get_supported_os_for_scheduler(scheduler)).contains_only(
         *supported_oses
     ).does_not_contain_duplicates()
 
@@ -184,7 +177,11 @@ def test_init_from_instance_type(mocker, caplog):
                     "ValidCores": [1, 2],
                     "ValidThreadsPerCore": [1, 2],
                 },
-                "NetworkInfo": {"EfaSupported": False, "MaximumNetworkCards": 1},
+                "NetworkInfo": {
+                    "EfaSupported": False,
+                    "MaximumNetworkCards": 1,
+                    "NetworkCards": [{"NetworkCardIndex": 0}],
+                },
                 "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
             }
         ),
@@ -192,7 +189,8 @@ def test_init_from_instance_type(mocker, caplog):
     c4_instance_info = AWSApi.instance().ec2.get_instance_type_info("c4.xlarge")
     assert_that(c4_instance_info.gpu_count()).is_equal_to(0)
     assert_that(caplog.text).is_empty()
-    assert_that(c4_instance_info.max_network_interface_count()).is_equal_to(1)
+    assert_that(c4_instance_info.max_network_cards()).is_equal_to(1)
+    assert_that(c4_instance_info.network_cards_list()[0].network_card_index()).is_equal_to(0)
     assert_that(c4_instance_info.cores_count()).is_equal_to(2)
     assert_that(c4_instance_info.default_threads_per_core()).is_equal_to(2)
     assert_that(c4_instance_info.vcpus_count()).is_equal_to(4)
@@ -206,7 +204,16 @@ def test_init_from_instance_type(mocker, caplog):
                 "InstanceType": "g4dn.metal",
                 "VCpuInfo": {"DefaultVCpus": 96, "DefaultCores": 48, "DefaultThreadsPerCore": 2},
                 "GpuInfo": {"Gpus": [{"Name": "T4", "Manufacturer": "NVIDIA", "Count": 8}]},
-                "NetworkInfo": {"EfaSupported": True, "MaximumNetworkCards": 4},
+                "NetworkInfo": {
+                    "EfaSupported": True,
+                    "MaximumNetworkCards": 4,
+                    "NetworkCards": [
+                        {"NetworkCardIndex": 0},
+                        {"NetworkCardIndex": 1},
+                        {"NetworkCardIndex": 2},
+                        {"NetworkCardIndex": 3},
+                    ],
+                },
                 "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
             }
         ),
@@ -214,7 +221,10 @@ def test_init_from_instance_type(mocker, caplog):
     g4dn_instance_info = AWSApi.instance().ec2.get_instance_type_info("g4dn.metal")
     assert_that(g4dn_instance_info.gpu_count()).is_equal_to(8)
     assert_that(caplog.text).is_empty()
-    assert_that(g4dn_instance_info.max_network_interface_count()).is_equal_to(4)
+    assert_that(g4dn_instance_info.max_network_cards()).is_equal_to(4)
+    g4dn_network_card_list = g4dn_instance_info.network_cards_list()
+    for index in range(4):
+        assert_that(g4dn_network_card_list[index].network_card_index()).is_equal_to(index)
     assert_that(g4dn_instance_info.default_threads_per_core()).is_equal_to(2)
     assert_that(g4dn_instance_info.vcpus_count()).is_equal_to(96)
     assert_that(g4dn_instance_info.supported_architecture()).is_equal_to(["x86_64"])
@@ -233,7 +243,11 @@ def test_init_from_instance_type(mocker, caplog):
                     "ValidThreadsPerCore": [1, 2],
                 },
                 "GpuInfo": {"Gpus": [{"Name": "*", "Manufacturer": "AMD", "Count": 4}]},
-                "NetworkInfo": {"EfaSupported": False, "MaximumNetworkCards": 1},
+                "NetworkInfo": {
+                    "EfaSupported": False,
+                    "MaximumNetworkCards": 1,
+                    "NetworkCards": [{"NetworkCardIndex": 0}],
+                },
                 "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
             }
         ),
@@ -241,7 +255,8 @@ def test_init_from_instance_type(mocker, caplog):
     g4ad_instance_info = AWSApi.instance().ec2.get_instance_type_info("g4ad.16xlarge")
     assert_that(g4ad_instance_info.gpu_count()).is_equal_to(0)
     assert_that(g4ad_instance_info.gpu_manufacturer()).is_equal_to("AMD")
-    assert_that(g4ad_instance_info.max_network_interface_count()).is_equal_to(1)
+    assert_that(g4ad_instance_info.max_network_cards()).is_equal_to(1)
+    assert_that(g4ad_instance_info.network_cards_list()[0].network_card_index()).is_equal_to(0)
     assert_that(g4ad_instance_info.default_threads_per_core()).is_equal_to(2)
     assert_that(g4ad_instance_info.vcpus_count()).is_equal_to(64)
     assert_that(g4ad_instance_info.supported_architecture()).is_equal_to(["x86_64"])
@@ -533,7 +548,653 @@ class TestAsyncUtils(unittest.TestCase):
                 executions.append(FakeAsyncMethodProvider().async_method(i))
                 expected_results.append(i)
 
-        results = asyncio.get_event_loop().run_until_complete(asyncio.gather(*executions))
+        with utils.event_loop() as loop:
+            results = loop.run_until_complete(asyncio.gather(*executions))
 
         assert_that(expected_results).contains_sequence(*results)
         assert_that(unique_calls).is_equal_to(total_calls)
+
+
+@pytest.mark.parametrize(
+    "feature, region, expected_result",
+    [
+        (Feature.BATCH, "ap-northeast-3", False),
+        (Feature.BATCH, "us-iso-east-1", False),
+        (Feature.BATCH, "us-iso-west-1", False),
+        (Feature.BATCH, "us-isob-east-1", False),
+        (Feature.BATCH, "us-isoWHATEVER", False),
+        (Feature.FSX_LUSTRE, "us-isob-east-1", True),
+        (Feature.FSX_LUSTRE, "us-isobWHATEVER", True),
+        (Feature.FSX_ONTAP, "us-iso-east-1", True),
+        (Feature.FSX_ONTAP, "us-iso-west-1", False),
+        (Feature.FSX_ONTAP, "us-isob-east-1", True),
+        (Feature.FSX_ONTAP, "us-isoWHATEVER", True),
+        (Feature.FSX_OPENZFS, "us-iso-east-1", False),
+        (Feature.FSX_OPENZFS, "us-iso-west-1", False),
+        (Feature.FSX_OPENZFS, "us-isob-east-1", False),
+        (Feature.FSX_OPENZFS, "us-isoWHATEVER", False),
+        (Feature.SLURM_DATABASE, "us-isoWHATEVER", True),
+        (Feature.CLUSTER_HEALTH_METRICS, "us-isoWHATEVER", False),
+        (Feature.BATCH, "WHATEVER-ELSE", True),
+        (Feature.FSX_LUSTRE, "WHATEVER-ELSE", True),
+        (Feature.FSX_ONTAP, "WHATEVER-ELSE", True),
+        (Feature.FSX_OPENZFS, "WHATEVER-ELSE", True),
+        (Feature.SLURM_DATABASE, "WHATEVER-ELSE", True),
+        (Feature.CLUSTER_HEALTH_METRICS, "WHATEVER-ELSE", True),
+    ],
+)
+def test_is_feature_supported(feature, region, expected_result):
+    actual_result = utils.is_feature_supported(feature=feature, region=region)
+    assert_that(actual_result).is_equal_to(expected_result)
+
+
+@pytest.mark.parametrize(
+    "service_name, partition, region, regional, expected_result, expected_exception",
+    [
+        pytest.param(
+            "ANY_SERVICE",
+            "ANY_PARTITION",
+            None,
+            False,
+            "ANY_SERVICE.A_DOMAIN_SUFFIX",
+            None,
+            id="Non-regional service principal",
+        ),
+        pytest.param(
+            "ANY_SERVICE",
+            "ANY_PARTITION",
+            "ANY_REGION",
+            True,
+            "ANY_SERVICE.ANY_REGION.A_DOMAIN_SUFFIX",
+            None,
+            id="Regional service principal",
+        ),
+        pytest.param(
+            "ANY_SERVICE",
+            "ANY_PARTITION",
+            None,
+            True,
+            None,
+            ValueError("Region must be provided when 'regional' is True."),
+            id="Regional=True without region provided",
+        ),
+    ],
+)
+def test_get_service_principal(service_name, mocker, partition, region, regional, expected_result, expected_exception):
+    """Test get_service_principal with various inputs."""
+    url_domain_suffix_mock = mocker.patch("pcluster.utils.get_url_domain_suffix", return_value="A_DOMAIN_SUFFIX")
+    if expected_exception:
+        with pytest.raises(ValueError, match=str(expected_exception)):
+            utils.get_service_principal(service_name, partition, region, regional)
+    else:
+        result = utils.get_service_principal(service_name, partition, region, regional)
+        url_domain_suffix_mock.assert_called_once()
+        assert_that(result).is_equal_to(expected_result)
+
+
+@pytest.mark.parametrize(
+    "partition, service, region, account, resource, expected_result",
+    [
+        pytest.param(
+            "ANY_PARTITION",
+            "ANY_SERVICE",
+            "ANY_REGION",
+            "ANY_ACCOUNT_ID",
+            "ANY_RESOURCE",
+            "arn:ANY_PARTITION:ANY_SERVICE:ANY_REGION:ANY_ACCOUNT_ID:ANY_RESOURCE",
+            id="All fields provided",
+        ),
+        pytest.param(
+            "ANY_PARTITION",
+            "ANY_SERVICE",
+            "",
+            "ANY_ACCOUNT_ID",
+            "ANY_RESOURCE",
+            "arn:ANY_PARTITION:ANY_SERVICE::ANY_ACCOUNT_ID:ANY_RESOURCE",
+            id="Empty region",
+        ),
+        pytest.param(
+            "ANY_PARTITION",
+            "ANY_SERVICE",
+            "ANY_REGION",
+            "",
+            "ANY_RESOURCE",
+            "arn:ANY_PARTITION:ANY_SERVICE:ANY_REGION::ANY_RESOURCE",
+            id="Empty account",
+        ),
+        pytest.param(
+            "ANY_PARTITION",
+            "ANY_SERVICE",
+            "",
+            "",
+            "ANY_RESOURCE",
+            "arn:ANY_PARTITION:ANY_SERVICE:::ANY_RESOURCE",
+            id="Empty region and account",
+        ),
+    ],
+)
+def test_format_arn(partition, service, region, account, resource, expected_result):
+    """Test format_arn with various inputs."""
+    result = utils.format_arn(partition, service, region, account, resource)
+    assert_that(result).is_equal_to(expected_result)
+
+
+class TestUltraserverUtils:
+    """Test ultraserver-related utility functions."""
+
+    @pytest.mark.parametrize(
+        "capacity_reservation_id, capacity_reservations, expected_result",
+        [
+            # Valid ultraserver capacity block
+            (
+                "cr-123456",
+                [
+                    CapacityReservationInfo(
+                        {
+                            "CapacityReservationId": "cr-123456",
+                            "InstanceType": "p6e-gb200.36xlarge",
+                            "ReservationType": "capacity-block",
+                        }
+                    )
+                ],
+                ("p6e-gb200.36xlarge", "capacity-block"),
+            ),
+            # Regular instance with ondemand reservation
+            (
+                "cr-789012",
+                [
+                    CapacityReservationInfo(
+                        {
+                            "CapacityReservationId": "cr-789012",
+                            "InstanceType": "c5.large",
+                            "ReservationType": "ondemand",
+                        }
+                    )
+                ],
+                ("c5.large", "ondemand"),
+            ),
+            # Empty capacity reservations list
+            (
+                "cr-nonexistent",
+                [],
+                (None, None),
+            ),
+            # None capacity reservation ID
+            (
+                None,
+                [],
+                (None, None),
+            ),
+        ],
+    )
+    def test_get_instance_type_and_reservation_type_from_capacity_reservation(
+        self, mocker, capacity_reservation_id, capacity_reservations, expected_result
+    ):
+        """Test get_instance_type_and_reservation_type_from_capacity_reservation function."""
+        mock_aws_api(mocker)
+
+        # Mock the EC2 API call
+        mocker.patch(
+            "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
+            return_value=capacity_reservations,
+        )
+
+        # Call the function
+        result = AWSApi.instance().ec2.get_instance_type_and_reservation_type_from_capacity_reservation(
+            capacity_reservation_id
+        )
+
+        # Verify the result
+        assert_that(result).is_equal_to(expected_result)
+
+    def test_get_instance_type_and_reservation_type_empty_capacity_reservation_id(self, mocker):
+        """Test function behavior with empty capacity reservation ID."""
+        mock_aws_api(mocker)
+
+        # Mock should not be called for empty ID
+        describe_mock = mocker.patch("pcluster.aws.ec2.Ec2Client.describe_capacity_reservations")
+
+        # Call the function with empty string
+        result = AWSApi.instance().ec2.get_instance_type_and_reservation_type_from_capacity_reservation("")
+
+        # Should return None values without calling API
+        assert_that(result).is_equal_to((None, None))
+        describe_mock.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "capacity_reservations, expected_instance_type, expected_reservation_type",
+        [
+            # Multiple reservations - should use first one
+            (
+                [
+                    CapacityReservationInfo(
+                        {
+                            "CapacityReservationId": "cr-123456",
+                            "InstanceType": "p6e-gb200.36xlarge",
+                            "ReservationType": "capacity-block",
+                        }
+                    ),
+                    CapacityReservationInfo(
+                        {
+                            "CapacityReservationId": "cr-789012",
+                            "InstanceType": "c5.large",
+                            "ReservationType": "ondemand",
+                        }
+                    ),
+                ],
+                "p6e-gb200.36xlarge",
+                "capacity-block",
+            ),
+            # Reservation with missing ReservationType
+            (
+                [
+                    CapacityReservationInfo(
+                        {
+                            "CapacityReservationId": "cr-123456",
+                            "InstanceType": "p6e-gb200.36xlarge",
+                            # Missing ReservationType
+                        }
+                    )
+                ],
+                "p6e-gb200.36xlarge",
+                None,
+            ),
+            # Reservation with missing InstanceType
+            (
+                [
+                    CapacityReservationInfo(
+                        {
+                            "CapacityReservationId": "cr-123456",
+                            # Missing InstanceType
+                            "ReservationType": "capacity-block",
+                        }
+                    )
+                ],
+                None,
+                "capacity-block",
+            ),
+        ],
+    )
+    def test_get_instance_type_and_reservation_type_edge_cases(
+        self, mocker, capacity_reservations, expected_instance_type, expected_reservation_type
+    ):
+        """Test function behavior with edge cases."""
+        mock_aws_api(mocker)
+
+        # Mock the EC2 API call
+        mocker.patch(
+            "pcluster.aws.ec2.Ec2Client.describe_capacity_reservations",
+            return_value=capacity_reservations,
+        )
+
+        # Call the function
+        instance_type, reservation_type = (
+            AWSApi.instance().ec2.get_instance_type_and_reservation_type_from_capacity_reservation("cr-123456")
+        )
+
+        # Verify the results
+        assert_that(instance_type).is_equal_to(expected_instance_type)
+        assert_that(reservation_type).is_equal_to(expected_reservation_type)
+
+
+@pytest.mark.parametrize(
+    "statuses, capacity_reservation_ids, expected_result",
+    [
+        # Test with matching capacity reservation IDs
+        (
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "TotalCapacity": 100,
+                    "CapacityReservationStatuses": [
+                        {"CapacityReservationId": "cr-123456", "TotalCapacity": 50, "TotalAvailableCapacity": 30}
+                    ],
+                },
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "TotalCapacity": 200,
+                    "CapacityReservationStatuses": [
+                        {"CapacityReservationId": "cr-789012", "TotalCapacity": 100, "TotalAvailableCapacity": 80}
+                    ],
+                },
+            ],
+            ["cr-123456", "cr-789012"],
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "TotalCapacity": 100,
+                    "CapacityReservationStatuses": [
+                        {"CapacityReservationId": "cr-123456", "TotalCapacity": 50, "TotalAvailableCapacity": 30}
+                    ],
+                },
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "TotalCapacity": 200,
+                    "CapacityReservationStatuses": [
+                        {"CapacityReservationId": "cr-789012", "TotalCapacity": 100, "TotalAvailableCapacity": 80}
+                    ],
+                },
+            ],
+        ),
+        # Test with partial matching
+        (
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 50}],
+                },
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "impaired",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-999999", "TotalCapacity": 100}],
+                },
+            ],
+            ["cr-123456"],
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 50}],
+                }
+            ],
+        ),
+        # Test with no matching capacity reservation IDs
+        (
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-999999", "TotalCapacity": 50}],
+                }
+            ],
+            ["cr-123456"],
+            [],
+        ),
+        # Test with empty statuses list
+        ([], ["cr-123456"], []),
+        # Test with empty capacity_reservation_ids list
+        (
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 50}],
+                }
+            ],
+            [],
+            [],
+        ),
+        # Test with status missing CapacityReservationStatuses
+        (
+            [
+                {"CapacityBlockId": "cb-123", "InterconnectStatus": "ok"},
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 50}],
+                },
+            ],
+            ["cr-123456"],
+            [
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 50}],
+                }
+            ],
+        ),
+        # Test with empty CapacityReservationStatuses list
+        (
+            [
+                {"CapacityBlockId": "cb-123", "InterconnectStatus": "ok", "CapacityReservationStatuses": []},
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 50}],
+                },
+            ],
+            ["cr-123456"],
+            [
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 50}],
+                }
+            ],
+        ),
+        # Test with CapacityReservationStatuses missing CapacityReservationId
+        (
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"TotalCapacity": 50, "TotalAvailableCapacity": 30}],
+                },
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 100}],
+                },
+            ],
+            ["cr-123456"],
+            [
+                {
+                    "CapacityBlockId": "cb-456",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [{"CapacityReservationId": "cr-123456", "TotalCapacity": 100}],
+                }
+            ],
+        ),
+        # Test with multiple CapacityReservationStatuses in one block
+        (
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [
+                        {"CapacityReservationId": "cr-123456", "TotalCapacity": 50},
+                        {"CapacityReservationId": "cr-789012", "TotalCapacity": 100},
+                    ],
+                }
+            ],
+            ["cr-123456"],
+            [
+                {
+                    "CapacityBlockId": "cb-123",
+                    "InterconnectStatus": "ok",
+                    "CapacityReservationStatuses": [
+                        {"CapacityReservationId": "cr-123456", "TotalCapacity": 50},
+                        {"CapacityReservationId": "cr-789012", "TotalCapacity": 100},
+                    ],
+                }
+            ],
+        ),
+    ],
+)
+def test_get_needed_ultraserver_capacity_block_statuses(statuses, capacity_reservation_ids, expected_result):
+    """Test get_needed_ultraserver_capacity_block_statuses function."""
+    result = utils.get_needed_ultraserver_capacity_block_statuses(statuses, capacity_reservation_ids)
+    assert_that(result).is_equal_to(expected_result)
+
+
+@pytest.mark.parametrize(
+    "value, raise_on_error, default, expected, raises",
+    [
+        # Valid JSON parsing
+        pytest.param('{"key": "value"}', False, None, {"key": "value"}, None, id="valid simple object"),
+        pytest.param(
+            '{"nested": {"a": 1, "b": 2}}', False, None, {"nested": {"a": 1, "b": 2}}, None, id="valid nested object"
+        ),
+        pytest.param("[1, 2, 3]", False, None, [1, 2, 3], None, id="valid array"),
+        pytest.param('"string"', False, None, "string", None, id="valid string value"),
+        pytest.param("123", False, None, 123, None, id="valid number value"),
+        pytest.param("true", False, None, True, None, id="valid boolean value"),
+        pytest.param("null", False, None, None, None, id="valid null value"),
+        # Invalid JSON with raise_on_error=False returns default
+        pytest.param("invalid json", False, None, None, None, id="invalid json returns None default"),
+        pytest.param("invalid json", False, {}, {}, None, id="invalid json returns empty dict default"),
+        pytest.param("invalid json", False, [], [], None, id="invalid json returns empty list default"),
+        pytest.param(
+            "{missing: quotes}", False, "default", "default", None, id="malformed json returns string default"
+        ),
+        pytest.param("", False, None, None, None, id="empty string returns None default"),
+        pytest.param(None, False, {}, {}, None, id="none value returns default"),
+        # Invalid JSON with raise_on_error=True raises exception
+        pytest.param("invalid json", True, None, None, Exception, id="invalid json raises when configured"),
+        pytest.param(None, True, None, None, TypeError, id="none value raises when configured"),
+    ],
+)
+def test_parse_json_string(value, raise_on_error, default, expected, raises):
+    if raises:
+        with pytest.raises(raises):
+            utils.parse_json_string(value, raise_on_error=raise_on_error, default=default)
+    else:
+        assert_that(utils.parse_json_string(value, raise_on_error=raise_on_error, default=default)).is_equal_to(
+            expected
+        )
+
+
+@pytest.mark.parametrize(
+    "d1, d2, expected",
+    [
+        pytest.param(
+            {"a": 1, "b": {"c": 2}},
+            {"a": 1, "b": {"c": 2}},
+            set(),
+            id="identical dicts returns empty",
+        ),
+        pytest.param(
+            {},
+            {},
+            set(),
+            id="empty dicts returns empty",
+        ),
+        pytest.param(
+            {"a": 1},
+            {"a": 1, "b": 2},
+            {"b"},
+            id="added key",
+        ),
+        pytest.param(
+            {"a": 1, "b": 2},
+            {"a": 1},
+            {"b"},
+            id="removed key",
+        ),
+        pytest.param(
+            {"a": 1, "b": 2},
+            {"a": 1, "b": 3},
+            {"b"},
+            id="changed value",
+        ),
+        pytest.param(
+            {"a": {"x": 1}},
+            {"a": {"x": 1, "y": 2}},
+            {"a.y"},
+            id="nested added key",
+        ),
+        pytest.param(
+            {"a": {"x": 1, "y": 2}},
+            {"a": {"x": 1}},
+            {"a.y"},
+            id="nested removed key",
+        ),
+        pytest.param(
+            {"a": {"x": 1}},
+            {"a": {"x": 2}},
+            {"a.x"},
+            id="nested changed value",
+        ),
+        pytest.param(
+            {"a": {"b": {"c": {"d": 1}}}},
+            {"a": {"b": {"c": {"d": 2}}}},
+            {"a.b.c.d"},
+            id="deeply nested change",
+        ),
+        pytest.param(
+            {"a": 1, "b": {"x": 10, "y": 20}, "c": 3},
+            {"a": 1, "b": {"x": 10, "y": 25}, "d": 4},
+            {"b.y", "c", "d"},
+            id="multiple changes",
+        ),
+        pytest.param(
+            {"a": {"nested": 1}},
+            {"a": "string"},
+            {"a"},
+            id="type change dict to value",
+        ),
+        pytest.param(
+            {"a": "string"},
+            {"a": {"nested": 1}},
+            {"a"},
+            id="type change value to dict",
+        ),
+        pytest.param(
+            {"a": 1, "b": 2},
+            {},
+            {"a", "b"},
+            id="compare with empty dict",
+        ),
+        pytest.param(
+            {},
+            {"a": 1, "b": 2},
+            {"a", "b"},
+            id="compare empty with populated",
+        ),
+        pytest.param(
+            None,
+            None,
+            set(),
+            id="none inputs returns empty set",
+        ),
+        pytest.param(
+            None,
+            {"a": 1, "b": 2},
+            {"a", "b"},
+            id="none first dict",
+        ),
+        pytest.param(
+            {"a": 1, "b": 2},
+            None,
+            {"a", "b"},
+            id="none second dict",
+        ),
+        pytest.param(
+            {},
+            {"cluster": {"slurm": {"timeout": 300}}},
+            {"cluster.slurm.timeout"},
+            id="added nested dict returns leaf paths",
+        ),
+        pytest.param(
+            {"cluster": {"slurm": {"timeout": 300}}},
+            {},
+            {"cluster.slurm.timeout"},
+            id="removed nested dict returns leaf paths",
+        ),
+        pytest.param(
+            {},
+            {"cluster": {"slurm": {"timeout": 300, "enabled": True}}},
+            {"cluster.slurm.timeout", "cluster.slurm.enabled"},
+            id="added nested dict with multiple leaves",
+        ),
+        pytest.param(
+            {"cluster": {"slurm": {"timeout": 300, "enabled": True}}},
+            {},
+            {"cluster.slurm.timeout", "cluster.slurm.enabled"},
+            id="removed nested dict with multiple leaves",
+        ),
+        pytest.param(
+            {},
+            {"cluster": {}},
+            {"cluster"},
+            id="added empty nested dict returns parent path",
+        ),
+    ],
+)
+def test_get_dictionary_diff(d1, d2, expected):
+    assert_that(utils.get_dictionary_diff(d1, d2)).is_equal_to(expected)

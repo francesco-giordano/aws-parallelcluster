@@ -42,7 +42,7 @@ HeadNode:
     CustomAmi: ami-98765432
   Imds:
     Secured: true
-  InstanceType: t2.micro
+  InstanceType: t3.micro
   LocalStorage:
     EphemeralVolume:
       MountDir: /test
@@ -50,7 +50,7 @@ HeadNode:
       DeleteOnTermination: true
       Encrypted: true
       Iops: 100
-      Size: 40
+      Size: 45
       Throughput: null
       VolumeType: gp2
   Networking:
@@ -70,6 +70,9 @@ HeadNode:
       HttpProxyAddress: https://proxy-address:port
     SecurityGroups: null
     SubnetId: subnet-12345678
+  SharedStorageEfsSettings:
+    Encrypted: false
+  SharedStorageType: Efs
   Ssh:
     AllowedIps: 1.2.3.4/32
     KeyName: ec2-key-name
@@ -80,10 +83,61 @@ Iam:
     LambdaFunctionsRole: arn:aws:iam::aws:role/CustomResourcesLambdaRole
 Image:
   CustomAmi: ami-12345678
-  Os: centos7
+  Os: alinux2023
 Imds:
-  ImdsSupport: v1.0
+  ImdsSupport: v2.0
+LoginNodes:
+  Pools:
+  - Count: 1
+    CustomActions:
+      OnNodeConfigured:
+        Args:
+        - arg0
+        Script: https://test.tgz
+      OnNodeStart:
+        Args:
+        - arg0
+        Script: https://test.tgz
+      OnNodeUpdated:
+        Args:
+        - arg0
+        Script: https://test.tgz
+    Dcv:
+      AllowedIps: 0.0.0.0/0
+      Enabled: true
+      Port: 8443
+    GracetimePeriod: 10
+    Iam:
+      AdditionalIamPolicies:
+      - Policy: arn:aws:iam::aws:policy/AdministratorAccess
+      InstanceProfile: null
+      InstanceRole: null
+    Image:
+      CustomAmi: ami-12345678
+    InstanceType: t3.micro
+    Name: test
+    Networking:
+      AdditionalSecurityGroups: null
+      Proxy:
+        HttpProxyAddress: https://proxy-address:port
+      SecurityGroups:
+      - sg-34567890
+      - sg-34567891
+      - sg-34567892
+      - sg-34567893
+      - sg-34567894
+      - sg-34567895
+      - sg-34567896
+      - sg-34567897
+      - sg-34567898
+      - sg-34567899
+      SubnetIds:
+      - subnet-12345678
+    Ssh:
+      AllowedIps: 1.2.3.4/32
 Monitoring:
+  Alarms:
+    Enabled: true
   Dashboards:
     CloudWatch:
       Enabled: true
@@ -97,6 +151,7 @@ Monitoring:
       Enabled: true
 Region: us-east-1
 Scheduling:
+  ScalingStrategy: all-or-nothing
   Scheduler: slurm
   SlurmQueues:
   - CapacityReservationTarget: null
@@ -105,6 +160,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -112,6 +168,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-00
@@ -122,9 +181,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -158,6 +218,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-0
     Networking:
       AdditionalSecurityGroups: null
@@ -180,6 +241,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -187,6 +249,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-10
@@ -197,9 +262,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -233,6 +299,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-1
     Networking:
       AdditionalSecurityGroups: null
@@ -255,6 +322,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -262,6 +330,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-20
@@ -272,9 +343,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -308,6 +380,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-2
     Networking:
       AdditionalSecurityGroups: null
@@ -330,6 +403,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -337,6 +411,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-30
@@ -347,9 +424,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -383,6 +461,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-3
     Networking:
       AdditionalSecurityGroups: null
@@ -405,6 +484,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -412,6 +492,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-40
@@ -422,9 +505,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -458,6 +542,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-4
     Networking:
       AdditionalSecurityGroups: null
@@ -480,6 +565,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -487,6 +573,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-50
@@ -497,9 +586,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -533,6 +623,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-5
     Networking:
       AdditionalSecurityGroups: null
@@ -555,6 +646,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -562,6 +654,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-60
@@ -572,9 +667,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -608,6 +704,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-6
     Networking:
       AdditionalSecurityGroups: null
@@ -630,6 +727,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -637,6 +735,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-70
@@ -647,9 +748,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -683,6 +785,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-7
     Networking:
       AdditionalSecurityGroups: null
@@ -705,6 +808,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -712,6 +816,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-80
@@ -722,9 +829,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -758,6 +866,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-8
     Networking:
       AdditionalSecurityGroups: null
@@ -780,6 +889,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -787,6 +897,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-90
@@ -797,9 +910,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -833,6 +947,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-9
     Networking:
       AdditionalSecurityGroups: null
@@ -855,6 +970,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -862,6 +978,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-100
@@ -872,9 +991,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -908,6 +1028,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-10
     Networking:
       AdditionalSecurityGroups: null
@@ -930,6 +1051,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -937,6 +1059,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-110
@@ -947,9 +1072,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -983,6 +1109,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-11
     Networking:
       AdditionalSecurityGroups: null
@@ -1005,6 +1132,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1012,6 +1140,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-120
@@ -1022,9 +1153,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1058,6 +1190,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-12
     Networking:
       AdditionalSecurityGroups: null
@@ -1080,6 +1213,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1087,6 +1221,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-130
@@ -1097,9 +1234,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1133,6 +1271,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-13
     Networking:
       AdditionalSecurityGroups: null
@@ -1155,6 +1294,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1162,6 +1302,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-140
@@ -1172,9 +1315,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1208,6 +1352,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-14
     Networking:
       AdditionalSecurityGroups: null
@@ -1230,6 +1375,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1237,6 +1383,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-150
@@ -1247,9 +1396,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1283,6 +1433,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-15
     Networking:
       AdditionalSecurityGroups: null
@@ -1305,6 +1456,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1312,6 +1464,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-160
@@ -1322,9 +1477,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1358,6 +1514,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-16
     Networking:
       AdditionalSecurityGroups: null
@@ -1380,6 +1537,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1387,6 +1545,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-170
@@ -1397,9 +1558,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1433,6 +1595,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-17
     Networking:
       AdditionalSecurityGroups: null
@@ -1455,6 +1618,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1462,6 +1626,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-180
@@ -1472,9 +1639,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1508,6 +1676,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-18
     Networking:
       AdditionalSecurityGroups: null
@@ -1530,6 +1699,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1537,6 +1707,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-190
@@ -1547,9 +1720,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1583,6 +1757,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-19
     Networking:
       AdditionalSecurityGroups: null
@@ -1605,6 +1780,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1612,6 +1788,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-200
@@ -1622,9 +1801,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1658,6 +1838,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-20
     Networking:
       AdditionalSecurityGroups: null
@@ -1680,6 +1861,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1687,6 +1869,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-210
@@ -1697,9 +1882,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1733,6 +1919,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-21
     Networking:
       AdditionalSecurityGroups: null
@@ -1755,6 +1942,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1762,6 +1950,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-220
@@ -1772,9 +1963,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1808,6 +2000,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-22
     Networking:
       AdditionalSecurityGroups: null
@@ -1830,6 +2023,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1837,6 +2031,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-230
@@ -1847,9 +2044,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1883,6 +2081,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-23
     Networking:
       AdditionalSecurityGroups: null
@@ -1905,6 +2104,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: false
+      DynamicNodePriority: 1000
       Efa:
         Enabled: false
         GdrSupport: false
@@ -1912,6 +2112,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 10
       MinCount: 0
       Name: compute-resource-ondemand-240
@@ -1922,9 +2125,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: null
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume: null
@@ -1958,6 +2162,7 @@ Scheduling:
         KeyName: null
     Image:
       CustomAmi: ami-12345678
+    JobExclusiveAllocation: false
     Name: queue-ondemand-24
     Networking:
       AdditionalSecurityGroups: null
@@ -1980,6 +2185,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -1987,6 +2193,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-00
@@ -1997,9 +2206,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2022,6 +2232,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-0
     Networking:
       AdditionalSecurityGroups: null
@@ -2045,6 +2256,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2052,6 +2264,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-10
@@ -2062,9 +2277,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2087,6 +2303,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-1
     Networking:
       AdditionalSecurityGroups: null
@@ -2110,6 +2327,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2117,6 +2335,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-20
@@ -2127,9 +2348,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2152,6 +2374,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-2
     Networking:
       AdditionalSecurityGroups: null
@@ -2175,6 +2398,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2182,6 +2406,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-30
@@ -2192,9 +2419,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2217,6 +2445,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-3
     Networking:
       AdditionalSecurityGroups: null
@@ -2240,6 +2469,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2247,6 +2477,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-40
@@ -2257,9 +2490,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2282,6 +2516,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-4
     Networking:
       AdditionalSecurityGroups: null
@@ -2305,6 +2540,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2312,6 +2548,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-50
@@ -2322,9 +2561,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2347,6 +2587,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-5
     Networking:
       AdditionalSecurityGroups: null
@@ -2370,6 +2611,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2377,6 +2619,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-60
@@ -2387,9 +2632,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2412,6 +2658,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-6
     Networking:
       AdditionalSecurityGroups: null
@@ -2435,6 +2682,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2442,6 +2690,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-70
@@ -2452,9 +2703,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2477,6 +2729,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-7
     Networking:
       AdditionalSecurityGroups: null
@@ -2500,6 +2753,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2507,6 +2761,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-80
@@ -2517,9 +2774,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2542,6 +2800,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-8
     Networking:
       AdditionalSecurityGroups: null
@@ -2565,6 +2824,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2572,6 +2832,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-90
@@ -2582,9 +2845,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2607,6 +2871,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-9
     Networking:
       AdditionalSecurityGroups: null
@@ -2630,6 +2895,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2637,6 +2903,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-100
@@ -2647,9 +2916,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2672,6 +2942,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-10
     Networking:
       AdditionalSecurityGroups: null
@@ -2695,6 +2966,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2702,6 +2974,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-110
@@ -2712,9 +2987,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2737,6 +3013,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-11
     Networking:
       AdditionalSecurityGroups: null
@@ -2760,6 +3037,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2767,6 +3045,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-120
@@ -2777,9 +3058,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2802,6 +3084,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-12
     Networking:
       AdditionalSecurityGroups: null
@@ -2825,6 +3108,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2832,6 +3116,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-130
@@ -2842,9 +3129,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2867,6 +3155,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-13
     Networking:
       AdditionalSecurityGroups: null
@@ -2890,6 +3179,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2897,6 +3187,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-140
@@ -2907,9 +3200,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2932,6 +3226,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-14
     Networking:
       AdditionalSecurityGroups: null
@@ -2955,6 +3250,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -2962,6 +3258,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-150
@@ -2972,9 +3271,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -2997,6 +3297,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-15
     Networking:
       AdditionalSecurityGroups: null
@@ -3020,6 +3321,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3027,6 +3329,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-160
@@ -3037,9 +3342,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3062,6 +3368,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-16
     Networking:
       AdditionalSecurityGroups: null
@@ -3085,6 +3392,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3092,6 +3400,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-170
@@ -3102,9 +3413,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3127,6 +3439,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-17
     Networking:
       AdditionalSecurityGroups: null
@@ -3150,6 +3463,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3157,6 +3471,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-180
@@ -3167,9 +3484,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3192,6 +3510,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-18
     Networking:
       AdditionalSecurityGroups: null
@@ -3215,6 +3534,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3222,6 +3542,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-190
@@ -3232,9 +3555,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3257,6 +3581,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-19
     Networking:
       AdditionalSecurityGroups: null
@@ -3280,6 +3605,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3287,6 +3613,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-200
@@ -3297,9 +3626,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3322,6 +3652,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-20
     Networking:
       AdditionalSecurityGroups: null
@@ -3345,6 +3676,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3352,6 +3684,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-210
@@ -3362,9 +3697,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3387,6 +3723,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-21
     Networking:
       AdditionalSecurityGroups: null
@@ -3410,6 +3747,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3417,6 +3755,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-220
@@ -3427,9 +3768,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3452,6 +3794,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-22
     Networking:
       AdditionalSecurityGroups: null
@@ -3475,6 +3818,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3482,6 +3826,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-230
@@ -3492,9 +3839,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3517,6 +3865,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-23
     Networking:
       AdditionalSecurityGroups: null
@@ -3540,6 +3889,7 @@ Scheduling:
     - CapacityReservationTarget: null
       CustomSlurmSettings: {}
       DisableSimultaneousMultithreading: true
+      DynamicNodePriority: 1000
       Efa:
         Enabled: true
         GdrSupport: false
@@ -3547,6 +3897,9 @@ Scheduling:
         Gpu:
           Enabled: null
       InstanceType: c5.2xlarge
+      LaunchTemplateOverrides:
+        LaunchTemplateId: lt-01234567890abcdef
+        Version: 1
       MaxCount: 15
       MinCount: 1
       Name: compute-resource-spot-240
@@ -3557,9 +3910,10 @@ Scheduling:
           Name: null
       SchedulableMemory: null
       SpotPrice: 1.1
+      StaticNodePriority: 1
       Tags:
-      - Key: computetag0
-        Value: computetag0
+      - Key: extremely_long_computetag_key0
+        Value: extremely_long_computetag_value0
     ComputeSettings:
       LocalStorage:
         EphemeralVolume:
@@ -3582,6 +3936,7 @@ Scheduling:
       S3Access: null
     Image:
       CustomAmi: ami-23456789
+    JobExclusiveAllocation: false
     Name: queue-spot-24
     Networking:
       AdditionalSecurityGroups: null
@@ -3608,6 +3963,8 @@ Scheduling:
       HostedZoneId: null
       UseEc2Hostnames: false
     EnableMemoryBasedScheduling: false
+    ExternalSlurmdbd: null
+    MungeKeySecretArn: null
     QueueUpdateStrategy: TERMINATE
     ScaledownIdletime: 10
 SharedStorage:
@@ -3682,6 +4039,7 @@ SharedStorage:
   Name: nameebs4
   StorageType: Ebs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: Delete
     Encrypted: false
     EncryptionInTransit: false
@@ -3695,6 +4053,7 @@ SharedStorage:
   Name: efs0
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3708,6 +4067,7 @@ SharedStorage:
   Name: existing-efs10
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3721,6 +4081,7 @@ SharedStorage:
   Name: existing-efs11
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3734,6 +4095,7 @@ SharedStorage:
   Name: existing-efs12
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3747,6 +4109,7 @@ SharedStorage:
   Name: existing-efs13
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3760,6 +4123,7 @@ SharedStorage:
   Name: existing-efs14
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3773,6 +4137,7 @@ SharedStorage:
   Name: existing-efs15
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3786,6 +4151,7 @@ SharedStorage:
   Name: existing-efs16
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3799,6 +4165,7 @@ SharedStorage:
   Name: existing-efs17
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3812,6 +4179,7 @@ SharedStorage:
   Name: existing-efs18
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3825,6 +4193,7 @@ SharedStorage:
   Name: existing-efs19
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3838,6 +4207,7 @@ SharedStorage:
   Name: existing-efs20
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3851,6 +4221,7 @@ SharedStorage:
   Name: existing-efs21
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3864,6 +4235,7 @@ SharedStorage:
   Name: existing-efs22
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3877,6 +4249,7 @@ SharedStorage:
   Name: existing-efs23
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3890,6 +4263,7 @@ SharedStorage:
   Name: existing-efs24
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3903,6 +4277,7 @@ SharedStorage:
   Name: existing-efs25
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3916,6 +4291,7 @@ SharedStorage:
   Name: existing-efs26
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3929,6 +4305,7 @@ SharedStorage:
   Name: existing-efs27
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3942,6 +4319,7 @@ SharedStorage:
   Name: existing-efs28
   StorageType: Efs
 - EfsSettings:
+    AccessPointId: null
     DeletionPolicy: null
     Encrypted: false
     EncryptionInTransit: false
@@ -3961,6 +4339,7 @@ SharedStorage:
     CopyTagsToBackups: true
     DailyAutomaticBackupStartTime: 01:03
     DataCompressionType: LZ4
+    DataRepositoryAssociations: null
     DeletionPolicy: Delete
     DeploymentType: PERSISTENT_1
     DriveCacheType: READ
@@ -3993,6 +4372,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4015,6 +4395,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4037,6 +4418,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4059,6 +4441,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4081,6 +4464,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4103,6 +4487,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4125,6 +4510,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4147,6 +4533,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4169,6 +4556,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4191,6 +4579,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4213,6 +4602,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4235,6 +4625,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4257,6 +4648,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4279,6 +4671,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4301,6 +4694,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4323,6 +4717,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4345,6 +4740,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null
@@ -4367,6 +4763,7 @@ SharedStorage:
     CopyTagsToBackups: null
     DailyAutomaticBackupStartTime: null
     DataCompressionType: null
+    DataRepositoryAssociations: null
     DeletionPolicy: null
     DeploymentType: null
     DriveCacheType: null

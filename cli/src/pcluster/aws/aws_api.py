@@ -10,17 +10,18 @@
 # limitations under the License.
 import os
 
-from pcluster.aws.batch import BatchClient
 from pcluster.aws.cfn import CfnClient
 from pcluster.aws.dynamo import DynamoResource
 from pcluster.aws.ec2 import Ec2Client
 from pcluster.aws.efs import EfsClient
+from pcluster.aws.elb import ElbClient
 from pcluster.aws.fsx import FSxClient
 from pcluster.aws.iam import IamClient
 from pcluster.aws.imagebuilder import ImageBuilderClient
 from pcluster.aws.kms import KmsClient
 from pcluster.aws.logs import LogsClient
 from pcluster.aws.resource_groups import ResourceGroupsClient
+from pcluster.aws.resource_groups_tagging_api import ResourceGroupsTaggingApiClient
 from pcluster.aws.route53 import Route53Client
 from pcluster.aws.s3 import S3Client
 from pcluster.aws.s3_resource import S3Resource
@@ -43,10 +44,10 @@ class AWSApi:
     def __init__(self):
         self.aws_region = os.environ.get("AWS_DEFAULT_REGION")
 
-        self._batch = None
         self._cfn = None
         self._ec2 = None
         self._efs = None
+        self._elb = None
         self._fsx = None
         self._dynamodb = None
         self._s3 = None  # pylint: disable=C0103
@@ -61,6 +62,7 @@ class AWSApi:
         self._secretsmanager = None
         self._ssm = None
         self._resource_groups = None
+        self._resource_groups_tagging_api = None
 
     @property
     def cfn(self):
@@ -68,13 +70,6 @@ class AWSApi:
         if not self._cfn:
             self._cfn = CfnClient()
         return self._cfn
-
-    @property
-    def batch(self):
-        """AWS Batch client."""
-        if not self._batch:
-            self._batch = BatchClient()
-        return self._batch
 
     @property
     def ec2(self):
@@ -89,6 +84,13 @@ class AWSApi:
         if not self._efs:
             self._efs = EfsClient(ec2_client=self.ec2)
         return self._efs
+
+    @property
+    def elb(self):
+        """ELB client."""
+        if not self._elb:
+            self._elb = ElbClient()
+        return self._elb
 
     @property
     def fsx(self):
@@ -181,6 +183,13 @@ class AWSApi:
             self._resource_groups = ResourceGroupsClient()
         return self._resource_groups
 
+    @property
+    def resource_groups_tagging_api(self):
+        """Resource Groups Tagging API client."""
+        if not self._resource_groups_tagging_api:
+            self._resource_groups_tagging_api = ResourceGroupsTaggingApiClient()
+        return self._resource_groups_tagging_api
+
     @staticmethod
     def instance():
         """Return the singleton AWSApi instance."""
@@ -192,3 +201,12 @@ class AWSApi:
     def reset():
         """Reset the instance to clear all caches."""
         AWSApi._instance = None
+
+
+class KeyPairInfo:
+    """Object to store Ec2 Keypair information, initialized with the key name."""
+
+    def __init__(self, key_name: str):
+        self.key_name = key_name
+        self.key_data = AWSApi.instance().ec2.describe_key_pair(key_name)
+        self.key_type = self.key_data["KeyPairs"][0]["KeyType"]

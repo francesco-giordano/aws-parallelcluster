@@ -1,8 +1,8 @@
 Image:
-  Os: centos7
+  Os: alinux2023
   CustomAmi: ami-12345678
 HeadNode:
-  InstanceType: t2.micro  # t2.micro
+  InstanceType: t3.micro  # t3.micro
   Networking:
     SubnetId: subnet-12345678  # subnet-xxx
     ElasticIp: String  # true|false|EIP-id
@@ -17,7 +17,7 @@ HeadNode:
     AllowedIps: 1.2.3.4/32
   LocalStorage:
     RootVolume:
-      Size: 40
+      Size: 45
       Encrypted: true
     EphemeralVolume:
       MountDir: /test
@@ -38,6 +38,14 @@ HeadNode:
         - stirng2
   Iam:
     InstanceRole: arn:aws:iam::aws:role/CustomHeadNodeRole
+LoginNodes:
+  Pools:
+  - Name: test
+    InstanceType: t3.micro
+    Count: 1
+    Networking:
+      SubnetIds:
+        - subnet-12345678
 Scheduling:
   Scheduler: slurm
   SlurmSettings:
@@ -46,6 +54,7 @@ Scheduling:
       DisableManagedDns: false
       HostedZoneId: 12345ABC
     CustomSlurmSettingsIncludeFile: https://test.conf
+    MungeKeySecretArn: arn:aws:secretsmanager:us-east-1:123456789012:secret:TestMungeKey
   SlurmQueues:
     - Name: queue1
       CapacityType: ONDEMAND
@@ -61,6 +70,9 @@ Scheduling:
           CustomSlurmSettings:
             Param1: Value1
             Param2: Value2
+          LaunchTemplateOverrides:
+            LaunchTemplateId: lt-01234567890abcdef
+            Version: 1
         - Name: compute_resource2
           InstanceType: c4.xlarge
       CustomActions:
@@ -139,6 +151,9 @@ Scheduling:
           Efa:
             Enabled: true
             GdrSupport: false
+          LaunchTemplateOverrides:
+            LaunchTemplateId: lt-1234567890abcdef0
+            Version: 1
 SharedStorage:
   - MountDir: /my/mount/point1
     Name: name1
@@ -177,6 +192,14 @@ SharedStorage:
       AutoImportPolicy: NEW  # NEW | NEW_CHANGED | NEW_CHANGED_DELETED
       DriveCacheType: READ  # READ
       StorageType: HDD  # HDD | SSD
+      DataRepositoryAssociations:
+        - Name: dra
+          BatchImportMetaDataOnCreate: false
+          DataRepositoryPath: s3://bucket/folder
+          FileSystemPath: /
+          ImportedFileChunkSize: 1024
+          AutoExportPolicy: [ NEW, CHANGED, DELETED ]
+          AutoImportPolicy: [ NEW, CHANGED, DELETED ]
   - MountDir: /my/mount/point4
     Name: name4
     StorageType: FsxOntap
@@ -187,6 +210,11 @@ SharedStorage:
     StorageType: FsxOpenZfs
     FsxOpenZfsSettings:
       VolumeId: "fsvol-00e6e91b8898ec4ef"
+  - MountDir: /my/mount/point6
+    Name: name6
+    StorageType: FileCache
+    FileCacheSettings:
+      FileCacheId: "fc-00e6e91b8898ec4ef"
 Iam:
   PermissionsBoundary: arn:aws:iam::aws:policy/boundary
   ResourcePrefix: /path-prefix/name-prefix
@@ -217,9 +245,9 @@ DevSettings:
     ChefCookbook: https://tests/aws-parallelcluster-cookbook-3.0.tgz
     ExtraChefAttributes: |
       {"cluster": {"scheduler_slots": "cores"}}
-  AwsBatchCliPackage: s3://test/aws-parallelcluster-batch-3.0.tgz
   NodePackage: s3://test/aws-parallelcluster-node-3.0.tgz
 DeploymentSettings:
   LambdaFunctionsVpcConfig:
     SecurityGroupIds: ["sg-028d73ae220157d96"]
     SubnetIds: ["subnet-8e482ce8"]
+  DisableSudoAccessForDefaultUser: true

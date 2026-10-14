@@ -35,13 +35,6 @@ export NO_PROXY="localhost,127.0.0.1,169.254.169.254"
 PROXY
 fi
 
-# Configure Amazon Linux 2 instance running in US isolated region.
-. /etc/os-release
-if [[ "${!ID}${!VERSION_ID}" == "amzn2" && "${AWS::Region}" == us-iso* ]]; then
-  configuration_script="/opt/parallelcluster/scripts/patch-iso-instance.sh"
-  [ -f ${!configuration_script} ] && bash ${!configuration_script}
-fi
-
 --==BOUNDARY==
 Content-Type: text/cloud-config; charset=us-ascii
 MIME-Version: 1.0
@@ -71,27 +64,22 @@ MIME-Version: 1.0
 
 function error_exit
 {
+  # Echo chef-client.log to console logs for debugging
+  echo "========== BEGIN CHEF-CLIENT.LOG =========="
+  cat /var/log/chef-client.log || echo "chef-client.log not found"
+  echo "========== END CHEF-CLIENT.LOG ==========="
   # wait logs flush before signaling the failure
   sleep 10
   # trim the error message because there is a size limit of 4096 bytes for cfn-signal
   # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cloudformation-limits.html
-  cutoff=$(expr 4096 - $(stat --printf="%s" /tmp/wait_condition_handle.txt))
+  cutoff=$(expr 4096 - $(stat --printf="%s" ${PclusterTmpDir}/wait_condition_handle.txt))
   reason=$(head --bytes=${!cutoff} /var/log/parallelcluster/bootstrap_error_msg 2>/dev/null) || reason="$1"
-  cfn-signal --exit-code=1 --reason="${!reason}" "${!wait_condition_handle_presigned_url}" --region ${AWS::Region} --url ${CloudFormationUrl}
+  $CFN_BOOTSTRAP_VIRTUALENV_PATH/cfn-signal --exit-code=1 --reason="${!reason}" "${!wait_condition_handle_presigned_url}" --region ${AWS::Region} --url ${CloudFormationUrl}
   exit 1
 }
 function vendor_cookbook
 {
-  mkdir /tmp/cookbooks
-  cd /tmp/cookbooks
-  tar -xzf /etc/chef/aws-parallelcluster-cookbook.tgz
-  HOME_BAK="${!HOME}"
-  export HOME="/tmp"
-  for d in `ls /tmp/cookbooks`; do
-    cd /tmp/cookbooks/$d
-    LANG=en_US.UTF-8 /opt/cinc/embedded/bin/berks vendor /etc/chef/cookbooks --delete || error_exit 'Vendoring cookbook failed.'
-  done;
-  export HOME="${!HOME_BAK}"
+  cd /etc/chef && tar -xzf /etc/chef/aws-parallelcluster-cookbook.tgz --strip-components 1 && rm -f aws-parallelcluster-cookbook.tgz
 }
 [ -f /etc/profile.d/proxy.sh ] && . /etc/profile.d/proxy.sh
 
@@ -101,11 +89,11 @@ function vendor_cookbook
 # deploy config files
 export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:/opt/aws/bin
 # Load ParallelCluster environment variables
-[ -f /etc/profile.d/pcluster.sh ] && . /etc/profile.d/pcluster.sh
+[ -f /etc/parallelcluster/pcluster_cookbook_environment.sh ] && . /etc/parallelcluster/pcluster_cookbook_environment.sh
 
-cd /tmp
-cfn-init -s ${AWS::StackName} -v -c deployFiles -r HeadNodeLaunchTemplate --region ${AWS::Region} --url ${CloudFormationUrl}
-wait_condition_handle_presigned_url=$(cat /tmp/wait_condition_handle.txt)
+cd ${PclusterTmpDir}
+$CFN_BOOTSTRAP_VIRTUALENV_PATH/cfn-init -s ${AWS::StackName} -v -c deployFiles -r HeadNodeLaunchTemplate --region ${AWS::Region} --url ${CloudFormationUrl}
+wait_condition_handle_presigned_url=$(cat ${PclusterTmpDir}/wait_condition_handle.txt)
 
 custom_cookbook=${CustomChefCookbook}
 export _region=${AWS::Region}
@@ -124,7 +112,6 @@ fi
 export parallelcluster_version=aws-parallelcluster-${ParallelClusterVersion}
 export cookbook_version=${CookbookVersion}
 export chef_version=${ChefVersion}
-export berkshelf_version=${BerkshelfVersion}
 if [ -f /opt/parallelcluster/.bootstrapped ]; then
   installed_version=$(cat /opt/parallelcluster/.bootstrapped)
   if [ "${!cookbook_version}" != "${!installed_version}" ]; then
@@ -136,12 +123,17 @@ else
   error_exit "This AMI was not baked by ParallelCluster. Please use pcluster build-image command to create an AMI by providing your AMI as parent image."
 fi
 if [ "${!custom_cookbook}" != "NONE" ]; then
-  curl --retry 3 -v -L -o /etc/chef/aws-parallelcluster-cookbook.tgz ${!cookbook_url}
+  delays=(1 2 4 8 16 32 64 128 256)
+  for i in {0..8}; do
+    curl -v -L -o /etc/chef/aws-parallelcluster-cookbook.tgz ${!cookbook_url} && break
+    echo "Curl attempt $((i+1)) failed, retrying in ${!delays[$i]}s..."
+    sleep ${!delays[$i]}
+  done
   vendor_cookbook
 fi
 
 # Call CloudFormation
-cfn-init -s ${AWS::StackName} -v -c default -r HeadNodeLaunchTemplate --region ${AWS::Region} --url ${CloudFormationUrl} || error_exit 'Failed to bootstrap the head node. Please check /var/log/cfn-init.log or /var/log/chef-client.log in the head node, or check the cfn-init.log or chef-client.log in CloudWatch logs. Please refer to https://docs.aws.amazon.com/parallelcluster/latest/ug/troubleshooting-v3.html#troubleshooting-v3-get-logs for more details on ParallelCluster logs.'
-cfn-signal --exit-code=0 --reason="HeadNode setup complete" "${!wait_condition_handle_presigned_url}" --region ${AWS::Region} --url ${CloudFormationUrl}
+$CFN_BOOTSTRAP_VIRTUALENV_PATH/cfn-init -s ${AWS::StackName} -v -c default -r HeadNodeLaunchTemplate --region ${AWS::Region} --url ${CloudFormationUrl} || error_exit 'Failed to bootstrap the head node. Please check /var/log/cfn-init.log and /var/log/chef-client.log in the head node or in CloudWatch logs. Please refer to https://docs.aws.amazon.com/parallelcluster/latest/ug/troubleshooting-v3.html#troubleshooting-v3-get-logs for more details on ParallelCluster logs.'
+$CFN_BOOTSTRAP_VIRTUALENV_PATH/cfn-signal --exit-code=0 --reason="HeadNode setup complete" "${!wait_condition_handle_presigned_url}" --region ${AWS::Region} --url ${CloudFormationUrl}
 # End of file
 --==BOUNDARY==

@@ -1,0 +1,33 @@
+Image:
+  Os: {{ os }}
+HeadNode:
+  InstanceType: {{ instance }}
+  Ssh:
+    KeyName: {{ key_name }}
+    AllowedIps: 0.0.0.0/0
+  Networking:
+    SubnetId: {{ subnet_with_proxy }}
+    Proxy:
+      HttpProxyAddress: {{ proxy_address }}
+  Iam:
+    AdditionalIamPolicies:
+      - Policy: arn:{{partition}}:iam::aws:policy/AmazonSSMManagedInstanceCore #Required to report patching status
+Scheduling:
+  Scheduler: slurm
+  SlurmQueues:
+    - Name: queue
+      ComputeResources:
+        - Name: compute1
+          Instances:
+            - InstanceType: {{ instance }}
+          MinCount: 1
+          MaxCount: 1
+      Networking:
+        SubnetIds:
+          - {{ subnet_with_proxy }}
+        AssignPublicIp: false
+        Proxy:
+          HttpProxyAddress: {{ proxy_address }}
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:{{partition}}:iam::aws:policy/AmazonSSMManagedInstanceCore #Required to report patching status

@@ -21,7 +21,9 @@ Scheduling:
       ComputeResources:
         - Name: compute-resource-0
           Instances:
-            - InstanceType: {{ instance }}
+            {% for instance_type in flexible_instance_types %}
+            - InstanceType: {{ instance_type }}
+            {% endfor %}
           MinCount: 1
           MaxCount: 1
       Networking:
@@ -34,7 +36,9 @@ Scheduling:
       ComputeResources:
         - Name: compute-resource-0
           Instances:
-            - InstanceType: {{ instance }}
+            {% for instance_type in flexible_instance_types %}
+            - InstanceType: {{ instance_type }}
+            {% endfor %}
           MinCount: 1
           MaxCount: 1
       Networking:
@@ -49,4 +53,4 @@ SharedStorage:
       ImportPath: s3://{{ bucket_name }}
       ExportPath: s3://{{ bucket_name }}/export_dir
       DeploymentType: PERSISTENT_1
-      PerUnitStorageThroughput: 200
+      PerUnitStorageThroughput: 50

@@ -13,16 +13,13 @@
 import os
 import sys
 from glob import glob
+from importlib.metadata import version
 
 import argparse
 import boto3
-import pkg_resources
 from botocore.exceptions import ClientError
-
-
-def get_all_aws_regions(region):
-    ec2 = boto3.client("ec2", region_name=region)
-    return set(sorted(r.get("RegionName") for r in ec2.describe_regions().get("Regions")))
+from common import PARTITION_TO_MAIN_REGION, assume_sts_role, get_aws_regions
+from s3_uploader import add_common_arguments
 
 
 def get_template_extension(templates_dir, template_name):
@@ -62,18 +59,11 @@ def put_object_to_s3(s3_client, bucket, key, region, data, template_name):
                 print("Bucket is not present.")
             else:
                 raise e
-        pass
 
 
 def upload_to_s3(args, region, aws_credentials=None):
     if aws_credentials:
-        s3_client = boto3.resource(
-            "s3",
-            region_name=region,
-            aws_access_key_id=aws_credentials.get("AccessKeyId"),
-            aws_secret_access_key=aws_credentials.get("SecretAccessKey"),
-            aws_session_token=aws_credentials.get("SessionToken"),
-        )
+        s3_client = boto3.resource("s3", region_name=region, **aws_credentials)
     else:
         s3_client = boto3.resource("s3", region_name=region)
 
@@ -90,17 +80,11 @@ def upload_to_s3(args, region, aws_credentials=None):
         key = "{key_path}{name}-{version}{extension}".format(
             key_path=key_path, name=t, version=args.version, extension=template_ext
         )
-        data = open(template_name, "rb")
+
         for bucket in buckets:
             try:
                 if aws_credentials:
-                    s3 = boto3.client(
-                        "s3",
-                        region_name=region,
-                        aws_access_key_id=aws_credentials.get("AccessKeyId"),
-                        aws_secret_access_key=aws_credentials.get("SecretAccessKey"),
-                        aws_session_token=aws_credentials.get("SessionToken"),
-                    )
+                    s3 = boto3.client("s3", region_name=region, **aws_credentials)
                 else:
                     s3 = boto3.client("s3", region_name=region)
 
@@ -109,10 +93,10 @@ def upload_to_s3(args, region, aws_credentials=None):
                 exist = True
             except ClientError:
                 exist = False
-                pass
 
             if (exist and args.override and not args.dryrun) or (not exist and not args.dryrun):
-                put_object_to_s3(s3_client, bucket, key, region, data, template_name)
+                with open(template_name, "rb") as data:
+                    put_object_to_s3(s3_client, bucket, key, region, data, template_name)
             else:
                 print(
                     "Not uploading %s to bucket %s, object exists %s, override is %s, dryrun is %s"
@@ -127,63 +111,28 @@ def main(main_region, args):
 
         if main_region == region:
             for credential in credentials:
-                credential_region = credential[0]
-                credential_endpoint = credential[1]
-                credential_arn = credential[2]
-                credential_external_id = credential[3]
+                credential_region, credential_endpoint, credential_arn, credential_external_id = credential
 
                 try:
-                    sts = boto3.client("sts", region_name=main_region, endpoint_url=credential_endpoint)
-                    assumed_role_object = sts.assume_role(
-                        RoleArn=credential_arn,
-                        ExternalId=credential_external_id,
-                        RoleSessionName=credential_region + "upload_cfn_templates_sts_session",
+                    aws_credentials = assume_sts_role(
+                        credential_endpoint,
+                        credential_arn,
+                        credential_external_id,
+                        main_region,
+                        credential_region + "upload_cfn_templates_sts_session",
                     )
-                    aws_credentials = assumed_role_object["Credentials"]
-
                     upload_to_s3(args, credential_region, aws_credentials)
 
                 except ClientError:
                     print("Warning: non authorized in region '{0}', skipping".format(credential_region))
-                    pass
 
 
 if __name__ == "__main__":
     # parse inputs
     parser = argparse.ArgumentParser(description="Upload extra templates under /cloudformation")
-    parser.add_argument("--partition", type=str, help="commercial | china | govcloud", required=True)
-    parser.add_argument(
-        "--regions",
-        type=str,
-        help='Valid Regions, can include "all", or comma separated list of regions',
-        required=True,
-    )
-    parser.add_argument(
-        "--credential",
-        type=str,
-        action="append",
-        help="STS credential endpoint, in the format <region>,<endpoint>,<ARN>,<externalId>."
-        "Could be specified multiple times",
-        required=False,
-    )
+    add_common_arguments(parser)
     parser.add_argument(
         "--templates", type=str, help="Template filenames, leave out '.cfn.json', comma separated list", required=True
-    )
-    parser.add_argument(
-        "--bucket",
-        type=str,
-        help="Buckets to upload to, defaults to [region]-aws-parallelcluster, comma separated list",
-        required=False,
-    )
-    parser.add_argument(
-        "--dryrun", action="store_true", help="Doesn't push anything to S3, just outputs", default=False, required=False
-    )
-    parser.add_argument(
-        "--override",
-        action="store_true",
-        help="If override is false, the file will not be pushed if it already exists in the bucket",
-        default=False,
-        required=False,
     )
     parser.add_argument(
         "--createifnobucket",
@@ -191,9 +140,6 @@ if __name__ == "__main__":
         help="Create S3 bucket if it does not exist",
         default=False,
         required=False,
-    )
-    parser.add_argument(
-        "--unsupportedregions", type=str, help="Unsupported regions, comma separated", default="", required=False
     )
     parser.add_argument(
         "--version",
@@ -204,13 +150,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.partition == "commercial":
-        main_region = "us-east-1"
-    elif args.partition == "govcloud":
-        main_region = "us-gov-west-1"
-    elif args.partition == "china":
-        main_region = "cn-north-1"
-    else:
+    main_region = PARTITION_TO_MAIN_REGION.get(args.partition)
+    if main_region is None:
         print("Unsupported partition %s" % args.partition)
         sys.exit(1)
 
@@ -223,10 +164,10 @@ if __name__ == "__main__":
         ]
 
     if not args.version:
-        args.version = pkg_resources.get_distribution("aws-parallelcluster").version
+        args.version = version("aws-parallelcluster")
 
     if args.regions == "all":
-        args.regions = get_all_aws_regions(main_region)
+        args.regions = get_aws_regions(args.partition)
     else:
         args.regions = args.regions.split(",")
     args.regions = set(args.regions) - set(args.unsupportedregions.split(","))

@@ -12,11 +12,10 @@ import re
 
 import pytest
 from assertpy import assert_that
+from marshmallow.validate import ValidationError
 
 from pcluster.schemas.cluster_schema import (
-    AwsBatchComputeResourceSchema,
-    AwsBatchQueueNetworkingSchema,
-    AwsBatchQueueSchema,
+    BaseIamSchema,
     CloudWatchLogsSchema,
     ClusterSchema,
     DcvSchema,
@@ -27,18 +26,21 @@ from pcluster.schemas.cluster_schema import (
     HeadNodeEphemeralVolumeSchema,
     HeadNodeNetworkingSchema,
     HeadNodeRootVolumeSchema,
-    IamSchema,
+    HeadNodeSshSchema,
     ImageSchema,
+    LoginNodesIamSchema,
+    LoginNodesImageSchema,
+    LoginNodesPoolSchema,
+    LoginNodesSshSchema,
     QueueEphemeralVolumeSchema,
     QueueNetworkingSchema,
     QueueRootVolumeSchema,
     RaidSchema,
-    SchedulerPluginQueueNetworkingSchema,
     SharedStorageSchema,
     SlurmComputeResourceSchema,
     SlurmQueueNetworkingSchema,
     SlurmQueueSchema,
-    SshSchema,
+    SlurmSettingsSchema,
 )
 
 
@@ -87,15 +89,15 @@ def test_root_volume_size_validator(size, expected_message):
     "capacity_type, expected_message",
     [
         ("ONDEMAND", None),
-        ("", "Must be one of: ONDEMAND, SPOT"),
-        ("wrong_value", "Must be one of: ONDEMAND, SPOT"),
-        ("NONE", "Must be one of: ONDEMAND, SPOT"),
+        ("CAPACITY_BLOCK", None),
+        ("", "Must be one of: CAPACITY_BLOCK, ONDEMAND, SPOT"),
+        ("wrong_value", "Must be one of: CAPACITY_BLOCK, ONDEMAND, SPOT"),
+        ("NONE", "Must be one of: CAPACITY_BLOCK, ONDEMAND, SPOT"),
         ("SPOT", None),
     ],
 )
 def test_compute_type_validator(capacity_type, expected_message):
     _validate_and_assert_error(SlurmQueueSchema(), {"CapacityType": capacity_type}, expected_message)
-    _validate_and_assert_error(AwsBatchQueueSchema(), {"CapacityType": capacity_type}, expected_message)
 
 
 @pytest.mark.parametrize(
@@ -121,47 +123,9 @@ def test_compute_type_validator(capacity_type, expected_message):
     ],
 )
 def test_slurm_compute_resource_validator(section_dict, expected_message):
+    # Add required field
+    section_dict.update({"InstanceType": "t3.micro"})
     _validate_and_assert_error(SlurmComputeResourceSchema(), section_dict, expected_message)
-
-
-@pytest.mark.parametrize(
-    "section_dict, expected_message",
-    [
-        ({"MinvCpus": -1}, "Must be greater than or equal"),
-        ({"MinvCpus": 0}, None),
-        ({"DesiredvCpus": -1}, "Must be greater than or equal"),
-        ({"DesiredvCpus": 0}, None),
-        ({"MaxvCpus": 0}, "Must be greater than or equal"),
-        ({"MaxvCpus": 1}, None),
-        ({"SpotBidPercentage": ""}, "Not a valid integer"),
-        ({"SpotBidPercentage": "wrong_value"}, "Not a valid integer"),
-        ({"SpotBidPercentage": 1}, None),
-        ({"SpotBidPercentage": 22}, None),
-        ({"SpotBidPercentage": 101}, "Must be.*less than or equal to 100"),
-    ],
-)
-def test_awsbatch_compute_resource_validator(section_dict, expected_message):
-    _validate_and_assert_error(AwsBatchComputeResourceSchema(), section_dict, expected_message)
-
-
-@pytest.mark.parametrize(
-    "section_dict, expected_message",
-    [
-        ({"ComputeResources": []}, "Length must be 1"),
-        ({"ComputeResources": [{"Name": "compute_resource1", "InstanceTypes": ["c5.xlarge"]}]}, None),
-        (
-            {
-                "ComputeResources": [
-                    {"Name": "compute_resource1", "InstanceTypes": ["c4.xlarge", "c5.xlarge"]},
-                    {"Name": "compute_resource1", "InstanceTypes": ["c4.xlarge"]},
-                ]
-            },
-            "Length must be 1",
-        ),
-    ],
-)
-def test_awsbatch_queue_validator(section_dict, expected_message):
-    _validate_and_assert_error(AwsBatchQueueSchema(), section_dict, expected_message)
 
 
 @pytest.mark.parametrize(
@@ -184,6 +148,7 @@ def test_custom_ami_validator(custom_ami, expected_message):
     "retention_in_days, expected_message",
     [
         # right value
+        (0, None),
         (1, None),
         (14, None),
         (180, None),
@@ -224,28 +189,48 @@ def test_dcv_validator(section_dict, expected_message):
 @pytest.mark.parametrize(
     "section_dict, expected_message",
     [
-        ({"AllowedIps": "wrong_value"}, "does not match expected patter"),
-        ({"AllowedIps": ""}, "does not match expected pattern"),
-        ({"AllowedIps": "wrong_value"}, "does not match expected pattern"),
-        ({"AllowedIps": "111.111.111.111"}, "does not match expected pattern"),
-        ({"AllowedIps": "111.111.111.111/222"}, "does not match expected pattern"),
-        ({"AllowedIps": "NONE"}, "does not match expected pattern"),
+        (
+            {"AllowedIps": "wrong_value"},
+            "Invalid value: 'wrong_value' is neither a valid CIDR nor a valid prefix-list.",
+        ),
+        ({"AllowedIps": ""}, "Invalid value: '' is neither a valid CIDR nor a valid prefix-list."),
+        (
+            {"AllowedIps": "wrong_value"},
+            "Invalid value: 'wrong_value' is neither a valid CIDR nor a valid prefix-list.",
+        ),
+        (
+            {"AllowedIps": "111.111.111.111"},
+            "Invalid value: '111.111.111.111' is neither a valid CIDR nor a valid prefix-list.",
+        ),
+        (
+            {"AllowedIps": "111.111.111.111/222"},
+            "Invalid value: '111.111.111.111/222' is neither a valid CIDR nor a valid prefix-list.",
+        ),
+        ({"AllowedIps": "NONE"}, "Invalid value: 'NONE' is neither a valid CIDR nor a valid prefix-list."),
         ({"AllowedIps": "0.0.0.0/0"}, None),
         ({"AllowedIps": "1.1.1.1/0"}, None),
         ({"AllowedIps": "1.1.1.1/8"}, None),
         ({"AllowedIps": "1.1.1.1/15"}, None),
         ({"AllowedIps": "1.1.1.1/32"}, None),
-        ({"AllowedIps": "1.1.1.1/33"}, "does not match expected pattern"),
+        ({"AllowedIps": "1.1.1.1/33"}, "Invalid value: '1.1.1.1/33' is neither a valid CIDR nor a valid prefix-list."),
         ({"AllowedIps": "11.11.11.11/32"}, None),
         ({"AllowedIps": "111.111.111.111/22"}, None),
         ({"AllowedIps": "255.255.255.255/32"}, None),
-        ({"AllowedIps": "255.255.255.256/32"}, "does not match expected pattern"),
+        ({"AllowedIps": "pl-123abcDEF"}, None),
+        (
+            {"AllowedIps": "prefix-list"},
+            "Invalid value: 'prefix-list' is neither a valid CIDR nor a valid prefix-list.",
+        ),
+        (
+            {"AllowedIps": "255.255.255.256/32"},
+            "Invalid value: '255.255.255.256/32' is neither a valid CIDR nor a valid prefix-list.",
+        ),
     ],
 )
 def test_cidr_validator(section_dict, expected_message):
     """Verify that cidr behaves as expected when parsed in a config file."""
     _validate_and_assert_error(DcvSchema(), section_dict, expected_message)
-    _validate_and_assert_error(SshSchema(), section_dict, expected_message)
+    _validate_and_assert_error(HeadNodeSshSchema(), section_dict, expected_message)
 
 
 @pytest.mark.parametrize(
@@ -472,7 +457,7 @@ def test_efs_throughput_mode_provisioned_throughput_validator(section_dict, expe
         ({"AutomaticBackupRetentionDays": ""}, "Not a valid integer"),
         ({"AutomaticBackupRetentionDays": 0}, None),
         ({"AutomaticBackupRetentionDays": 35}, None),
-        ({"AutomaticBackupRetentionDays": 36}, "Must be.*less than or equal to 35"),
+        ({"AutomaticBackupRetentionDays": 91}, "Must be.*less than or equal to 90"),
         ({"CopyTagsToBackups": ""}, "Not a valid boolean"),
         ({"CopyTagsToBackups": "NONE"}, "Not a valid boolean"),
         ({"CopyTagsToBackups": True}, None),
@@ -575,32 +560,14 @@ def test_subnet_id_validator_head_node(subnet_id, expected_message):
         (["NONE"], "does not match expected pattern"),
         (["subnet-12345678"], None),
         (["subnet-12345678901234567"], None),
-        (["subnet-1234", "subnet-5678"], "does not match expected pattern"),
-    ],
-)
-def test_subnet_id_validator_aws_batch(subnet_ids, expected_message):
-    """Verify that subnet ids behaves as expected when parsed in a config file."""
-    _validate_and_assert_error(AwsBatchQueueNetworkingSchema(), {"SubnetIds": subnet_ids}, expected_message)
-
-
-@pytest.mark.parametrize(
-    "subnet_ids, expected_message",
-    [
-        ([""], "does not match expected pattern"),
-        (["subnet-12345"], "does not match expected pattern"),
-        (["subnet-123456789"], "does not match expected pattern"),
-        (["NONE"], "does not match expected pattern"),
-        (["subnet-12345678"], None),
-        (["subnet-12345678901234567"], None),
         (["subnet-123456789012345678"], "does not match expected pattern"),
         (["subnet-1234", "subnet-5678"], "does not match expected pattern"),
         (["subnet-12345678", "subnet-87654321"], None),
     ],
 )
-def test_subnet_id_validator_slurm_and_scheduler_plugin(subnet_ids, expected_message):
+def test_subnet_id_validator_slurm(subnet_ids, expected_message):
     """Verify that subnet ids behaves as expected when parsed in a config file."""
     _validate_and_assert_error(SlurmQueueNetworkingSchema(), {"SubnetIds": subnet_ids}, expected_message)
-    _validate_and_assert_error(SchedulerPluginQueueNetworkingSchema(), {"SubnetIds": subnet_ids}, expected_message)
 
 
 @pytest.mark.parametrize(
@@ -647,7 +614,7 @@ def _validate_and_assert_error(schema, section_dict, expected_message, partial=T
 )
 def test_instance_role_validator(instance_role, expected_message):
     """Verify that instance role behaves as expected when parsed in a config file."""
-    _validate_and_assert_error(IamSchema(), {"InstanceRole": instance_role}, expected_message)
+    _validate_and_assert_error(BaseIamSchema(), {"InstanceRole": instance_role}, expected_message)
 
 
 @pytest.mark.parametrize(
@@ -659,3 +626,181 @@ def test_instance_role_validator(instance_role, expected_message):
 )
 def test_password_secret_arn_validator(password_secret_arn, expected_message):
     _validate_and_assert_error(DirectoryServiceSchema(), {"PasswordSecretArn": password_secret_arn}, expected_message)
+
+
+@pytest.mark.parametrize(
+    "custom_ami, expected_message",
+    [
+        ("ami-12345678", None),
+        ("ami-00000000000000017", None),
+        ("", "does not match expected pattern"),
+        ("random", "does not match expected pattern"),
+        ("ami-aaaaaaaa", None),
+        ("ami-AAAAAAAA", "does not match expected pattern"),
+        ("NONE", "does not match expected pattern"),
+        ("ami-xx", "does not match expected pattern"),
+    ],
+)
+def test_login_node_custom_ami_validator(custom_ami, expected_message):
+    _validate_and_assert_error(LoginNodesImageSchema(), {"CustomAmi": custom_ami}, expected_message)
+
+
+@pytest.mark.parametrize(
+    "count, expected_message",
+    [
+        (1, None),
+        (10, None),
+        (0, None),
+        (-5, "The count for LoginNodes Pool must be greater than or equal to 0."),
+    ],
+)
+def test_login_node_pool_count_validator(count, expected_message):
+    _validate_and_assert_error(
+        LoginNodesPoolSchema(),
+        {
+            "Name": "validname",
+            "InstanceType": "t3.micro",
+            "Networking": {"SubnetIds": ["subnet-01b4c1fa1de8a507f"]},
+            "Count": count,
+        },
+        expected_message,
+    )
+
+
+@pytest.mark.parametrize(
+    "instance_role, instance_profile, expected_message",
+    [
+        (
+            "arn:aws:iam::aws:role/LoginNodeRole",
+            "arn:aws:iam::aws:instance-profile/LoginNodeInstanceProfile",
+            "InstanceProfile, InstanceRole or AdditionalIamPolicies can not be configured together.",
+        ),
+        (
+            "arn:aws:iam::aws:role/LoginNodeRole",
+            None,
+            None,
+        ),
+        (
+            None,
+            "arn:aws:iam::aws:instance-profile/LoginNodeInstanceProfile",
+            None,
+        ),
+    ],
+)
+def test_iam_validator(instance_role, instance_profile, expected_message):
+    iam_dict = dict()
+    if instance_role:
+        iam_dict["InstanceRole"] = instance_role
+    if instance_profile:
+        iam_dict["InstanceProfile"] = instance_profile
+
+    if expected_message:
+        with pytest.raises(
+            ValidationError,
+            match=expected_message,
+        ):
+            LoginNodesIamSchema().load(iam_dict)
+    else:
+        iam = LoginNodesIamSchema().load(iam_dict)
+        assert_that(iam.instance_role).is_equal_to(instance_role)
+        assert_that(iam.instance_profile).is_equal_to(instance_profile)
+
+
+@pytest.mark.parametrize(
+    "section_dict, expected_message",
+    [
+        ({"ScaledownIdletime": -100}, "Must be greater than or equal"),
+        ({"ScaledownIdletime": -2}, "Must be greater than or equal"),
+        ({"ScaledownIdletime": -1}, None),
+        ({"ScaledownIdletime": 0}, None),
+        ({"ScaledownIdletime": 1}, None),
+        ({"ScaledownIdletime": 100}, None),
+    ],
+)
+def test_slurm_scaledown_idletime_validator(section_dict, expected_message):
+    _validate_and_assert_error(SlurmSettingsSchema(), section_dict, expected_message)
+
+
+@pytest.mark.parametrize(
+    "gracetime_period, expected_message",
+    [
+        (0, "The gracetime period for LoginNodes Pool must be an integer from 3 to 120."),
+        (1, "The gracetime period for LoginNodes Pool must be an integer from 3 to 120."),
+        (10, None),
+        (120, None),
+        (-5, "The gracetime period for LoginNodes Pool must be an integer from 3 to 120."),
+        (121, "The gracetime period for LoginNodes Pool must be an integer from 3 to 120."),
+    ],
+)
+def test_login_node_pool_gracetime_period_validator(gracetime_period, expected_message):
+    _validate_and_assert_error(
+        LoginNodesPoolSchema(),
+        {
+            "Name": "validname",
+            "InstanceType": "t3.micro",
+            "Networking": {"SubnetIds": ["subnet-01b4c1fa1de8a507f"]},
+            "Count": 1,
+            "GracetimePeriod": gracetime_period,
+        },
+        expected_message,
+    )
+
+
+@pytest.mark.parametrize(
+    "subnet_ids, expected_message",
+    [
+        ([], "Only one subnet can be associated with a login node pool."),
+        (["subnet-12345678"], None),
+        (["subnet-12345678", "subnet-23456789"], "Only one subnet can be associated with a login node pool"),
+        (
+            ["subnet-12345678", "subnet-12345678901234567", "subnet-23456789"],
+            "Only one subnet can be associated with a login node pool",
+        ),
+    ],
+)
+def test_login_node_pool_subnet_ids_validator(subnet_ids, expected_message):
+    _validate_and_assert_error(
+        LoginNodesPoolSchema(),
+        {
+            "Name": "validname",
+            "InstanceType": "t3.micro",
+            "Networking": {"SubnetIds": subnet_ids},
+            "Count": 1,
+        },
+        expected_message,
+    )
+
+
+@pytest.mark.parametrize(
+    "ssh_config, expected_message",
+    [
+        (
+            {"KeyName": "my-key"},
+            "Starting with ParallelCluster 3.15, the KeyName parameter is no longer supported for "
+            "Login Nodes. Remove from the configuration and try again.",
+        ),
+        (
+            {"KeyName": "my-key", "AllowedIps": "0.0.0.0/0"},
+            "Starting with ParallelCluster 3.15, the KeyName parameter "
+            "is no longer supported for Login Nodes. Remove from the "
+            "configuration and try again.",
+        ),
+        ({"AllowedIps": "0.0.0.0/0"}, None),
+        ({}, None),
+        # When there are other unknown fields, KeyName still gets the custom message
+        (
+            {"KeyName": "my-key", "OtherUnknown": "value"},
+            "Starting with ParallelCluster 3.15, the KeyName parameter "
+            "is no longer supported for Login Nodes. Remove from "
+            "the configuration and try again.",
+        ),
+        ({"OtherUnknown": "value"}, "Unknown field"),
+    ],
+)
+def test_login_nodes_ssh_key_name_removed(ssh_config, expected_message):
+    """Test that using the removed KeyName field in LoginNodes Ssh provides a helpful error message."""
+    _validate_and_assert_error(
+        LoginNodesSshSchema(),
+        ssh_config,
+        expected_message,
+    )

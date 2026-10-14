@@ -20,6 +20,7 @@ from pcluster.aws.aws_api import AWSApi
 from pcluster.aws.aws_resources import InstanceTypeInfo
 from pcluster.aws.common import AWSClientError
 from pcluster.cli.commands.dcv_util import get_supported_dcv_os
+from pcluster.config.common import CapacityType, SharedStorageType, merge_tags
 from pcluster.constants import (
     CIDR_ALL_IPS,
     DELETE_POLICY,
@@ -31,18 +32,17 @@ from pcluster.constants import (
     PCLUSTER_NAME_REGEX,
     PCLUSTER_TAG_VALUE_REGEX,
     PCLUSTER_VERSION_TAG,
+    PRIVATE_OSES,
     RETAIN_POLICY,
-    SCHEDULERS_SUPPORTING_IMDS_SECURED,
     SUPPORTED_OSES,
-    SUPPORTED_REGIONS,
     SUPPORTED_SCHEDULERS,
 )
 from pcluster.launch_template_utils import _LaunchTemplateBuilder
 from pcluster.utils import (
     get_installed_version,
     get_supported_os_for_architecture,
-    get_supported_os_for_scheduler,
     remove_none_values,
+    retrieve_supported_regions,
 )
 from pcluster.validators.common import FailureLevel, Validator
 
@@ -51,7 +51,7 @@ NAME_MAX_LENGTH = 25
 SHARED_STORAGE_NAME_MAX_LENGTH = 30
 NAME_REGEX = r"^[a-z][a-z0-9\-]*$"
 
-EFA_UNSUPPORTED_ARCHITECTURES_OSES = {"x86_64": [], "arm64": ["centos7"]}
+EFA_UNSUPPORTED_ARCHITECTURES_OSES = {"x86_64": [], "arm64": []}
 
 EFS_MESSAGES = {
     "errors": {
@@ -87,7 +87,7 @@ class ClusterNameValidator(Validator):
     """Cluster name validator."""
 
     def _validate(self, name, scheduling):
-        if scheduling.scheduler == "slurm" and scheduling.settings.database is not None:
+        if scheduling.settings.database is not None or scheduling.settings.external_slurmdbd is not None:
             if not re.match(PCLUSTER_NAME_REGEX % (PCLUSTER_NAME_MAX_LENGTH_SLURM_ACCOUNTING - 1), name):
                 self._add_failure(
                     (
@@ -115,24 +115,25 @@ class RegionValidator(Validator):
     """Region validator."""
 
     def _validate(self, region):
-        if region not in SUPPORTED_REGIONS:
+        if region not in retrieve_supported_regions():
             self._add_failure(
                 f"Region '{region}' is not yet officially supported by ParallelCluster", FailureLevel.ERROR
             )
 
 
-class SchedulerOsValidator(Validator):
-    """
-    scheduler - os validator.
+class OsCustomAmiValidator(Validator):
+    """For some OSes we don't publish official AMIs, so CustomAmi parameter is required."""
 
-    Validate os and scheduler combination.
-    """
-
-    def _validate(self, os, scheduler):
-        supported_os = get_supported_os_for_scheduler(scheduler)
-        if os not in supported_os:
+    def _validate(self, os: str, custom_ami: str):
+        if not custom_ami and os in PRIVATE_OSES:
             self._add_failure(
-                f"{scheduler} scheduler supports the following operating systems: {supported_os}.", FailureLevel.ERROR
+                (
+                    f"ParallelCluster has no official AMI for {os}. "
+                    "Please build your own AMI using pcluster build-image command, "
+                    "as explained in the documentation: "
+                    "https://docs.aws.amazon.com/parallelcluster/latest/ug/building-custom-ami-v3.html"
+                ),
+                FailureLevel.ERROR,
             )
 
 
@@ -185,9 +186,19 @@ class ComputeResourceSizeValidator(Validator):
     Validate min count and max count combinations.
     """
 
-    def _validate(self, min_count, max_count):
+    def _validate(self, min_count: int, max_count: int, capacity_type: CapacityType):
         if max_count < min_count:
             self._add_failure("Max count must be greater than or equal to min count.", FailureLevel.ERROR)
+        if capacity_type == CapacityType.CAPACITY_BLOCK:
+            if max_count != min_count:
+                self._add_failure(
+                    "Max count must be set to the same value of min count when using Capacity Block reservation.",
+                    FailureLevel.ERROR,
+                )
+            if min_count == 0:
+                self._add_failure(
+                    "Min count must be a value > 0 when using Capacity Block reservation.", FailureLevel.ERROR
+                )
 
 
 class EfaOsArchitectureValidator(Validator):
@@ -235,19 +246,12 @@ class ArchitectureOsValidator(Validator):
     ARM AMIs are only available for a subset of the supported OSes.
     """
 
-    def _validate(self, os: str, architecture: str, custom_ami: str, ami_search_filters):
+    def _validate(self, os: str, architecture: str):
         allowed_oses = get_supported_os_for_architecture(architecture)
         if os not in allowed_oses:
             self._add_failure(
                 f"The architecture {architecture} is only supported "
                 f"for the following operating systems: {allowed_oses}.",
-                FailureLevel.ERROR,
-            )
-        if custom_ami is None and os == "centos7" and architecture == "arm64" and not ami_search_filters:
-            self._add_failure(
-                "The aarch64 CentOS 7 OS is not validated for the 6th generation aarch64 instances "
-                "(M6g, C6g, etc.). To proceed please provide a custom AMI, "
-                "for more info see: https://wiki.centos.org/Cloud/AWS#aarch64_notes",
                 FailureLevel.ERROR,
             )
 
@@ -337,18 +341,31 @@ class EfaPlacementGroupValidator(Validator):
     """Validate placement group if EFA is enabled."""
 
     def _validate(
-        self, efa_enabled: bool, placement_group_key: str, placement_group_disabled: bool, multi_az_enabled: bool
+        self,
+        efa_enabled: bool,
+        placement_group_key: str,
+        placement_group_disabled: bool,
+        multi_az_enabled: bool,
+        capacity_type: str,
+        queue_name: str,
     ):
+        # Capacity Blocks do not require the configuration of a Placement Group
+        if capacity_type == CapacityType.CAPACITY_BLOCK:
+            return
         # if multi_az is enabled suggestions about PlacementGroups will be suppressed
         if efa_enabled and placement_group_disabled and not multi_az_enabled:
             self._add_failure(
-                "You may see better performance using a placement group for the queue.", FailureLevel.WARNING
+                f"Placement group is disabled for queue '{queue_name}'. "
+                "This is expected when using a capacity reservation with its own placement group. "
+                "Otherwise, enabling a placement group may improve network performance.",
+                FailureLevel.WARNING,
             )
         elif efa_enabled and placement_group_key is None and not multi_az_enabled:
             self._add_failure(
-                "The placement group for EFA-enabled compute resources must be explicit. "
-                "You may see better performance using a placement group, but if you don't wish to use one please add "
-                "'Enabled: false' to the compute resource's configuration section.",
+                f"The placement group for EFA-enabled compute resources in queue '{queue_name}' must be explicit. "
+                "You may see better performance using a placement group, but if you don't wish to use one or "
+                "the compute resources in the queue use a capacity reservation with its own placement group, "
+                "please add 'Enabled: false' to the compute resource's configuration section.",
                 FailureLevel.ERROR,
             )
 
@@ -418,7 +435,9 @@ class EfaMultiAzValidator(Validator):
 # --------------- Storage validators --------------- #
 
 
-def _is_access_allowed(security_groups_ids, subnets, port, security_groups_by_nodes, protocol="tcp"):
+def _is_access_allowed(
+    security_groups_ids, subnets, port, security_groups_by_nodes, protocol="tcp", check_outbound=True
+):
     """
     Verify given list of security groups to check if they allow in and out access on the given port.
 
@@ -464,7 +483,9 @@ def _is_access_allowed(security_groups_ids, subnets, port, security_groups_by_no
     out_access = out_access or _are_ip_ranges_and_sg_accessible(
         security_groups_by_nodes, dst_ip_ranges, dst_security_groups, subnets
     )
-    return in_access and out_access
+    if check_outbound:
+        return in_access and out_access
+    return in_access
 
 
 def _are_ip_ranges_and_sg_accessible(security_groups_by_nodes, allowed_ip_ranges, allowed_security_groups, subnets):
@@ -486,15 +507,18 @@ def _populate_allowed_src_or_dst(rule, ip_ranges, allowed_security_groups):
     """
     if rule.get("PrefixListIds"):
         return True  # Always assume prefix list is properly set for code simplicity
-    elif rule.get("IpRanges"):
+    if rule.get("IpRanges"):
         ip_ranges.extend(rule.get("IpRanges"))
-        return False  # Ip Ranges have to be checked later. Return False because the rule allowance is not determined.
-    elif rule.get("UserIdGroupPairs"):
+        # Ip Ranges have to be checked later. Return False because the rule allowance is not determined.
+    if rule.get("Ipv4Ranges"):
+        # Currently the describe_security_groups API response syntax contains "IpRanges".
+        # This check is added for future compatibility if API changes to use "Ipv4Ranges"
+        ip_ranges.extend(rule.get("Ipv4Ranges"))
+    if rule.get("UserIdGroupPairs"):
         allowed_security_groups.update(
             {user_id_group_pair.get("GroupId") for user_id_group_pair in rule.get("UserIdGroupPairs")}
         )
         # Security groups have to be checked later. Return False because the rule allowance is not determined.
-        return False
     return False
 
 
@@ -610,31 +634,45 @@ class ExistingFsxNetworkingValidator(Validator):
 
                 for protocol, ports in FSX_PORTS[file_storage.file_storage_type].items():
                     missing_ports = self._get_missing_ports(
-                        security_groups_by_nodes, subnet_ids, network_interfaces, ports, protocol
+                        security_groups_by_nodes,
+                        subnet_ids,
+                        network_interfaces,
+                        ports,
+                        protocol,
+                        file_storage.file_storage_type,
                     )
 
                     if missing_ports:
+                        direction = "inbound and outbound"
+                        if file_storage.file_storage_type == "OPENZFS":
+                            direction = "inbound"
                         self._add_failure(
                             f"The current security group settings on file storage '{file_storage_id}' does not"
                             " satisfy mounting requirement. The file storage must be associated to a security group"
-                            f" that allows inbound and outbound {protocol.upper()} traffic through ports {ports}. "
+                            f" that allows {direction} {protocol.upper()} traffic through ports {ports}. "
                             f"Missing ports: {missing_ports}",
                             FailureLevel.ERROR,
                         )
 
-    def _get_missing_ports(self, security_groups_by_nodes, subnet_ids, network_interfaces, ports, protocol):
+    def _get_missing_ports(
+        self, security_groups_by_nodes, subnet_ids, network_interfaces, ports, protocol, storage_type
+    ):
         missing_ports = []
         for port in ports:
             fs_access = False
             for network_interface in network_interfaces:
                 # Get list of security group IDs
                 sg_ids = [sg.get("GroupId") for sg in network_interface.get("Groups")]
+                check_outbound = True
+                if storage_type == "OPENZFS":
+                    check_outbound = False
                 if _is_access_allowed(
                     sg_ids,
                     subnet_ids,
                     port=port,
                     security_groups_by_nodes=security_groups_by_nodes,
                     protocol=protocol,
+                    check_outbound=check_outbound,
                 ):
                     fs_access = True
                     break
@@ -892,12 +930,16 @@ class SharedStorageMountDirValidator(Validator):
             "/boot",
             "/dev",
             "/etc",
-            "/home",
             "/lib",
             "/lib64",
             "/media",
             "/mnt",
             "/opt",
+            "/opt/parallelcluster",
+            "/opt/parallelcluster/shared",
+            "/opt/parallelcluster/shared_login_nodes",
+            "/opt/slurm",
+            "/opt/intel",
             "/proc",
             "/root",
             "/run",
@@ -916,6 +958,24 @@ class SharedStorageMountDirValidator(Validator):
         if mount_dir in reserved_directories:
             self._add_failure(
                 f"Error: The shared storage mount directory {mount_dir} is reserved. Please use another directory",
+                FailureLevel.ERROR,
+            )
+
+
+class SharedFileCacheNotHomeValidator(Validator):
+    """
+    Shared FileCache Not Home Validator.
+
+    Validate if the provided name for the shared storage is not /home for FileCache
+    """
+
+    def _validate(self, mount_dir: str):
+        if mount_dir in ("/home", "home"):
+            self._add_failure(
+                (
+                    f"Error: FileCache cannot be used to mount the shared storage directory '{mount_dir}'.  Please "
+                    f"select a supported filesystem."
+                ),
                 FailureLevel.ERROR,
             )
 
@@ -953,7 +1013,7 @@ class DcvValidator(Validator):
             allowed_oses = get_supported_dcv_os(architecture)
             if os not in allowed_oses:
                 self._add_failure(
-                    f"NICE DCV can be used with one of the following operating systems "
+                    f"Amazon DCV can be used with one of the following operating systems "
                     f"when using {architecture} architecture: {allowed_oses}. "
                     "Please double check the os configuration.",
                     FailureLevel.ERROR,
@@ -962,7 +1022,7 @@ class DcvValidator(Validator):
             if re.search(r"(micro)|(nano)", instance_type):
                 self._add_failure(
                     "The packages required for desktop virtualization in the selected instance type '{0}' "
-                    "may cause instability of the instance. If you want to use NICE DCV it is recommended "
+                    "may cause instability of the instance. If you want to use Amazon DCV it is recommended "
                     "to use an instance type with at least 1.7 GB of memory.".format(instance_type),
                     FailureLevel.WARNING,
                 )
@@ -971,6 +1031,14 @@ class DcvValidator(Validator):
                 self._add_failure(
                     f"With this configuration you are opening DCV port {port} to the world (0.0.0.0/0). "
                     "It is recommended to restrict access.",
+                    FailureLevel.WARNING,
+                )
+
+            instance_info = AWSApi.instance().ec2.get_instance_type_info(instance_type)
+            if not instance_info.gpu_count():
+                self._add_failure(
+                    f"DCV is enabled but the instance type '{instance_type}' does not have a GPU. "
+                    "It is recommended to use DCV with a GPU-enabled instance type.",
                     FailureLevel.WARNING,
                 )
 
@@ -1078,16 +1146,14 @@ class _LaunchTemplateValidator(Validator):
         self._launch_template_builder = DictLaunchTemplateBuilder()
 
     @staticmethod
-    def _build_launch_network_interfaces(
-        network_interfaces_count, use_efa, security_group_ids, subnet, use_public_ips=False
-    ):
+    def _build_launch_network_interfaces(network_cards_list, use_efa, security_group_ids, subnet, use_public_ips=False):
         """Build the needed NetworkInterfaces to launch an instance."""
         network_interfaces = []
-        for network_interface_index in range(network_interfaces_count):
+        for network_card in network_cards_list:
             network_interfaces.append(
                 {
                     "DeviceIndex": 0,
-                    "NetworkCardIndex": network_interface_index,
+                    "NetworkCardIndex": network_card.network_card_index(),
                     "InterfaceType": "efa" if use_efa else "interface",
                     "Groups": security_group_ids,
                     "SubnetId": subnet,
@@ -1095,7 +1161,7 @@ class _LaunchTemplateValidator(Validator):
             )
 
         # If instance types has multiple Network Interfaces we also check for
-        if network_interfaces_count > 1 and use_public_ips:
+        if len(network_cards_list) > 1 and use_public_ips:
             network_interfaces[0]["AssociatePublicIpAddress"] = True
         return network_interfaces
 
@@ -1168,7 +1234,7 @@ class _LaunchTemplateValidator(Validator):
 class HeadNodeLaunchTemplateValidator(_LaunchTemplateValidator):
     """Try to launch the requested instance (in dry-run mode) to verify configuration parameters."""
 
-    def _validate(self, head_node, os, ami_id, tags, imds_support):
+    def _validate(self, head_node, root_volume_device_name, ami_id, tags, imds_support):
         try:
             head_node_security_groups = []
             if head_node.networking.security_groups:
@@ -1177,7 +1243,7 @@ class HeadNodeLaunchTemplateValidator(_LaunchTemplateValidator):
                 head_node_security_groups.extend(head_node.networking.additional_security_groups)
 
             head_node_network_interfaces = self._build_launch_network_interfaces(
-                network_interfaces_count=head_node.max_network_interface_count,
+                network_cards_list=head_node.network_cards_list,
                 use_efa=False,  # EFA is not supported on head node
                 security_group_ids=head_node_security_groups,
                 subnet=head_node.networking.subnet_id,
@@ -1195,7 +1261,9 @@ class HeadNodeLaunchTemplateValidator(_LaunchTemplateValidator):
                 TagSpecifications=self._generate_tag_specifications(tags),
                 KeyName=head_node.ssh.key_name,
                 BlockDeviceMappings=(
-                    self._launch_template_builder.get_block_device_mappings(head_node.local_storage.root_volume, os)
+                    self._launch_template_builder.get_block_device_mappings(
+                        head_node.local_storage.root_volume, root_volume_device_name
+                    )
                 ),
                 MetadataOptions={
                     "HttpTokens": "required" if imds_support == "v2.0" else "optional",
@@ -1207,30 +1275,64 @@ class HeadNodeLaunchTemplateValidator(_LaunchTemplateValidator):
             )
 
 
-class HeadNodeImdsValidator(Validator):
+class HeadNodeMemorySizeValidator(Validator):
     """
-    Head Node IMDS configuration validator.
+    Head Node Memory Size Validator.
 
-    Verify if the Head Node IMDs configuration is compatible with other configurations.
+    Verify if the Head Node has enough memory to manage compute nodes.
     """
 
-    def _validate(self, imds_secured: bool, scheduler: str):
-        if scheduler is None:
-            self._add_failure("Cannot validate IMDS configuration if scheduler is not set.", FailureLevel.ERROR)
-        elif imds_secured is None:
-            self._add_failure("Cannot validate IMDS configuration if IMDS Secured is not set.", FailureLevel.ERROR)
-        elif imds_secured and scheduler not in SCHEDULERS_SUPPORTING_IMDS_SECURED:
-            # TODO move validation for Imds parameter in the schema
+    def _validate(self, head_node_instance_type: str, total_max_compute_nodes: int):
+        head_node_memory = (
+            AWSApi.instance().ec2.get_instance_type_info(head_node_instance_type).ec2memory_size_in_mib() / 1024
+        )
+        # Assume OS takes up 0.6GB memory. Only check upto 16GB memory to prevent usage of small instance types.
+        required_memory = min(total_max_compute_nodes / 25 + 0.6, 16)
+        if head_node_memory < required_memory:
             self._add_failure(
-                f"IMDS Secured cannot be enabled when using scheduler {scheduler}. Please, disable IMDS Secured.",
+                f"Head node instance type {head_node_instance_type} has {head_node_memory} GB of memory. "
+                f"Please choose a head node instance type with at least {required_memory} GB of memory"
+                f" to manage {total_max_compute_nodes} compute nodes.",
                 FailureLevel.ERROR,
+            )
+
+
+class SharedStorageEfsSettingsValidator(Validator):
+    """
+    HeadNode SharedStorageEfsSettings Validator.
+
+    Verify HeadNode SharedStorageEfsSettings can only be used with Efs SharedStorageType.
+    """
+
+    def _validate(self, shared_storage_type: str, shared_storage_efs_settings):
+        if shared_storage_efs_settings and shared_storage_type.lower() != SharedStorageType.EFS.value:
+            self._add_failure(
+                "SharedStorageEfsSettings is specified "
+                f"but the SharedStorageType is set to {shared_storage_type}. "
+                "SharedStorageEfsSettings can only be used when "
+                f"SharedStorageType is {SharedStorageType.EFS.value.capitalize()}.",
+                FailureLevel.ERROR,
+            )
+
+
+class SharedEbsPerformanceBottleNeckValidator(Validator):
+    """Warn potential performance bottleneck of using Shared EBS."""
+
+    def _validate(self, total_max_compute_nodes: int):
+        if total_max_compute_nodes > 100:
+            self._add_failure(
+                "EBS shared storage is mounted on the head node and shared to the compute nodes. "
+                "Therefore, the head node network bandwidth is a network performance bottle neck "
+                "if the compute nodes rely on this shared storage. "
+                "Please use FSx and EFS for better performance.",
+                FailureLevel.WARNING,
             )
 
 
 class ComputeResourceLaunchTemplateValidator(_LaunchTemplateValidator):
     """Try to launch the requested instances (in dry-run mode) to verify configuration parameters."""
 
-    def _validate(self, queue, os, ami_id, tags, imds_support):
+    def _validate(self, queue, root_volume_device_name, ami_id, tags, imds_support):
         try:
             # Retrieve network parameters
             queue_subnet_id = queue.networking.subnet_ids[0]
@@ -1244,7 +1346,7 @@ class ComputeResourceLaunchTemplateValidator(_LaunchTemplateValidator):
             # Resources with multiple NICs are preferred among others.
             # Temporarily limiting dryrun tests to 1 per queue to save boto3 calls.
             dry_run_compute_resource = next(
-                (compute_res for compute_res in queue.compute_resources if compute_res.max_network_interface_count > 1),
+                (compute_res for compute_res in queue.compute_resources if compute_res.max_network_cards > 1),
                 queue.compute_resources[0],
             )
             compute_resource_placement_group = (
@@ -1252,17 +1354,20 @@ class ComputeResourceLaunchTemplateValidator(_LaunchTemplateValidator):
             )
 
             placement_group_name = compute_resource_placement_group.assignment
+            # Merge cluster, queue, and compute resource tags to mirror the tags applied at launch time,
+            # so the dry run reflects the tags an actual RunInstances would carry.
+            merged_tags = merge_tags(tags, queue.get_tags(), dry_run_compute_resource.get_tags())
             # For SlurmFlexibleComputeResource test only the first InstanceType through a RunInstances
             self._test_compute_resource(
                 queue=queue,
-                os=os,
+                root_volume_device_name=root_volume_device_name,
                 compute_resource=dry_run_compute_resource,
                 use_public_ips=bool(queue.networking.assign_public_ip),
                 ami_id=ami_id,
                 subnet_id=queue_subnet_id,
                 security_groups_ids=queue_security_groups,
                 placement_group={"GroupName": placement_group_name} if placement_group_name else {},
-                tags=tags,
+                tags=merged_tags,
                 imds_support=imds_support,
             )
         except Exception as e:
@@ -1273,7 +1378,7 @@ class ComputeResourceLaunchTemplateValidator(_LaunchTemplateValidator):
     def _test_compute_resource(
         self,
         queue,
-        os,
+        root_volume_device_name,
         compute_resource,
         use_public_ips,
         ami_id,
@@ -1285,11 +1390,11 @@ class ComputeResourceLaunchTemplateValidator(_LaunchTemplateValidator):
     ):
         """Test Compute Resource Instance Configuration."""
         network_interfaces = self._build_launch_network_interfaces(
-            compute_resource.max_network_interface_count,
-            compute_resource.efa.enabled,
-            security_groups_ids,
-            subnet_id,
-            use_public_ips,
+            network_cards_list=compute_resource.network_cards_list,
+            use_efa=compute_resource.efa.enabled,
+            security_group_ids=security_groups_ids,
+            subnet=subnet_id,
+            use_public_ips=use_public_ips,
         )
         self._ec2_run_instance(
             availability_zone=AWSApi.instance().ec2.get_subnet_avail_zone(subnet_id),
@@ -1306,7 +1411,7 @@ class ComputeResourceLaunchTemplateValidator(_LaunchTemplateValidator):
                 queue, compute_resource
             ),
             BlockDeviceMappings=self._launch_template_builder.get_block_device_mappings(
-                queue.compute_settings.local_storage.root_volume, os
+                queue.compute_settings.local_storage.root_volume, root_volume_device_name
             ),
             MetadataOptions={
                 "HttpTokens": "required" if imds_support == "v2.0" else "optional",
@@ -1393,7 +1498,7 @@ class DictLaunchTemplateBuilder(_LaunchTemplateBuilder):
     def _block_device_mapping_for_virt(self, device_name, virtual_name):
         return {"DeviceName": device_name, "VirtualName": virtual_name}
 
-    def _instance_market_option(self, market_type, spot_instance_type, instance_interruption_behavior, max_price):
+    def _spot_instance_market_option(self, market_type, spot_instance_type, instance_interruption_behavior, max_price):
         return {
             "MarketType": market_type,
             "SpotOptions": remove_none_values(
@@ -1404,6 +1509,9 @@ class DictLaunchTemplateBuilder(_LaunchTemplateBuilder):
                 }
             ),
         }
+
+    def _capacity_block_instance_market_option(self, market_type):
+        return {"MarketType": market_type}
 
     def _capacity_reservation(self, cr_target):
         return {
@@ -1433,14 +1541,73 @@ class RootVolumeEncryptionConsistencyValidator(Validator):
 
 
 class MultiNetworkInterfacesInstancesValidator(Validator):
-    """Verify that queues with multi nic compute resources don't auto-assign public IPs or contain subnets that do."""
+    """Verify that queues launching multiple network interfaces don't auto-assign public IPs or use subnets that do."""
 
-    def _validate(self, queues):
+    # Shared statement of the underlying AWS limitation.
+    _PUBLIC_IP_LIMITATION = (
+        "AWS can't auto-assign a public IP to instances launched with more than one network interface."
+    )
+
+    @staticmethod
+    def _multiple_network_interfaces_reason(compute_resource, efa_interface_type):
+        """Return why the compute resource is launched with more than one network interface, or None.
+
+        Two cases produce more than one network interface, which must be kept in sync with
+        templates/queues_stack.py::add_network_interfaces:
+        - "multi_card": multi-network-card instances (e.g. p4d, hpc6id) attach a network interface per network card.
+        - "efa": single-network-card instances with EFA enabled (e.g. hpc6a, c5n), for which ParallelCluster attaches
+          a primary interface plus a dedicated efa-only interface (unless the EfaInterfaceType: efa opt-out is set or
+          the primary network card cannot hold 2 network interfaces).
+        """
+        if compute_resource.max_network_cards > 1:
+            return "multi_card"
+
+        efa_enabled = compute_resource.efa and compute_resource.efa.enabled
+        use_legacy_efa = efa_interface_type == "efa"
+        nci0_supports_efa = compute_resource.max_efa_interfaces == compute_resource.max_network_cards
+        nci0_max_enis = (
+            compute_resource.network_cards_list[0].maximum_network_interfaces()
+            if compute_resource.network_cards_list
+            else 1
+        )
+        if efa_enabled and not use_legacy_efa and nci0_supports_efa and nci0_max_enis >= 2:
+            return "efa"
+        return None
+
+    def _reason_clause(self, queue, efa_interface_type):
+        """Return a queue-level clause explaining why the queue's instances launch multiple network interfaces.
+
+        A queue may contain both kinds of compute resources, so include every applicable reason along with the
+        instance types responsible for it.
+        """
+        instance_types_by_reason = {"multi_card": [], "efa": []}
+        for compute_resource in queue.compute_resources:
+            reason = self._multiple_network_interfaces_reason(compute_resource, efa_interface_type)
+            if reason:
+                instance_types_by_reason[reason].extend(compute_resource.instance_types)
+
+        clauses = []
+        if instance_types_by_reason["multi_card"]:
+            # Instance types with multiple network cards are launched with one network interface per card.
+            types = ", ".join(sorted(set(instance_types_by_reason["multi_card"])))
+            clauses.append(f"contains the instance types {types} with multiple network interfaces")
+        if instance_types_by_reason["efa"]:
+            # Single-network-card instances launched with a primary interface plus an efa-only interface (EFA enabled).
+            types = ", ".join(sorted(set(instance_types_by_reason["efa"])))
+            clauses.append(
+                f"has EFA enabled on the single-network-card instance types {types}, so its compute nodes are "
+                f"launched with multiple network interfaces (a primary interface plus a dedicated efa-only interface)"
+            )
+        return " and ".join(clauses)
+
+    def _validate(self, queues, efa_interface_type=None):
         multi_nic_queues = [
             queue
             for queue in queues
-            for compute_resource in queue.compute_resources
-            if compute_resource.max_network_interface_count > 1
+            if any(
+                self._multiple_network_interfaces_reason(compute_resource, efa_interface_type)
+                for compute_resource in queue.compute_resources
+            )
         ]
 
         all_subnets_with_public_ips = {
@@ -1452,11 +1619,12 @@ class MultiNetworkInterfacesInstancesValidator(Validator):
         }
 
         for queue in multi_nic_queues:
+            reason_clause = self._reason_clause(queue, efa_interface_type)
             if queue.networking.assign_public_ip:
                 self._add_failure(
-                    f"The queue {queue.name} contains an instance type with multiple network interfaces however the "
-                    f"AssignPublicIp value is set to true. AWS public IPs can only be assigned to instances launched "
-                    f"with a single network interface.",
+                    f"The queue {queue.name} {reason_clause}, but AssignPublicIp is set to true. "
+                    f"{self._PUBLIC_IP_LIMITATION} Set AssignPublicIp to false and use a private subnet with a NAT "
+                    f"gateway to provide internet access to the compute nodes.",
                     FailureLevel.ERROR,
                 )
 
@@ -1465,8 +1633,8 @@ class MultiNetworkInterfacesInstancesValidator(Validator):
             )
             if queue_subnets_with_public_ips:
                 self._add_failure(
-                    f"The queue {queue.name} contains an instance type with multiple network interfaces however the "
-                    f"subnets {queue_subnets_with_public_ips} is configured to automatically assign public IPs. AWS "
-                    f"public IPs can only be assigned to instances launched with a single network interface.",
+                    f"The queue {queue.name} {reason_clause}, but the subnets {queue_subnets_with_public_ips} "
+                    f"auto-assign public IPs. {self._PUBLIC_IP_LIMITATION} Use a private subnet with a NAT gateway to "
+                    f"provide internet access to the compute nodes.",
                     FailureLevel.ERROR,
                 )

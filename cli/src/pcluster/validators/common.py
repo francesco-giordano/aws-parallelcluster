@@ -11,12 +11,16 @@
 #
 # This module contains all the classes representing the Resources objects.
 # These objects are obtained from the configuration file through a conversion based on the Schema classes.
-#
+# pylint: disable=protected-access
+
 import asyncio
 import functools
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import List
+
+from pcluster.aws.common import AWSClientError
+from pcluster.utils import event_loop
 
 ASYNC_TIMED_VALIDATORS_DEFAULT_TIMEOUT_SEC = 10
 
@@ -81,7 +85,8 @@ class AsyncValidator(Validator):
         super().__init__()
 
     def _validate(self, *arg, **kwargs):
-        asyncio.get_event_loop().run_until_complete(self._validate_async(*arg, **kwargs))
+        with event_loop() as loop:
+            loop.run_until_complete(self._validate_async(*arg, **kwargs))
         return self._failures
 
     async def execute_async(self, *arg, **kwargs) -> List[ValidationResult]:
@@ -133,7 +138,8 @@ def get_async_timed_validator_type_for(validator_type: type) -> AsyncValidator:
         schema_class_type = type(class_name, class_bases, class_dict)
         globals()[class_name] = schema_class_type
     else:
-        schema_class_type = globals()[class_name]
+        # TODO: Fix semgrep finding in line below. https://sg.run/jNzn
+        schema_class_type = globals()[class_name]  # nosem
     return schema_class_type
 
 
@@ -143,3 +149,33 @@ class ValidatorContext:
     def __init__(self, head_node_instance_id: str = None, during_update: bool = None):
         self.head_node_instance_id = head_node_instance_id
         self.during_update = during_update
+
+
+def get_arn_components(arn: str):
+    return arn.split(":")
+
+
+def get_arn_service_and_resource(arn: str):
+    arn_components = get_arn_components(arn)
+    service = arn_components[2]
+    resource = arn_components[5]
+    return service, resource
+
+
+#  TODO: Search for a better place for this function.
+#   Maybe we could create an abstract class with abstract methods, of which this could be an implementation.
+def handle_arn_aws_client_error(e: AWSClientError, arn: str, validator_instance):
+    if e.error_code in ("ResourceNotFoundExceptionSecrets", "ParameterNotFound"):
+        validator_instance._add_failure(f"The secret {arn} does not exist.", FailureLevel.ERROR)
+    elif e.error_code == "AccessDeniedException":
+        validator_instance._add_failure(
+            f"Cannot validate secret {arn} due to lack of permissions. "
+            "Please refer to ParallelCluster official documentation for more information.",
+            FailureLevel.WARNING,
+        )
+    else:
+        validator_instance._add_failure(
+            f"Cannot validate secret {arn}. "
+            "Please refer to ParallelCluster official documentation for more information.",
+            FailureLevel.WARNING,
+        )

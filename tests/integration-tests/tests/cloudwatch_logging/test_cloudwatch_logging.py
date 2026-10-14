@@ -32,7 +32,9 @@ DEFAULT_RETENTION_DAYS = 180
 NODE_CONFIG_PATH = "/etc/chef/dna.json"
 HEAD_NODE_ROLE_NAME = "HeadNode"
 COMPUTE_NODE_ROLE_NAME = "ComputeFleet"
-NODE_ROLE_NAMES = {HEAD_NODE_ROLE_NAME, COMPUTE_NODE_ROLE_NAME}
+LOGIN_NODE_ROLE_NAME = "LoginNode"
+EXTERNAL_SLURM_DBD_ROLE_NAME = "ExternalSlurmDbd"
+NODE_ROLE_NAMES = {HEAD_NODE_ROLE_NAME, COMPUTE_NODE_ROLE_NAME, LOGIN_NODE_ROLE_NAME, EXTERNAL_SLURM_DBD_ROLE_NAME}
 
 
 def _get_log_group_name_for_cluster(cluster_name):
@@ -101,17 +103,34 @@ class CloudWatchLoggingClusterState:
         self.scheduler_commands = get_scheduler_commands(
             scheduler=self.scheduler, remote_command_executor=self.remote_command_executor
         )
-        self._relevant_logs = {HEAD_NODE_ROLE_NAME: [], COMPUTE_NODE_ROLE_NAME: []}
-        self._cluster_log_state = {HEAD_NODE_ROLE_NAME: {}, COMPUTE_NODE_ROLE_NAME: {}}
+        self._relevant_logs = {
+            HEAD_NODE_ROLE_NAME: [],
+            COMPUTE_NODE_ROLE_NAME: [],
+            LOGIN_NODE_ROLE_NAME: [],
+            EXTERNAL_SLURM_DBD_ROLE_NAME: [],
+        }
+        self._cluster_log_state = {
+            HEAD_NODE_ROLE_NAME: {},
+            COMPUTE_NODE_ROLE_NAME: {},
+            LOGIN_NODE_ROLE_NAME: {},
+            EXTERNAL_SLURM_DBD_ROLE_NAME: [],
+        }
         self._set_cluster_log_state()
 
     @property
     def compute_nodes_count(self):
         """Return the number of compute nodes in the cluster."""
-        if self.scheduler == "awsbatch":
-            return 0  # batch "computes" use a different log group
-        else:
-            return self.scheduler_commands.compute_nodes_count()
+        return self.scheduler_commands.compute_nodes_count()
+
+    @property
+    def login_nodes(self):
+        """Return result of describe-cluster-instances for login nodes"""
+        return self.cluster.describe_login_nodes()
+
+    @property
+    def login_nodes_count(self):
+        """Return the number of login nodes in the cluster."""
+        return len(self.login_nodes)
 
     @property
     def is_feature_specific(self):
@@ -128,7 +147,14 @@ class CloudWatchLoggingClusterState:
                 for hostname, host_dict in self._cluster_log_state.get(COMPUTE_NODE_ROLE_NAME).items()
             ]
         )
-        assert_that(states).is_length(self.compute_nodes_count + 1)  # computes + head node
+        states.extend(
+            [
+                {key: host_dict[key] for key in desired_keys}
+                for hostname, host_dict in self._cluster_log_state.get(LOGIN_NODE_ROLE_NAME).items()
+            ]
+        )
+        # computes + logins + head node
+        assert_that(states).is_length(self.compute_nodes_count + self.login_nodes_count + 1)
         return states
 
     @staticmethod
@@ -147,11 +173,11 @@ class CloudWatchLoggingClusterState:
         """Turn the name of a base OS into the platform."""
         # Special case: in the files of the cookbook regarding the cloudwatch agent under
         # cookbooks/aws-parallelcluster-config/files/default/cloudwatch the configurations refers to:
-        # * "alinux2" as platform "amazon"
+        # * "alinux2023" as platform "amazon"
         # * "rhel8" as platform "redhat"
-        if base_os == "alinux2":
+        if "alinux" in base_os:
             return "amazon"
-        elif base_os == "rhel8":
+        elif "rhel" in base_os:
             return "redhat"
         else:
             return base_os.rstrip(string.digits)
@@ -177,6 +203,20 @@ class CloudWatchLoggingClusterState:
             "instance_id": instance.get("InstanceId"),
         }
 
+    def _add_login_instance(self, instance):
+        """Update the cluster's log state by adding a login node."""
+        # Ensure the instance is in 'running' state
+        if instance.get("State", {}).get("Name") != "running":
+            return
+        login_hostname = self._run_command_on_head_node(
+            "ssh -o StrictHostKeyChecking=no -q {} hostname -f".format(instance.get("PrivateDnsName"))
+        )
+        self._cluster_log_state[LOGIN_NODE_ROLE_NAME][login_hostname] = {
+            "node_role": LOGIN_NODE_ROLE_NAME,
+            "hostname": instance.get("PrivateDnsName"),
+            "instance_id": instance.get("InstanceId"),
+        }
+
     def _get_initial_cluster_log_state(self):
         """Get EC2 instances belonging to this cluster. Figure out their roles in the cluster."""
         for instance in cw_logs_utils.get_ec2_instances():
@@ -185,8 +225,11 @@ class CloudWatchLoggingClusterState:
                 continue
             elif tags.get("Name", "") == "HeadNode":
                 self._set_head_node_instance(instance)
-            elif self.scheduler != "awsbatch":  # AWS Batch Compute instances do not use CloudWatch
+            elif tags.get("Name", "") == "LoginNode":
+                self._add_login_instance(instance)
+            else:
                 self._add_compute_instance(instance)
+
         LOGGER.debug("After getting initial cluster state:\n{0}".format(self._dump_cluster_log_state()))
 
     def _read_log_configs_from_head_node(self):
@@ -207,8 +250,6 @@ class CloudWatchLoggingClusterState:
         """Read the node configuration JSON file at NODE_CONFIG_PATH on a compute node."""
         compute_node_config = {}
         # Do not try to fetch dna.json from compute if batch
-        if self.scheduler == "awsbatch":
-            return compute_node_config
         compute_hostname_to_config = self._run_command_on_computes("cat {{redirect}} {0}".format(NODE_CONFIG_PATH))
 
         # Use first one, since ParallelCluster-specific node config should be the same on every compute node
@@ -220,11 +261,33 @@ class CloudWatchLoggingClusterState:
         LOGGER.info("DNA config read from compute node: {0}".format(_dump_json(compute_node_config)))
         return compute_node_config
 
+    def _read_login_node_config(self):
+        """Read the node configuration JSON file at NODE_CONFIG_PATH for each login node pool."""
+        login_node_configs = {}
+        if not self.login_nodes:
+            return login_node_configs
+        login_node_hostname_to_config = self._run_command_on_login_nodes("cat {0}".format(NODE_CONFIG_PATH))
+        # TODO Support multiple login node pools different configurations and logging requirements
+        for _, config_json in login_node_hostname_to_config.items():
+            login_node_configs = json.loads(config_json).get("cluster", {})
+
+        assert_that(login_node_configs).is_not_empty()
+        LOGGER.info("DNA config read from login node: {0}".format(_dump_json(login_node_configs)))
+        return login_node_configs
+
+    def _read_external_dbd_node_config(self):
+        """Read the node configuration JSON file at NODE_CONFIG_PATH on a external dbd node."""
+        external_dbd_node_config = {}
+        # TODO add logic to execute remote commands on ExternalDbd node
+        return external_dbd_node_config
+
     def _read_node_configs(self):
         """Return a dict mapping node role names to the config at NODE_CONFIG_PATH."""
         return {
             HEAD_NODE_ROLE_NAME: self._read_head_node_config(),
             COMPUTE_NODE_ROLE_NAME: self._read_compute_node_config(),
+            LOGIN_NODE_ROLE_NAME: self._read_login_node_config(),
+            EXTERNAL_SLURM_DBD_ROLE_NAME: self._read_external_dbd_node_config(),
         }
 
     @staticmethod
@@ -287,13 +350,13 @@ class CloudWatchLoggingClusterState:
         """Populate self._relevant_logs with the entries of logs."""
         # When the scheduler is AWS Batch, only keep log that whose config's node_role value is HeadNode, since
         # Batch doesn't have compute nodes in the traditional sense.
-        desired_node_roles = {HEAD_NODE_ROLE_NAME} if self.scheduler == "awsbatch" else NODE_ROLE_NAMES
+        desired_node_roles = NODE_ROLE_NAMES
         for log in logs:
             for node_role in set(log.get("node_roles")) & desired_node_roles:
                 self._relevant_logs[node_role].append(self._clean_log_config(log))
 
     def _filter_logs(self, logs):
-        """Populate self._relevant_logs with logs appropriate for the two different node types."""
+        """Populate self._relevant_logs with logs appropriate for the different node types."""
         logs = self._filter_logs_on_platform_and_scheduler(logs)
         logs = self._filter_logs_on_feature(logs)
         self._populate_relevant_logs_for_node_roles(logs)
@@ -307,17 +370,33 @@ class CloudWatchLoggingClusterState:
             compute_instance_dict["logs"] = {
                 log.get("file_path"): log.copy() for log in self._relevant_logs.get(COMPUTE_NODE_ROLE_NAME)
             }
+        for _hostname, login_instance_dict in self._cluster_log_state.get(LOGIN_NODE_ROLE_NAME).items():
+            login_instance_dict["logs"] = {
+                log.get("file_path"): log.copy() for log in self._relevant_logs.get(LOGIN_NODE_ROLE_NAME)
+            }
 
     def _get_relevant_logs(self):
         """Get subset of all log configs that apply to this cluster's scheduler/os combo."""
         logs = self._read_log_configs_from_head_node()
         self._filter_logs(logs)
         self._create_log_entries_for_nodes()
-        LOGGER.debug("After populating relevant logs:\n{0}".format(self._dump_cluster_log_state()))
+        LOGGER.debug("After getting relevant logs:\n{0}".format(self._dump_cluster_log_state()))
 
     def _run_command_on_head_node(self, cmd):
         """Run cmd on cluster's head node."""
         return self.remote_command_executor.run_remote_command(cmd, timeout=60).stdout.strip()
+
+    def _run_command_on_login_nodes(self, cmd):
+        """Run cmd on all login nodes in the cluster"""
+        outputs = {}
+
+        for login_node in self.login_nodes:
+            login_node_ip = login_node.get("publicIpAddress") or login_node.get("privateIpAddress")
+            login_node_remote_command_executor = RemoteCommandExecutor(self.cluster, login_node_ip=login_node_ip)
+            hostname = login_node_remote_command_executor.run_remote_command("hostname -f", timeout=60).stdout.strip()
+            cmd_output = login_node_remote_command_executor.run_remote_command(cmd, timeout=60).stdout.strip()
+            outputs[hostname] = cmd_output
+        return outputs
 
     def _run_command_on_computes(self, cmd, assert_success=True):
         """Run cmd on all computes in the cluster."""
@@ -348,28 +427,27 @@ class CloudWatchLoggingClusterState:
         dummy_log_entry = "CloudWatch logs integ test - ensuring critical log file is not empty"
         self._run_command_on_head_node(f"echo '{dummy_log_entry}' > {dummy_log_message_path}")
         # Append the dummy entry to the log
-        cmd = f"sudo tee -a {log_path} < {dummy_log_message_path}"
+        log_file_user = self.remote_command_executor.get_user_to_operate_on_file(log_path)
+        cmd = f"sudo -u {log_file_user} tee -a {log_path} < {dummy_log_message_path}"
         if node_type == HEAD_NODE_ROLE_NAME:
             self._run_command_on_head_node(cmd)
         elif node_type == COMPUTE_NODE_ROLE_NAME:
             self._run_command_on_computes(cmd)
+        elif node_type == LOGIN_NODE_ROLE_NAME:
+            self._run_command_on_login_nodes(cmd)
         else:
             raise Exception(f"Unknown node type: {node_type}")
 
     def _populate_head_node_log_existence(self):
         """Figure out which of the relevant logs for the head node don't exist."""
-        critical_head_node_logs = (
-            [
-                "/var/log/parallelcluster/clustermgtd",
-                "/var/log/parallelcluster/clusterstatusmgtd",
-                "/var/log/parallelcluster/slurm_resume.log",
-                "/var/log/parallelcluster/slurm_suspend.log",
-                "/var/log/parallelcluster/slurm_fleet_status_manager.log",
-                "/var/log/slurmdbd.log",
-            ]
-            if self.scheduler == "slurm"
-            else []
-        )
+        critical_head_node_logs = [
+            "/var/log/parallelcluster/clustermgtd",
+            "/var/log/parallelcluster/clusterstatusmgtd",
+            "/var/log/parallelcluster/slurm_resume.log",
+            "/var/log/parallelcluster/slurm_suspend.log",
+            "/var/log/parallelcluster/slurm_fleet_status_manager.log",
+            "/var/log/slurmdbd.log",
+        ]
         for log_path, log_dict in self._cluster_log_state.get(HEAD_NODE_ROLE_NAME).get("logs").items():
             # If a log is of critical importance for debugging operational issues, make sure
             # it's not empty so that we can later assert that the data is making it to CloudWatch.
@@ -383,11 +461,10 @@ class CloudWatchLoggingClusterState:
         """Figure out which of the relevant logs for the ComputeFleet nodes don't exist."""
         if self.compute_nodes_count == 0:
             return
-        critical_compute_node_logs = (
-            ["/var/log/parallelcluster/computemgtd", "/var/log/parallelcluster/bootstrap_error_msg"]
-            if self.scheduler == "slurm"
-            else []
-        )
+        critical_compute_node_logs = [
+            "/var/log/parallelcluster/computemgtd",
+            "/var/log/parallelcluster/bootstrap_error_msg",
+        ]
         for log_dict in self._relevant_logs.get(COMPUTE_NODE_ROLE_NAME):
             log_path = log_dict.get("file_path")
             if log_path in critical_compute_node_logs:
@@ -405,10 +482,33 @@ class CloudWatchLoggingClusterState:
                 )
                 node_log_dict["exists"] = output == "exists"
 
+    def _populate_login_node_log_existence(self):
+        """Figure out which of the relevant logs for the login nodes don't exist."""
+        if not self.login_nodes:
+            return
+        # TODO Populate with critical login node logs
+        critical_login_node_logs = []
+
+        for log_dict in self._relevant_logs.get(LOGIN_NODE_ROLE_NAME):
+            log_path = log_dict.get("file_path")
+            if log_path in critical_login_node_logs:
+                self._write_dummy_message_to_log(log_path, LOGIN_NODE_ROLE_NAME)
+            cmd = "[ -f {path} ] && echo 'exists' || echo 'does not exist'".format(path=log_path)
+            hostname_to_output = self._run_command_on_login_nodes(cmd)
+            for hostname, output in hostname_to_output.items():
+                node_log_dict = (
+                    self._cluster_log_state.get(LOGIN_NODE_ROLE_NAME)
+                    .get(hostname)
+                    .get("logs")
+                    .get(log_dict.get("file_path"))
+                )
+                node_log_dict["exists"] = output == "exists"
+
     def _populate_log_existence(self):
         """Figure out which of the relevant logs for each node type don't exist."""
         self._populate_head_node_log_existence()
         self._populate_compute_log_existence()
+        self._populate_login_node_log_existence()
         LOGGER.debug("After populating log existence:\n{0}".format(self._dump_cluster_log_state()))
 
     def _populate_head_node_log_emptiness_and_tail(self):
@@ -443,10 +543,28 @@ class CloudWatchLoggingClusterState:
                 host_log_dict["is_empty"] = output == ""
                 host_log_dict["tail"] = output
 
+    def _populate_login_node_log_emptiness_and_tail(self):
+        """Figure out which of the relevant logs for the login nodes are empty."""
+        if not self.login_nodes:
+            return
+        for log_dict in self._relevant_logs.get(LOGIN_NODE_ROLE_NAME):
+            cmd = "sudo tail -n 1 {path}".format(path=log_dict.get("file_path"))
+            hostname_to_output = self._run_command_on_login_nodes(cmd)
+            for hostname, output in hostname_to_output.items():
+                host_log_dict = (
+                    self._cluster_log_state.get(LOGIN_NODE_ROLE_NAME)
+                    .get(hostname)
+                    .get("logs")
+                    .get(log_dict.get("file_path"))
+                )
+                host_log_dict["is_empty"] = output == ""
+                host_log_dict["tail"] = output
+
     def _populate_log_emptiness_and_tail(self):
         """Figure out which of the relevant logs for each node type are empty."""
         self._populate_head_node_log_emptiness_and_tail()
         self._populate_compute_log_emptiness_and_tail()
+        self._populate_login_node_log_emptiness_and_tail()
         LOGGER.debug("After populating log emptiness and tails:\n{0}".format(self._dump_cluster_log_state()))
 
     def _populate_head_node_agent_status(self):
@@ -465,10 +583,21 @@ class CloudWatchLoggingClusterState:
         for hostname, status_dict in hostname_to_status_dict.items():
             self._cluster_log_state[COMPUTE_NODE_ROLE_NAME][hostname]["agent_status"] = status_dict.get("status")
 
+    def _populate_login_node_agent_status(self):
+        """Get the cloudwatch agent's status for all the login nodes in the cluster."""
+        if not self.login_nodes:
+            return
+        status_cmd = "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status"
+        login_statuses = self._run_command_on_login_nodes(status_cmd)
+        hostname_to_status_dict = {hostname: json.loads(status) for hostname, status in login_statuses.items()}
+        for hostname, status_dict in hostname_to_status_dict.items():
+            self._cluster_log_state[LOGIN_NODE_ROLE_NAME][hostname]["agent_status"] = status_dict.get("status")
+
     def _populate_agent_status(self):
         """Get the cloudwatch agent's status for all the nodes in the cluster."""
         self._populate_head_node_agent_status()
         self._populate_compute_agent_status()
+        self._populate_login_node_agent_status()
         LOGGER.debug("After populating agent statuses:\n{0}".format(self._dump_cluster_log_state()))
 
     def _set_cluster_log_state(self):
@@ -503,7 +632,7 @@ class CloudWatchLoggingTestRunner:
 
     @staticmethod
     def _fqdn_to_local_hostname(fqdn):
-        """Turn a fullly qualified domain name into a local hostname of the form ip-X-X-X-X."""
+        """Turn a fully qualified domain name into a local hostname of the form ip-X-X-X-X."""
         local_hostname = fqdn.split(".")[0]
         assert_that(re.match(r"ip-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}$", local_hostname)).is_not_none()
         return local_hostname
@@ -568,9 +697,14 @@ class CloudWatchLoggingTestRunner:
         if not self.enabled or (cluster_has_been_deleted and not self.logs_persist_after_delete):
             return
         log_group = next((group for group in log_groups if group.get("logGroupName") == self.log_group_name), None)
-        assert_that(log_group).is_not_none().is_equal_to(
-            {"retentionInDays": self.retention_days}, include="retentionInDays"
-        )
+
+        if self.retention_days == 0:
+            # If retention days is 0, the log group shouldn't have a retentionInDays setting (since it uses the default)
+            assert_that(log_group).is_not_none().does_not_contain("retentionInDays")
+        else:
+            assert_that(log_group).is_not_none().is_equal_to(
+                {"retentionInDays": self.retention_days}, include="retentionInDays"
+            )
 
     def verify_agent_status(self, logs_state):
         """Verify CloudWatch agent is running on the head node (or not if not enabled)."""
@@ -637,7 +771,7 @@ def get_config_param_vals():
     retention_days = int(
         environ.get(
             "CW_LOGGING_RETENTION_DAYS",
-            random.choice([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]),
+            random.choice([0, 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]),
         )
     )
     queue_size = int(environ.get("CW_LOGGING_QUEUE_SIZE", 1))

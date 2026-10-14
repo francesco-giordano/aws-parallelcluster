@@ -11,13 +11,14 @@ Allowed values for EC2 Key Pair Name:
 6. key6
 Allowed values for Scheduler:
 1. slurm
-2. awsbatch
 Allowed values for Operating System:
-1. alinux2
-2. centos7
-3. ubuntu1804
-4. ubuntu2004
-5. rhel8
+1. alinux2023
+2. ubuntu2204
+3. ubuntu2404
+4. rhel8
+5. rocky8
+6. rhel9
+7. rocky9
 Allowed values for VPC ID:
   #  id            name                                 number_of_subnets
 ---  ------------  ---------------------------------  -------------------

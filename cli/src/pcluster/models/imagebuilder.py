@@ -19,9 +19,9 @@ import os.path
 import re
 import tempfile
 from datetime import datetime
+from importlib.resources import files  # nosemgrep: python.lang.compatibility.python37.python37-compatibility-importlib2
 from typing import Set
 
-import pkg_resources
 from marshmallow.exceptions import ValidationError
 
 from pcluster.aws.aws_api import AWSApi
@@ -61,6 +61,7 @@ from pcluster.models.common import (
     create_logs_archive,
     export_stack_events,
     parse_config,
+    sanitize_path_component,
     upload_archive,
 )
 from pcluster.models.imagebuilder_resources import (
@@ -76,7 +77,7 @@ from pcluster.templates.cdk_builder import CDKTemplateBuilder
 from pcluster.utils import datetime_to_epoch, generate_random_name_with_prefix, get_installed_version, get_partition
 from pcluster.validators.common import FailureLevel, ValidationResult
 
-ImageBuilderStatusMapping = {
+ImageBuilderStatusMapping = {  # pylint: disable=invalid-name
     "BUILD_IN_PROGRESS": [
         "CREATE_IN_PROGRESS",
         "UPDATE_IN_PROGRESS",
@@ -532,7 +533,7 @@ class ImageBuilder:
                 # upload cfn template
                 self.bucket.upload_cfn_template(self.template_body, self._s3_artifacts_dict.get("template_name"))
 
-            resources = pkg_resources.resource_filename(__name__, "../resources/custom_resources")
+            resources = str(files(__package__).parent / "resources" / "custom_resources")
             self.bucket.upload_resources(
                 resource_dir=resources, custom_artifacts_name=self._s3_artifacts_dict.get("custom_artifacts_name")
             )
@@ -696,8 +697,9 @@ class ImageBuilder:
 
         try:
             with tempfile.TemporaryDirectory() as output_tempdir:
-                # Create root folder for the archive
-                archive_name = f"{self.image_id}-logs-{datetime.now().strftime('%Y%m%d%H%M')}"
+                # Create root folder for the archive. Sanitize the identifier so it is always a single,
+                # safe local path component (defends against separators in the identifier).
+                archive_name = f"{sanitize_path_component(self.image_id)}-logs-{datetime.now().strftime('%Y%m%d%H%M')}"
                 root_archive_dir = os.path.join(output_tempdir, archive_name)
                 os.makedirs(root_archive_dir, exist_ok=True)
 
@@ -721,10 +723,11 @@ class ImageBuilder:
                     )
 
                 if stack_exists:
-                    # Get stack events and write them into a file
-                    stack_events_file = os.path.join(root_archive_dir, self._stack_events_stream_name)
+                    # Get stack events and write them into a file (sanitize the stream name for use as a path).
+                    stack_events_file = os.path.join(
+                        root_archive_dir, sanitize_path_component(self._stack_events_stream_name)
+                    )
                     export_stack_events(self.stack.name, stack_events_file)
-
                 archive_path = create_logs_archive(root_archive_dir, output_file)
                 if output_file:
                     return output_file

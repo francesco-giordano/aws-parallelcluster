@@ -1,6 +1,14 @@
 Image:
-  Os: alinux2
+  Os: alinux2023
   CustomAmi: ami-12345678
+LoginNodes:
+  Pools:
+  - Name: test
+    InstanceType: t3.micro
+    Count: 1
+    Networking:
+      SubnetIds:
+        - subnet-12345678
 HeadNode:
   InstanceType: c5d.xlarge
   Networking:
@@ -14,12 +22,13 @@ Scheduling:
   Scheduler: slurm
   SlurmQueues:
     - Name: queue1
+      CapacityType: SPOT
       Networking:
         SubnetIds:
           - subnet-23456789
       ComputeResources:
         - Name: compute_resource1
-          InstanceType: t2.large
+          InstanceType: t3.large
           Tags:
             - Key: compute_tag1
               Value: String
@@ -28,6 +37,7 @@ Scheduling:
         - Name: compute_resource2
           InstanceType: c4.2xlarge
     - Name: queue2
+      AllocationStrategy: "prioritized"
       Networking:
         SubnetIds:
           - subnet-23456789
@@ -40,13 +50,35 @@ Scheduling:
           InstanceType: c5d.xlarge
           DisableSimultaneousMultithreading: false
         - Name: compute_resource3
-          InstanceType: t2.large
+          Instances:
+            - InstanceType: t3.large
           DisableSimultaneousMultithreading: true
+          CapacityReservationTarget:
+            CapacityReservationId: "cr-34567"
       Tags:
         - Key: queue_tag1
           Value: String
         - Key: queue_tag2
           Value: String
+    - Name: queue3
+      CapacityType: CAPACITY_BLOCK
+      CapacityReservationTarget:
+        CapacityReservationId: "cr-12345"
+      Networking:
+        SubnetIds:
+          - subnet-23456789
+      ComputeResources:
+        - Name: compute_resource1
+          Instances:
+            - InstanceType: t3.xlarge
+          MinCount: 5
+          MaxCount: 5
+        - Name: compute_resource2
+          InstanceType: t3.xlarge
+          MinCount: 3
+          MaxCount: 3
+          CapacityReservationTarget:
+            CapacityReservationId: "cr-23456"
 SharedStorage:
   - MountDir: /my/mount/point1
     Name: name1
@@ -69,3 +101,7 @@ Tags:
     Value: String
   - Key: cluster_tag2
     Value: String
+DevSettings:
+  Cookbook:
+    ExtraChefAttributes: |
+      {"attr1": {"attr2": "value"}}

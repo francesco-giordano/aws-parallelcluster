@@ -35,26 +35,11 @@ export NO_PROXY="localhost,127.0.0.1,169.254.169.254"
 PROXY
 fi
 
-# Configure Amazon Linux 2 instance running in US isolated region.
-. /etc/os-release
-if [[ "${!ID}${!VERSION_ID}" == "amzn2" && "${AWS::Region}" == us-iso* ]]; then
-  configuration_script="/opt/parallelcluster/scripts/patch-iso-instance.sh"
-  [ -f ${!configuration_script} ] && bash ${!configuration_script}
-fi
-
 --==BOUNDARY==
 Content-Type: text/cloud-config; charset=us-ascii
 MIME-Version: 1.0
 
 bootcmd:
-  # Disable multithreading using logic from https://aws.amazon.com/blogs/compute/disabling-intel-hyper-threading-technology-on-amazon-linux/
-  # thread_siblings_list contains a comma (,) or dash (-) separated list of CPU hardware threads within the same core as cpu
-  # e.g. 0-1 or 0,1
-  # cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list
-  #     | tr '-' ','       # convert hyphen (-) to comma (,), to account that some kernels and CPU architectures use a hyphen instead of a comma
-  #     | cut -s -d, -f2-  # split over comma (,) and take the right part
-  #     | tr ',' '\n'      # convert remaining comma (,) into new lines
-  #     | sort -un         # sort and unique
   - if [ "${DisableMultiThreadingManually}" = "true" ]; then for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | tr '-' ',' | cut -s -d, -f2- | tr ',' '\n' | sort -un); do echo 0 > /sys/devices/system/cpu/cpu$cpunum/online; done; fi
 
 package_update: false
@@ -62,68 +47,21 @@ package_upgrade: false
 repo_upgrade: none
 
 datasource_list: [ Ec2, None ]
+
 output:
-  all: "| tee -a /var/log/cloud-init-output.log | logger -t user-data -s 2>/dev/console"
+  all: "| tee -a /var/log/cloud-init-output.log | logger -t user-data -s 2>/dev/ttyS0"
 write_files:
-  - path: /tmp/dna.json
+  - path: ${PclusterTmpDir}/dna.json
     permissions: '0644'
     owner: root:root
     content: |
-      {
-        "cluster": {
-          "cluster_name": "${ClusterName}",
-          "stack_name": "${AWS::StackName}",
-          "stack_arn": "${AWS::StackId}",
-          "enable_efa": "${EnableEfa}",
-          "raid_shared_dir": "${RAIDSharedDir}",
-          "raid_type": "${RAIDType}",
-          "base_os": "${BaseOS}",
-          "region": "${AWS::Region}",
-          "efs_fs_ids": "${EFSIds}",
-          "efs_shared_dirs": "${EFSSharedDirs}",
-          "efs_encryption_in_transits": "${EFSEncryptionInTransits}",
-          "efs_iam_authorizations": "${EFSIamAuthorizations}",
-          "fsx_fs_ids": "${FSXIds}",
-          "fsx_mount_names": "${FSXMountNames}",
-          "fsx_dns_names": "${FSXDNSNames}",
-          "fsx_volume_junction_paths": "${FSXVolumeJunctionPaths}",
-          "fsx_fs_types": "${FSXFileSystemTypes}",
-          "fsx_shared_dirs": "${FSXSharedDirs}",
-          "scheduler": "${Scheduler}",
-          "ephemeral_dir": "${EphemeralDir}",
-          "ebs_shared_dirs": "${EbsSharedDirs}",
-          "proxy": "${ProxyServer}",
-          "slurm_ddb_table": "${SlurmDynamoDBTable}",
-          "log_group_name": "${LogGroupName}",
-          "dns_domain": "${ClusterDNSDomain}",
-          "hosted_zone": "${ClusterHostedZone}",
-          "node_type": "ComputeFleet",
-          "cluster_user": "${OSUser}",
-          "enable_intel_hpc_platform": "${IntelHPCPlatform}",
-          "cw_logging_enabled": "${CWLoggingEnabled}",
-          "log_rotation_enabled": "${LogRotationEnabled}",
-          "scheduler_queue_name": "${QueueName}",
-          "scheduler_compute_resource_name": "${ComputeResourceName}",
-          "enable_efa_gdr": "${EnableEfaGdr}",
-          "custom_node_package": "${CustomNodePackage}",
-          "custom_awsbatchcli_package": "${CustomAwsBatchCliPackage}",
-          "use_private_hostname": "${UsePrivateHostname}",
-          "head_node_private_ip": "${HeadNodePrivateIp}",
-          "directory_service": {
-            "enabled": "${DirectoryServiceEnabled}"
-          }
-        }
-      }
-  - path: /etc/chef/client.rb
-    permissions: '0644'
-    owner: root:root
-    content: cookbook_path ['/etc/chef/cookbooks']
-  - path: /tmp/extra.json
+      ${DnaJson}
+  - path: ${PclusterTmpDir}/extra.json
     permissions: '0644'
     owner: root:root
     content: |
       ${ExtraJson}
-  - path: /tmp/bootstrap.sh
+  - path: ${PclusterTmpDir}/bootstrap.sh
     permissions: '0744'
     owner: root:root
     content: |
@@ -132,6 +70,10 @@ write_files:
       function error_exit
       {
         echo "Bootstrap failed with error: $1"
+        # Echo chef-client.log to console logs for debugging
+        echo "========== BEGIN CHEF-CLIENT.LOG =========="
+        cat /var/log/chef-client.log || echo "chef-client.log not found"
+        echo "========== END CHEF-CLIENT.LOG ==========="
         # wait logs flush before signaling the failure
         sleep 10
         # TODO: add possibility to override this behavior and keep the instance for debugging
@@ -140,20 +82,28 @@ write_files:
       }
       function vendor_cookbook
       {
-        mkdir /tmp/cookbooks
-        cd /tmp/cookbooks
-        tar -xzf /etc/chef/aws-parallelcluster-cookbook.tgz
-        HOME_BAK="${!HOME}"
-        export HOME="/tmp"
-        for d in `ls /tmp/cookbooks`; do
-          cd /tmp/cookbooks/$d
-          LANG=en_US.UTF-8 /opt/cinc/embedded/bin/berks vendor /etc/chef/cookbooks --delete || error_exit 'Vendoring cookbook failed.'
-        done;
-        export HOME="${!HOME_BAK}"
+        cd /etc/chef && tar -xzf /etc/chef/aws-parallelcluster-cookbook.tgz --strip-components 1 && rm -f aws-parallelcluster-cookbook.tgz
       }
+
+      function publish_startup_time
+      {
+        start_time=$1
+        end_time=$2
+        # Only put the startup time data if the scheduler is slurm
+        slurm_node_path=/etc/parallelcluster/slurm_plugin/slurm_node_spec.json
+        if test -f "$slurm_node_path"; then
+            INSTANCE_ID=$(cat $slurm_node_path | jq -r .instance_id)
+            INSTANCE_TYPE=$(cat $slurm_node_path | jq -r .'compute."instance-type"')
+            aws cloudwatch put-metric-data --namespace "ParallelCluster" --metric-name "StartupTime" --value $(($end_time-$start_time)) --dimensions "InstanceID=${!INSTANCE_ID},InstanceType=${!INSTANCE_TYPE},ClusterName=${ClusterName},OS=${BaseOS}" --region "${AWS::Region}"
+        fi
+      }
+
+      export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:/opt/aws/bin
+
+      [ -f /etc/parallelcluster/pcluster_cookbook_environment.sh ] && . /etc/parallelcluster/pcluster_cookbook_environment.sh
+
       [ -f /etc/profile.d/proxy.sh ] && . /etc/profile.d/proxy.sh
 
-      # Configure AWS CLI using the expected overrides, if any.
       [ -f /etc/profile.d/aws-cli-default-config.sh ] && . /etc/profile.d/aws-cli-default-config.sh
 
       custom_cookbook=${CustomChefCookbook}
@@ -162,11 +112,7 @@ write_files:
       s3_url=${AWS::URLSuffix}
       if [ "${!custom_cookbook}" != "NONE" ]; then
         if [[ "${!custom_cookbook}" =~ ^s3://([^/]*)(.*) ]]; then
-          # Set the socket connection timeout to 15s. Emperically, it seems like the actual
-          # timeout is 8x(cli-connect-timeout). i.e. if cli-connection-timeout is set to
-          # 60s, the call will timeout the connect attempt at 8m. Setting it to 15s, causes
-          # each attempt to take 240s, so 2m * 3 attempts will result in a failure after 6
-          # minutes.
+          # Socket timeout = 15s; the actual timeout is 8*(cli-connect-timeout), so (15s*8)*3retries=6min.
           S3API_RESULT=$(AWS_RETRY_MODE=standard aws s3api get-bucket-location --cli-connect-timeout 15 --bucket ${!BASH_REMATCH[1]} --region ${AWS::Region} 2>&1) || error_exit "${!S3API_RESULT}"
           bucket_region=$(echo "${!S3API_RESULT}" | jq -r '.LocationConstraint')
           if [[ "${!bucket_region}" == null ]]; then
@@ -177,11 +123,9 @@ write_files:
           cookbook_url=${!custom_cookbook}
         fi
       fi
-      export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:/opt/aws/bin
       export parallelcluster_version=aws-parallelcluster-${ParallelClusterVersion}
       export cookbook_version=${CookbookVersion}
       export chef_version=${ChefVersion}
-      export berkshelf_version=${BerkshelfVersion}
       if [ -f /opt/parallelcluster/.bootstrapped ]; then
         installed_version=$(cat /opt/parallelcluster/.bootstrapped)
         if [ "${!cookbook_version}" != "${!installed_version}" ]; then
@@ -193,26 +137,40 @@ write_files:
         error_exit "This AMI was not baked by ParallelCluster. Please use pcluster build-image command to create an AMI by providing your AMI as parent image."
       fi
       if [ "${!custom_cookbook}" != "NONE" ]; then
-        curl --retry 3 -v -L -o /etc/chef/aws-parallelcluster-cookbook.tgz ${!cookbook_url}
+        delays=(1 2 4 8 16 32 64 128 256)
+        for i in {0..8}; do
+          curl -v -L -o /etc/chef/aws-parallelcluster-cookbook.tgz ${!cookbook_url} && break
+          echo "Curl attempt $((i+1)) failed, retrying in ${!delays[$i]}s..."
+          sleep ${!delays[$i]}
+        done
         vendor_cookbook
       fi
-      cd /tmp
-
+      cd ${PclusterTmpDir}
       mkdir -p /etc/chef/ohai/hints
       touch /etc/chef/ohai/hints/ec2.json
-      jq --argfile f1 /tmp/dna.json --argfile f2 /tmp/extra.json -n '$f1 * $f2' > /etc/chef/dna.json || ( echo "jq not installed or invalid extra_json"; cp /tmp/dna.json /etc/chef/dna.json)
+
+      start=$(date +%s)
+      jq -s ".[0] * .[1]" ${PclusterTmpDir}/dna.json ${PclusterTmpDir}/extra.json > /etc/chef/dna.json || ( echo "jq not installed"; cp ${PclusterTmpDir}/dna.json /etc/chef/dna.json )
       {
+        CINC_CMD="cinc-client --local-mode --config /etc/chef/client.rb --log_level info --logfile /var/log/chef-client.log --force-formatter --no-color --chef-zero-port 8889 --json-attributes /etc/chef/dna.json --override-runlist"
+        FR_CMD="/opt/parallelcluster/scripts/fetch_and_run"
         pushd /etc/chef &&
-        cinc-client --local-mode --config /etc/chef/client.rb --log_level info --force-formatter --no-color --chef-zero-port 8889 --json-attributes /etc/chef/dna.json --override-runlist aws-parallelcluster::init &&
-        /opt/parallelcluster/scripts/fetch_and_run -preinstall &&
-        cinc-client --local-mode --config /etc/chef/client.rb --log_level info --force-formatter --no-color --chef-zero-port 8889 --json-attributes /etc/chef/dna.json --override-runlist aws-parallelcluster::config &&
-        /opt/parallelcluster/scripts/fetch_and_run -postinstall &&
-        cinc-client --local-mode --config /etc/chef/client.rb --log_level info --force-formatter --no-color --chef-zero-port 8889 --json-attributes /etc/chef/dna.json --override-runlist aws-parallelcluster::finalize &&
+        ${!CINC_CMD} aws-parallelcluster-entrypoints::init &&
+        ${!FR_CMD} -preinstall &&
+        ${!CINC_CMD} aws-parallelcluster-entrypoints::config &&
+        ${!FR_CMD} -postinstall &&
+        ${!CINC_CMD} aws-parallelcluster-entrypoints::finalize &&
         popd
-      } || error_exit 'Failed to run bootstrap recipes. If --norollback was specified, check /var/log/cfn-init.log and /var/log/cloud-init-output.log.'
+      } || error_exit 'Failed to run bootstrap recipes. Please check /var/log/chef-client.log in the compute node or in CloudWatch logs.'
 
       if [ ! -f /opt/parallelcluster/.bootstrapped ]; then
         echo ${!cookbook_version} | tee /opt/parallelcluster/.bootstrapped
+      fi
+
+      end=$(date +%s)
+
+      if [ "${ComputeStartupTimeMetricEnabled}" = "True" ]; then
+        publish_startup_time $start $end || echo "[WARNING] failed to push the StartupTime metric to CloudWatch."
       fi
 
 --==BOUNDARY==
@@ -224,16 +182,18 @@ MIME-Version: 1.0
 function error_exit
 {
   echo "Timed-out when bootstrapping instance"
+  # Echo chef-client.log to console logs for debugging
+  echo "========== BEGIN CHEF-CLIENT.LOG =========="
+  cat /var/log/chef-client.log || echo "chef-client.log not found"
+  echo "========== END CHEF-CLIENT.LOG ==========="
   sleep 10  # Allow logs to propagate
   shutdown -h now
   exit 1
 }
 
 if [ "${Timeout}" == "NONE" ]; then
-  /tmp/bootstrap.sh
+  ${PclusterTmpDir}/bootstrap.sh
 else
-  timeout ${Timeout} /tmp/bootstrap.sh || error_exit
+  timeout ${Timeout} ${PclusterTmpDir}/bootstrap.sh || error_exit
 fi
-
-# End of file
 --==BOUNDARY==

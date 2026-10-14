@@ -7,7 +7,7 @@
 # OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 # limitations under the License.
 
-usage="$(basename "$0") [-h] --s3-bucket bucket-name --region aws-region [--stack-name name] [--enable-iam-admin true|false] [--create-api-user true|false])"
+usage="$(basename "$0") [-h] --s3-bucket bucket-name --region aws-region [--stack-name name] [--enable-iam-admin true|false] [--create-api-user true|false] [--lambda-layer abs_path] [--additional-iam-policies policy_arn]"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
@@ -15,6 +15,8 @@ S3_BUCKET=
 STACK_NAME="ParallelClusterApi"
 ENABLE_IAM_ADMIN="true"
 CREATE_API_USER="false"
+LAMBDA_LAYER=
+PC_FUNCTION_ADDITIONAL_IAM_POLICIES=
 while [[ $# -gt 0 ]]
 do
 key="$1"
@@ -59,6 +61,16 @@ case $key in
     shift # past argument
     shift # past value
     ;;
+    --lambda-layer)
+    export LAMBDA_LAYER=$2
+    shift # past argument
+    shift # past value
+    ;;
+    --additional-iam-policies)
+    export PC_FUNCTION_ADDITIONAL_IAM_POLICIES=$2
+    shift # past argument
+    shift # past value
+    ;;
     *)    # unknown option
     echo "$usage" >&2
     exit 1
@@ -71,7 +83,8 @@ if [ -z "${S3_BUCKET}" ] || [ -z "${AWS_DEFAULT_REGION}" ] ; then
     exit 1
 fi
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+PC_VERSION=$(yq ".Mappings.ParallelCluster.Constants.Version" "${SCRIPT_DIR}/parallelcluster-api.yaml")
+
 S3_UPLOAD_URI="s3://${S3_BUCKET}/api/ParallelCluster.openapi.yaml"
 POLICIES_S3_URI="s3://${S3_BUCKET}/stacks/parallelcluster-policies.yaml"
 POLICIES_TEMPLATE_URI="http://${S3_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/stacks/parallelcluster-policies.yaml"
@@ -82,6 +95,12 @@ aws s3 cp "${SCRIPT_DIR}/../spec/openapi/ParallelCluster.openapi.yaml" "${S3_UPL
 echo "Publishing policies CloudFormation stack to S3"
 aws s3 cp "${SCRIPT_DIR}/../../cloudformation/policies/parallelcluster-policies.yaml" "${POLICIES_S3_URI}"
 
+if [ -n "${LAMBDA_LAYER}" ]; then
+  LAMBDA_LAYER_S3_URI="s3://${S3_BUCKET}/parallelcluster/${PC_VERSION}/layers/aws-parallelcluster/lambda-layer.zip"
+  echo "Publishing Lambda Layer for version ${PC_VERSION} to S3"
+  aws s3 cp "${LAMBDA_LAYER}" "${LAMBDA_LAYER_S3_URI}"
+fi
+
 echo "Deploying API template"
 aws cloudformation deploy \
     --stack-name "${STACK_NAME}" \
@@ -91,4 +110,6 @@ aws cloudformation deploy \
     --parameter-overrides ApiDefinitionS3Uri="${S3_UPLOAD_URI}" \
                           PoliciesTemplateUri="${POLICIES_TEMPLATE_URI}" \
                           EnableIamAdminAccess="${ENABLE_IAM_ADMIN}" CreateApiUserRole="${CREATE_API_USER}" \
+                          ParallelClusterFunctionAdditionalPolicies="${PC_FUNCTION_ADDITIONAL_IAM_POLICIES}" \
+                          "$([[ -n "${LAMBDA_LAYER}" ]] && echo "CustomBucket=${S3_BUCKET}" || echo " ")" \
     --capabilities CAPABILITY_NAMED_IAM

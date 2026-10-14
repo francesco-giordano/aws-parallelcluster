@@ -27,20 +27,437 @@ from tests.pcluster.test_utils import dummy_cluster
 
 
 @pytest.mark.parametrize(
-    "is_fleet_stopped, old_max, new_max, expected_result",
+    "is_fleet_stopped, key, path, old_value, new_value, update_strategy, other_changes, expected_result",
     [
-        pytest.param(True, 10, 9, True, id="stopped fleet and new_max < old_max"),
-        pytest.param(False, "10", "9", False, id="running fleet and new_max < old_max"),
-        pytest.param(True, 10, 11, True, id="stopped fleet new_max > old_max"),
-        pytest.param(False, 10, 9, False, id="running fleet and new_max < old_max"),
-        pytest.param(False, 10, 11, True, id="running fleet and new_max > old_max"),
-        pytest.param(False, None, 0, False, id="running fleet and new_max < DEFAULT_MAX_COUNT"),
-        pytest.param(False, None, 11, True, id="running fleet and new_max > DEFAULT_MAX_COUNT"),
-        pytest.param(False, 11, None, False, id="running fleet and DEFAULT_MAX_COUNT < old_max"),
-        pytest.param(False, 0, None, True, id="running fleet and DEFAULT_MAX_COUNT > old_max"),
+        # tests with fleet stopped
+        pytest.param(
+            True,
+            "SlurmQueues",
+            ["Scheduling"],
+            None,
+            {
+                "Name": "queue-added",
+                "Networking": {"SubnetIds": "subnet-12345678"},
+                "ComputeResources": {"Name": "compute-added", "InstanceType": "c5.9xlarge"},
+            },
+            None,
+            [],
+            True,
+            id="stopped fleet and queue is added",
+        ),
+        pytest.param(
+            True,
+            "SlurmQueues",
+            ["Scheduling"],
+            {
+                "Name": "queue-to-remove",
+                "Networking": {"SubnetIds": "subnet-12345678"},
+                "ComputeResources": {"Name": "compute-to-remove", "InstanceType": "c5.9xlarge"},
+            },
+            None,
+            None,
+            [],
+            True,
+            id="stopped fleet and queue is removed",
+        ),
+        pytest.param(
+            True,
+            "ComputeResources",
+            ["Scheduling", "SlurmQueues[queue1]"],
+            None,
+            {"Name": "compute-added", "InstanceType": "c5.large", "MinCount": 1},
+            None,
+            [],
+            True,
+            id="stopped fleet and compute is added",
+        ),
+        pytest.param(
+            True,
+            "ComputeResources",
+            ["Scheduling", "SlurmQueues[queue1]"],
+            {"Name": "compute-to-remove", "InstanceType": "c5.large", "MinCount": 1},
+            None,
+            None,
+            [],
+            True,
+            id="stopped fleet and compute is removed",
+        ),
+        pytest.param(
+            True,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            None,
+            [],
+            True,
+            id="stopped fleet and min count is decreased",
+        ),
+        pytest.param(
+            True,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [],
+            True,
+            id="stopped fleet and min count is increased",
+        ),
+        pytest.param(
+            True,
+            "MaxCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            None,
+            [],
+            True,
+            id="stopped fleet and max count is decreased",
+        ),
+        pytest.param(
+            True,
+            "MaxCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [],
+            True,
+            id="stopped fleet and max count is increased",
+        ),
+        # tests with fleet running
+        pytest.param(
+            False,
+            "SlurmQueues",
+            ["Scheduling"],
+            None,
+            {
+                "Name": "queue-added",
+                "Networking": {"SubnetIds": "subnet-12345678"},
+                "ComputeResources": {"Name": "compute-added", "InstanceType": "c5.9xlarge"},
+            },
+            None,
+            [],
+            True,
+            id="running fleet and queue is added",
+        ),
+        pytest.param(
+            False,
+            "SlurmQueues",
+            ["Scheduling"],
+            {
+                "Name": "queue-to-remove",
+                "Networking": {"SubnetIds": "subnet-12345678"},
+                "ComputeResources": {"Name": "compute-to-remove", "InstanceType": "c5.9xlarge"},
+            },
+            None,
+            None,
+            [],
+            False,
+            id="running fleet and queue is removed wo update strategy",
+        ),
+        pytest.param(
+            False,
+            "SlurmQueues",
+            ["Scheduling"],
+            {
+                "Name": "queue-to-remove",
+                "Networking": {"SubnetIds": "subnet-12345678"},
+                "ComputeResources": {"Name": "compute-to-remove", "InstanceType": "c5.9xlarge"},
+            },
+            None,
+            QueueUpdateStrategy.TERMINATE.value,
+            [],
+            True,
+            id="running fleet and queue is removed with TERMINATE update strategy",
+        ),
+        pytest.param(
+            False,
+            "SlurmQueues",
+            ["Scheduling"],
+            {
+                "Name": "queue-to-remove",
+                "Networking": {"SubnetIds": "subnet-12345678"},
+                "ComputeResources": {"Name": "compute-to-remove", "InstanceType": "c5.9xlarge"},
+            },
+            None,
+            QueueUpdateStrategy.DRAIN.value,
+            [],
+            False,
+            id="running fleet and queue is removed with DRAIN update strategy",
+        ),
+        pytest.param(
+            False,
+            "ComputeResources",
+            ["Scheduling", "SlurmQueues[queue1]"],
+            None,
+            {"Name": "compute-added", "InstanceType": "c5.large", "MinCount": 1},
+            None,
+            [],
+            True,
+            id="running fleet and compute is added",
+        ),
+        pytest.param(
+            False,
+            "ComputeResources",
+            ["Scheduling", "SlurmQueues[queue1]"],
+            {"Name": "compute-to-remove", "InstanceType": "c5.large", "MinCount": 1},
+            None,
+            None,
+            [],
+            False,
+            id="running fleet and compute is removed wo update strategy",
+        ),
+        pytest.param(
+            False,
+            "ComputeResources",
+            ["Scheduling", "SlurmQueues[queue1]"],
+            {"Name": "compute-to-remove", "InstanceType": "c5.large", "MinCount": 1},
+            None,
+            QueueUpdateStrategy.TERMINATE.value,
+            [],
+            True,
+            id="running fleet and compute is removed with TERMINATE update strategy",
+        ),
+        pytest.param(
+            False,
+            "ComputeResources",
+            ["Scheduling", "SlurmQueues[queue1]"],
+            {"Name": "compute-to-remove", "InstanceType": "c5.large", "MinCount": 1},
+            None,
+            QueueUpdateStrategy.DRAIN.value,
+            [],
+            False,
+            id="running fleet and compute is removed with DRAIN update strategy",
+        ),
+        pytest.param(
+            False,
+            "MaxCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            None,
+            [],
+            False,
+            id="running fleet and max count is decreased wo update strategy",
+        ),
+        pytest.param(
+            False,
+            "MaxCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            QueueUpdateStrategy.TERMINATE.value,
+            [],
+            True,
+            id="running fleet and max count is decreased with TERMINATE update strategy",
+        ),
+        pytest.param(
+            False,
+            "MaxCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            QueueUpdateStrategy.DRAIN.value,
+            [],
+            False,
+            id="running fleet and max count is decreased with DRAIN update strategy",
+        ),
+        pytest.param(
+            False,
+            "MaxCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [],
+            True,
+            id="running fleet and max count is increased",
+        ),
+        pytest.param(
+            False,
+            "MaxCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            None,
+            10,
+            None,
+            [],
+            True,
+            id="running fleet and max count is increased (initial value was not set)",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            None,
+            [],
+            False,
+            id="running fleet and min count is decreased wo update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            QueueUpdateStrategy.TERMINATE.value,
+            [],
+            True,
+            id="running fleet and  min count is decreased with TERMINATE update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            10,
+            0,
+            QueueUpdateStrategy.DRAIN.value,
+            [],
+            False,
+            id="running fleet and  min count is decreased with DRAIN update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [],
+            False,
+            id="running fleet and  min count is increased wo update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            QueueUpdateStrategy.TERMINATE.value,
+            [],
+            True,
+            id="running fleet and min count is increased with TERMINATE update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            QueueUpdateStrategy.DRAIN.value,
+            [],
+            False,
+            id="running fleet and  min count is increased with DRAIN update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [
+                Change(
+                    path=["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+                    key="MaxCount",
+                    old_value="0",
+                    new_value="1",
+                    update_policy={},
+                    is_list=False,
+                )
+            ],
+            False,
+            id="running fleet and  min > max count are increased wo update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [
+                Change(
+                    path=["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+                    key="MaxCount",
+                    old_value=None,
+                    new_value="1",
+                    update_policy={},
+                    is_list=False,
+                )
+            ],
+            False,
+            id="running fleet and  min > max count are increased wo update strategy (max count old value not set)",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [
+                Change(
+                    path=["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+                    key="MaxCount",
+                    old_value="0",
+                    new_value="10",
+                    update_policy={},
+                    is_list=False,
+                )
+            ],
+            True,
+            id="running fleet and  min = max count are increased wo update strategy",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            None,
+            10,
+            None,
+            [
+                Change(
+                    path=["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+                    key="MaxCount",
+                    old_value=None,
+                    new_value="10",
+                    update_policy={},
+                    is_list=False,
+                )
+            ],
+            True,
+            id="running fleet and  min = max count are increased wo update strategy "
+            "(both min and max count old value not set)",
+        ),
+        pytest.param(
+            False,
+            "MinCount",
+            ["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+            0,
+            10,
+            None,
+            [
+                Change(
+                    path=["Scheduling", "SlurmQueues[queue1], ComputeResources[compute1]"],
+                    key="MaxCount",
+                    old_value="0",
+                    new_value="20",
+                    update_policy={},
+                    is_list=False,
+                )
+            ],
+            True,
+            id="running fleet and  min < max count are increased wo update strategy",
+        ),
     ],
 )
-def test_max_count_policy(mocker, is_fleet_stopped, old_max, new_max, expected_result):
+def test_condition_checker_resize_update_strategy_on_remove(
+    mocker, is_fleet_stopped, key, path, old_value, new_value, update_strategy, other_changes, expected_result
+):
     cluster = dummy_cluster()
     cluster_has_running_capacity_mock = mocker.patch.object(
         cluster, "has_running_capacity", return_value=not is_fleet_stopped
@@ -48,11 +465,29 @@ def test_max_count_policy(mocker, is_fleet_stopped, old_max, new_max, expected_r
 
     patch_mock = mocker.MagicMock()
     patch_mock.cluster = cluster
+    patch_mock.target_config = (
+        {"Scheduling": {"SlurmSettings": {"QueueUpdateStrategy": update_strategy}}}
+        if update_strategy
+        else {"Scheduling": {"SlurmSettings": {}}}
+    )
+    if [other_changes]:
+        patch_mock.changes = other_changes
     change_mock = mocker.MagicMock()
-    change_mock.new_value = new_max
-    change_mock.old_value = old_max
+    change_mock.path = path
+    change_mock.key = key
+    change_mock.old_value = old_value
+    change_mock.new_value = new_value
 
-    assert_that(UpdatePolicy.MAX_COUNT.condition_checker(change_mock, patch_mock)).is_equal_to(expected_result)
+    assert_that(UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE.condition_checker(change_mock, patch_mock)).is_equal_to(
+        expected_result
+    )
+    assert_that(UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE.fail_reason(change_mock, patch_mock)).is_equal_to(
+        "All compute nodes must be stopped or QueueUpdateStrategy must be set to TERMINATE"
+    )
+    assert_that(UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE.action_needed(change_mock, patch_mock)).is_equal_to(
+        "Stop the compute fleet or set QueueUpdateStrategy:TERMINATE in config "
+        "to remove nodes from the scheduler, terminate the associated instances & any running jobs"
+    )
     cluster_has_running_capacity_mock.assert_called()
 
 
@@ -303,95 +738,43 @@ def test_queue_update_strategy_condition_checker(
     [
         pytest.param(
             True,
-            "SlurmQueues",
-            ["Scheduling"],
+            "Instances",
+            ["Scheduling", "SlurmQueues[queue1]", "ComputeResources[compute-resource1]"],
             None,
-            {
-                "Name": "queue-added",
-                "Networking": {"SubnetIds": "subnet-12345678"},
-                "ComputeResources": {"Name": "compute-added", "InstanceType": "c5.9xlarge"},
-            },
+            {"InstanceType": "c5.9xlarge"},
             True,
-            id="stopped fleet and queue is added",
+            id="stopped fleet and instance type is added",
         ),
         pytest.param(
             True,
-            "SlurmQueues",
-            ["Scheduling"],
-            {
-                "Name": "queue-removed",
-                "Networking": {"SubnetIds": "subnet-12345678"},
-                "ComputeResources": {"Name": "compute-removed", "InstanceType": "c5.9xlarge"},
-            },
+            "Instances",
+            ["Scheduling", "SlurmQueues[queue1]", "ComputeResources[compute-resource1]"],
+            {"InstanceType": "c5.9xlarge"},
             None,
             True,
-            id="stopped fleet and queue is removed",
-        ),
-        pytest.param(
-            True,
-            "ComputeResources",
-            ["Scheduling", "SlurmQueues[queue1]"],
-            None,
-            {"Name": "compute-added", "InstanceType": "c5.large", "MinCount": 1},
-            True,
-            id="stopped fleet and compute is added",
-        ),
-        pytest.param(
-            True,
-            "ComputeResources",
-            ["Scheduling", "SlurmQueues[queue1]"],
-            {"Name": "compute-removed", "InstanceType": "c5.large", "MinCount": 1},
-            None,
-            True,
-            id="stopped fleet and compute is removed",
+            id="stopped fleet and instance type is removed",
         ),
         pytest.param(
             False,
-            "SlurmQueues",
-            ["Scheduling"],
+            "Instances",
+            ["Scheduling", "SlurmQueues[queue1]", "ComputeResources[compute-resource1]"],
             None,
-            {
-                "Name": "queue-added",
-                "Networking": {"SubnetIds": "subnet-12345678"},
-                "ComputeResources": {"Name": "compute-added", "InstanceType": "c5.9xlarge"},
-            },
+            {"InstanceType": "c5.9xlarge"},
             True,
-            id="running fleet and queue is added",
+            id="running fleet and instance type is added",
         ),
         pytest.param(
             False,
-            "SlurmQueues",
-            ["Scheduling"],
-            {
-                "Name": "queue-removed",
-                "Networking": {"SubnetIds": "subnet-12345678"},
-                "ComputeResources": {"Name": "compute-removed", "InstanceType": "c5.9xlarge"},
-            },
+            "Instances",
+            ["Scheduling", "SlurmQueues[queue1]", "ComputeResources[compute-resource1]"],
+            {"InstanceType": "c5.9xlarge"},
             None,
             False,
-            id="running fleet and queue is removed",
-        ),
-        pytest.param(
-            False,
-            "ComputeResources",
-            ["Scheduling", "SlurmQueues[queue1]"],
-            None,
-            {"Name": "compute-added", "InstanceType": "c5.large", "MinCount": 1},
-            True,
-            id="running fleet and compute is added",
-        ),
-        pytest.param(
-            False,
-            "ComputeResources",
-            ["Scheduling", "SlurmQueues[queue1]"],
-            {"Name": "compute-removed", "InstanceType": "c5.large", "MinCount": 1},
-            None,
-            False,
-            id="running fleet and compute is removed",
+            id="running fleet and instance type is removed",
         ),
     ],
 )
-def test_compute_fleet_stop_on_remove_condition_checker(
+def test_condition_checker_compute_fleet_stop_on_remove(
     mocker, is_fleet_stopped, key, path, old_value, new_value, expected_result
 ):
     cluster = dummy_cluster()
@@ -456,9 +839,9 @@ def test_queue_update_strategy_fail_reason_and_actions_needed(
             "SlurmQueues",
             ["Scheduling"],
             {
-                "Name": "queue-removed",
+                "Name": "queue-to-remove",
                 "Networking": {"SubnetIds": "subnet-12345678"},
-                "ComputeResources": {"Name": "compute-removed", "InstanceType": "c5.9xlarge"},
+                "ComputeResources": {"Name": "compute-to-remove", "InstanceType": "c5.9xlarge"},
             },
             None,
             "All compute nodes must be stopped",
@@ -526,222 +909,444 @@ def test_compute_fleet_stop_fail_reason_and_actions_needed(
     )
 
 
+managed_ebs = {
+    "MountDir": "/ebs-managed",
+    "Name": "ebs-managed",
+    "StorageType": "Ebs",
+}
+
+managed_efs = {
+    "MountDir": "/efs-managed",
+    "Name": "efs-managed",
+    "StorageType": "Efs",
+}
+
+external_efs = {
+    "MountDir": "/efs-external",
+    "Name": "efs-external",
+    "StorageType": "Efs",
+    "EfsSettings": {"FileSystemId": "fs-123456789"},
+}
+
+managed_fsx_lustre = {
+    "MountDir": "/fsx-managed",
+    "Name": "fsx-managed",
+    "StorageType": "FsxLustre",
+}
+
+external_fsx_lustre = {
+    "MountDir": "/fsx-external",
+    "Name": "fsx-external",
+    "StorageType": "FsxLustre",
+    "FsxLustreSettings": {"FileSystemId": "fs-123456789"},
+}
+
+
 @pytest.mark.parametrize(
-    "is_fleet_stopped, key, path, old_value, new_value, update_strategy, expected_result, expected_fail_reason, "
-    "expected_actions_needed, scheduler",
+    "is_fleet_stopped, has_running_login_nodes, key, path, old_value, new_value, update_strategy, expected_result, "
+    "expected_fail_reason, expected_actions_needed, scheduler",
     [
+        # Managed EBS
         pytest.param(
             True,
+            False,
             "SharedStorage",
             [],
             None,
-            {"MountDir": "/ebs3", "Name": "ebs3", "StorageType": "Ebs", "EbsSettings": {"VolumeType": "gp3"}},
+            managed_ebs,
             None,
             True,
             None,
             None,
             "slurm",
-            id="stopped fleet and add new EBS section",
+            id="Compute stopped, login stopped, add managed EBS, update strategy not set: accepted",
         ),
         pytest.param(
             True,
+            False,
             "SharedStorage",
             [],
-            {"MountDir": "/ebs3", "Name": "ebs3", "StorageType": "Ebs", "EbsSettings": {"VolumeType": "gp3"}},
+            managed_ebs,
             None,
             None,
             True,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
+            None,
+            None,
             "slurm",
-            id="stopped fleet and remove EBS section",
+            id="Compute stopped, login stopped, remove managed EBS, update strategy not set: accepted",
         ),
         pytest.param(
+            False,
             False,
             "SharedStorage",
             [],
             None,
-            {"MountDir": "/ebs3", "Name": "ebs3", "StorageType": "Ebs", "EbsSettings": {"VolumeType": "gp3"}},
+            managed_ebs,
             None,
             False,
-            "All compute nodes must be stopped or QueueUpdateStrategy must be set",
+            "All compute nodes must be stopped or QueueUpdateStrategy must be set.",
             "Stop the compute fleet with the pcluster update-compute-fleet command, or set QueueUpdateStrategy in the "
-            "configuration used for the 'update-cluster' operation",
+            "configuration used for the 'update-cluster' operation.",
             "slurm",
-            id="running fleet and adding a new EBS section with no update strategy set",
+            id="Compute running, login stopped, add managed EBS, update strategy not set: rejected",
         ),
         pytest.param(
+            False,
             False,
             "SharedStorage",
             [],
             None,
-            {"MountDir": "/ebs3", "Name": "ebs3", "StorageType": "Ebs", "EbsSettings": {"VolumeType": "gp3"}},
-            None,
-            False,
-            "Update actions are not currently supported for the 'SharedStorage' parameter",
-            "Restore the parameter 'SharedStorage'. If you need this change, please consider creating a new cluster "
-            "instead of updating the existing one.",
-            "awsbatch",
-            id="running fleet and EBS changed with no update strategy set with awsbatch scheduler",
-        ),
-        pytest.param(
-            False,
-            "SharedStorage",
-            [],
-            None,
-            {"MountDir": "/ebs3", "Name": "ebs3", "StorageType": "Ebs", "EbsSettings": {"VolumeType": "gp3"}},
-            None,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
-            "plugin",
-            id="running fleet and EBS changed with no update strategy set with plugin scheduler",
-        ),
-        pytest.param(
-            False,
-            "SharedStorage",
-            [],
-            None,
-            {"MountDir": "/ebs3", "Name": "ebs3", "StorageType": "Ebs", "EbsSettings": {"VolumeType": "gp3"}},
+            managed_ebs,
             QueueUpdateStrategy.TERMINATE.value,
             True,
             None,
             None,
             "slurm",
-            id="running fleet and EBS added with update strategy TERMINATE",
+            id="Compute running, login stopped, add managed EBS, update strategy TERMINATE: accepted",
         ),
         pytest.param(
             False,
+            False,
             "SharedStorage",
             [],
-            {"MountDir": "/ebs3", "Name": "ebs3", "StorageType": "Ebs", "EbsSettings": {"VolumeType": "gp3"}},
+            managed_ebs,
             None,
             QueueUpdateStrategy.DRAIN.value,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
+            True,
+            None,
+            None,
             "slurm",
-            id="running fleet and Ebs removed with update strategy DRAIN",
+            id="Compute running, login stopped, remove managed EBS, update strategy DRAIN: accepted",
         ),
+        # Managed EFS
         pytest.param(
+            False,
             False,
             "SharedStorage",
             [],
             None,
-            {"MountDir": "/efs4", "Name": "efs4", "StorageType": "Efs"},
+            managed_efs,
             QueueUpdateStrategy.TERMINATE.value,
             True,
             None,
             None,
             "slurm",
-            id="running fleet and EFS added with update strategy TERMINATE",
+            id="Compute running, login stopped, add managed EFS, update strategy TERMINATE: accepted",
         ),
         pytest.param(
             True,
+            False,
             "SharedStorage",
             [],
-            {"MountDir": "/efs", "Name": "efs", "StorageType": "Efs"},
+            managed_efs,
             None,
             None,
             True,
             None,
             None,
             "slurm",
-            id="stopped fleet and change EFS section",
+            id="Compute stopped, login stopped, remove managed EFS, update strategy not set: accepted",
         ),
         pytest.param(
             False,
+            True,
             "SharedStorage",
             [],
-            {"MountDir": "/efs", "Name": "efs", "StorageType": "Efs"},
+            managed_efs,
             None,
             QueueUpdateStrategy.DRAIN.value,
             False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
+            "All login nodes must be stopped",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
             "slurm",
-            id="running fleet and Efs removed with update strategy DRAIN",
+            id="Compute running, login running, remove managed EFS, update strategy DRAIN: rejected",
         ),
         pytest.param(
             False,
-            "SharedStorage",
-            [],
-            {"MountDir": "/efs", "Name": "efs", "StorageType": "Efs", "EfsSettings": {"DeletionPolicy": "Retain"}},
-            None,
-            QueueUpdateStrategy.DRAIN.value,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
-            "slurm",
-            id="running fleet and Efs removed with DeletionPolicy to Retain and update strategy DRAIN",
-        ),
-        pytest.param(
-            False,
-            "SharedStorage",
-            [],
-            {"MountDir": "/efs", "Name": "efs", "StorageType": "Efs", "EfsSettings": {"DeletionPolicy": "Retain"}},
-            None,
-            None,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
-            "slurm",
-            id="running fleet and Efs removed with DeletionPolicy to Retain",
-        ),
-        pytest.param(
-            False,
-            "SharedStorage",
-            [],
-            {"MountDir": "/efs", "Name": "efs", "StorageType": "Efs", "EfsSettings": {"DeletionPolicy": "Retain"}},
-            None,
-            None,
-            False,
-            "Update actions are not currently supported for the 'SharedStorage' parameter",
-            "Restore 'SharedStorage' value to '{'MountDir': '/efs', 'Name': 'efs', 'StorageType': 'Efs', "
-            "'EfsSettings': {'DeletionPolicy': 'Retain'}}'",
-            "awsbatch",
-            id="running fleet and Efs removed with DeletionPolicy to Retain with awsbatch scheduler",
-        ),
-        pytest.param(
-            False,
-            "SharedStorage",
-            [],
-            {"MountDir": "/efs", "Name": "efs", "StorageType": "Efs", "EfsSettings": {"DeletionPolicy": "Retain"}},
-            None,
-            None,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
-            "plugin",
-            id="running fleet and Efs removed with DeletionPolicy to Retain with plugin scheduler",
-        ),
-        pytest.param(
-            False,
-            "SharedStorage",
-            [],
-            {"MountDir": "/efs", "Name": "efs", "StorageType": "Efs", "EfsSettings": {"DeletionPolicy": "Delete"}},
-            None,
-            QueueUpdateStrategy.DRAIN.value,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
-            "slurm",
-            id="running fleet and Efs removed with DeletionPolicy to Delete and update strategy DRAIN",
-        ),
-        pytest.param(
             True,
             "SharedStorage",
             [],
-            {"MountDir": "/lstrue", "Name": "Fsx", "StorageType": "FsxLustre"},
+            managed_efs,
+            None,
+            None,
+            False,
+            "All compute nodes must be stopped or QueueUpdateStrategy must be set. All login nodes must be stopped",
+            "Stop the compute fleet with the pcluster update-compute-fleet command, "
+            "or set QueueUpdateStrategy in the configuration used for the 'update-cluster' operation. "
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            "slurm",
+            id="Compute running, login running, remove managed EFS, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
+            True,
+            "SharedStorage",
+            [],
+            managed_efs,
+            None,
+            QueueUpdateStrategy.DRAIN.value,
+            False,
+            "All login nodes must be stopped",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            "slurm",
+            id="Compute running, login running, remove managed EFS, update strategy DRAIN: rejected",
+        ),
+        # External EFS
+        pytest.param(
+            True,
+            False,
+            "SharedStorage",
+            [],
+            None,
+            external_efs,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute stopped, login stopped, add external EFS, no update strategy set: accepted",
+        ),
+        pytest.param(
+            True,
+            False,
+            "SharedStorage",
+            [],
+            external_efs,
             None,
             None,
             True,
             None,
             None,
             "slurm",
-            id="Stopped fleet and change FsxLustre section",
+            id="Compute stopped, login stopped, remove external EFS, no update strategy set: accepted",
         ),
         pytest.param(
+            False,
+            True,
+            "SharedStorage",
+            [],
+            None,
+            external_efs,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute running, login running, add external EFS, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
+            True,
+            "SharedStorage",
+            [],
+            external_efs,
+            None,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute running, login running, remove external EFS, update strategy not set: rejected",
+        ),
+        pytest.param(
+            True,
+            True,
+            "SharedStorage",
+            [],
+            None,
+            external_efs,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute stopped, login running, add external EFS, update strategy not set: rejected",
+        ),
+        pytest.param(
+            True,
+            True,
+            "SharedStorage",
+            [],
+            external_efs,
+            None,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute stopped, login running, remove external EFS, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
+            False,
+            "SharedStorage",
+            [],
+            None,
+            external_efs,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute running, login stopped, add external EFS, update strategy not set: accepted",
+        ),
+        pytest.param(
+            False,
+            False,
+            "SharedStorage",
+            [],
+            external_efs,
+            None,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute running, login stopped, remove external EFS, update strategy not set: accepted",
+        ),
+        # Managed FSxLustre
+        pytest.param(
+            True,
+            False,
+            "SharedStorage",
+            [],
+            None,
+            managed_fsx_lustre,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute stopped, login stopped, add managed FSxLustre, update strategy not set: accepted",
+        ),
+        pytest.param(
+            True,
+            False,
+            "SharedStorage",
+            [],
+            managed_fsx_lustre,
+            None,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute stopped, login stopped, remove managed FSxLustre, no update strategy set: accepted",
+        ),
+        pytest.param(
+            False,
+            True,
+            "SharedStorage",
+            [],
+            None,
+            managed_fsx_lustre,
+            None,
+            False,
+            "All compute nodes must be stopped or QueueUpdateStrategy must be set. All login nodes must be stopped",
+            "Stop the compute fleet with the pcluster update-compute-fleet command, "
+            "or set QueueUpdateStrategy in the configuration used for the 'update-cluster' operation. "
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            "slurm",
+            id="Compute running, login running, add managed FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
+            True,
+            "SharedStorage",
+            [],
+            managed_fsx_lustre,
+            None,
+            None,
+            False,
+            "All compute nodes must be stopped or QueueUpdateStrategy must be set. All login nodes must be stopped",
+            "Stop the compute fleet with the pcluster update-compute-fleet command, "
+            "or set QueueUpdateStrategy in the configuration used for the 'update-cluster' operation. "
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            "slurm",
+            id="Compute running, login running, remove managed FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            True,
+            True,
+            "SharedStorage",
+            [],
+            None,
+            managed_fsx_lustre,
+            None,
+            False,
+            "All login nodes must be stopped",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            "slurm",
+            id="Compute stopped, login running, add managed FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            True,
+            True,
+            "SharedStorage",
+            [],
+            managed_fsx_lustre,
+            None,
+            None,
+            False,
+            "All login nodes must be stopped",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            "slurm",
+            id="Compute stopped, login running, remove managed FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
+            True,
+            "SharedStorage",
+            [],
+            managed_fsx_lustre,
+            None,
+            QueueUpdateStrategy.DRAIN.value,
+            False,
+            "All login nodes must be stopped",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            "slurm",
+            id="Compute running, login running, remove managed FSxLustre, update strategy DRAIN: rejected",
+        ),
+        pytest.param(
+            False,
+            False,
+            "SharedStorage",
+            [],
+            None,
+            managed_fsx_lustre,
+            None,
+            False,
+            "All compute nodes must be stopped or QueueUpdateStrategy must be set.",
+            "Stop the compute fleet with the pcluster update-compute-fleet command, "
+            "or set QueueUpdateStrategy in the configuration used for the 'update-cluster' operation.",
+            "slurm",
+            id="Compute running, login stopped, add managed FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
+            False,
+            "SharedStorage",
+            [],
+            managed_fsx_lustre,
+            None,
+            None,
+            False,
+            "All compute nodes must be stopped or QueueUpdateStrategy must be set.",
+            "Stop the compute fleet with the pcluster update-compute-fleet command, "
+            "or set QueueUpdateStrategy in the configuration used for the 'update-cluster' operation.",
+            "slurm",
+            id="Compute running, login stopped, remove managed FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
             False,
             "SharedStorage",
             [],
@@ -752,83 +1357,128 @@ def test_compute_fleet_stop_fail_reason_and_actions_needed(
             None,
             None,
             "slurm",
-            id="running fleet and Fsx added with update strategy DRAIN",
+            id="Compute running, login stopped, add managed FSxLustre, update strategy TERMINATE: accepted",
         ),
+        # External FSx
+        # We test FSxLustre, as an FSx storage to cover all the other FSx storage types (Ontap, OpenZfs, FileCache)
         pytest.param(
+            True,
             False,
             "SharedStorage",
             [],
-            {"MountDir": "/fsx", "Name": "fsx", "StorageType": "FsxLustre"},
             None,
-            QueueUpdateStrategy.DRAIN.value,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
-            "slurm",
-            id="running fleet and Fsx removed with update strategy DRAIN",
-        ),
-        pytest.param(
-            False,
-            "SharedStorage",
-            [],
-            {
-                "MountDir": "/fsx",
-                "Name": "fsx",
-                "StorageType": "FsxLustre",
-                "FsxLustreSettings": {"DeletionPolicy": "Retain"},
-            },
+            external_fsx_lustre,
             None,
-            QueueUpdateStrategy.DRAIN.value,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
+            True,
+            None,
+            None,
             "slurm",
-            id="running fleet and FSx removed with DeletionPolicy to Retain and update strategy DRAIN",
+            id="Compute stopped, login stopped, add external FSxLustre, no update strategy set: accepted",
         ),
         pytest.param(
             True,
+            False,
             "SharedStorage",
             [],
-            {"MountDir": "/openzfs", "Name": "Fsx", "StorageType": "FsxOpenZfs"},
+            external_fsx_lustre,
             None,
             None,
             True,
             None,
             None,
             "slurm",
-            id="Stopped fleet and change FsxOpenXfs section",
+            id="Compute stopped, login stopped, remove external FSxLustre, no update strategy set: accepted",
         ),
         pytest.param(
+            False,
             True,
             "SharedStorage",
             [],
             None,
-            {"MountDir": "/ontap", "Name": "ontap", "StorageType": "FsxOntap"},
+            external_fsx_lustre,
             None,
             True,
             None,
             None,
             "slurm",
-            id="Stopped fleet and change FsxOntap section",
+            id="Compute running, login running, add external FSxLustre, update strategy not set: rejected",
         ),
         pytest.param(
             False,
+            True,
             "SharedStorage",
             [],
-            {"MountDir": "/fsx", "Name": "fsx", "StorageType": "FsxOntap"},
+            external_fsx_lustre,
             None,
             None,
-            False,
-            "All compute nodes must be stopped",
-            "Stop the compute fleet with the pcluster update-compute-fleet command",
+            True,
+            None,
+            None,
             "slurm",
-            id="running fleet and Efs change with no update strategy set",
+            id="Compute running, login running, remove external FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            True,
+            True,
+            "SharedStorage",
+            [],
+            None,
+            external_fsx_lustre,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute stopped, login running, add external FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            True,
+            True,
+            "SharedStorage",
+            [],
+            external_fsx_lustre,
+            None,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute stopped, login running, remove external FSxLustre, update strategy not set: rejected",
+        ),
+        pytest.param(
+            False,
+            False,
+            "SharedStorage",
+            [],
+            None,
+            external_fsx_lustre,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute running, login stopped, add external FSxLustre, update strategy not set: accepted",
+        ),
+        pytest.param(
+            False,
+            False,
+            "SharedStorage",
+            [],
+            external_fsx_lustre,
+            None,
+            None,
+            True,
+            None,
+            None,
+            "slurm",
+            id="Compute running, login stopped, remove external FSxLustre, update strategy not set: accepted",
         ),
     ],
 )
 def test_shared_storage_update_policy_condition_checker(
     mocker,
     is_fleet_stopped,
+    has_running_login_nodes,
     key,
     path,
     old_value,
@@ -843,22 +1493,16 @@ def test_shared_storage_update_policy_condition_checker(
     cluster_has_running_capacity_mock = mocker.patch.object(
         cluster, "has_running_capacity", return_value=not is_fleet_stopped
     )
-    mocker.patch(
-        "pcluster.config.update_policy.is_awsbatch_scheduler", return_value=True if scheduler == "awsbatch" else False
-    )
-    mocker.patch(
-        "pcluster.config.update_policy.is_slurm_scheduler", return_value=True if scheduler == "slurm" else False
+    cluster_has_running_login_nodes_mock = mocker.patch.object(
+        cluster, "has_running_login_nodes", return_value=has_running_login_nodes
     )
     patch_mock = mocker.MagicMock()
     patch_mock.cluster = cluster
-    if scheduler == "slurm":
-        patch_mock.target_config = (
-            {"Scheduling": {"SlurmSettings": {"QueueUpdateStrategy": update_strategy}}}
-            if update_strategy
-            else {"Scheduling": {"SlurmSettings": {}}}
-        )
-    else:
-        patch_mock.target_config = {"Scheduling": {}}
+    patch_mock.target_config = (
+        {"Scheduling": {"SlurmSettings": {"QueueUpdateStrategy": update_strategy}}}
+        if update_strategy
+        else {"Scheduling": {"SlurmSettings": {}}}
+    )
 
     change_mock = mocker.MagicMock()
     change_mock.path = path
@@ -876,8 +1520,8 @@ def test_shared_storage_update_policy_condition_checker(
         assert_that(UpdatePolicy.SHARED_STORAGE_UPDATE_POLICY.action_needed(change_mock, patch_mock)).is_equal_to(
             expected_actions_needed
         )
-    if scheduler != "awsbatch":
-        cluster_has_running_capacity_mock.assert_called()
+    cluster_has_running_login_nodes_mock.assert_called()
+    cluster_has_running_capacity_mock.assert_called()
 
 
 @pytest.mark.parametrize(
@@ -1678,3 +2322,766 @@ def test_condition_checker_managed_fsx(
     assert_that(condition_checker_managed_fsx(change, patch)).is_equal_to(expected_subnet_updated)
     assert_that(fail_reason_managed_fsx(change, patch)).is_equal_to(expected_fail_reason)
     assert_that(actions_needed_managed_fsx(change, patch)).is_equal_to(expected_action_needed)
+
+
+@pytest.mark.parametrize(
+    "key, path, old_value, new_value, expected_running_login_nodes, expected_update_allowed, "
+    "expected_fail_reason, expected_actions_needed",
+    [
+        pytest.param(
+            "Pools",
+            ["LoginNodes"],
+            {
+                "Name": "pool-old",
+                "InstanceType": "t3.micro",
+                "GracetimePeriod": 3,
+                "Count": 1,
+                "Networking": {"SubnetIds": ["subnet-12345678901234567"]},
+                "Ssh": {"KeyName": "valid-key"},
+            },
+            None,
+            True,
+            False,
+            "The update is not supported when login nodes are running",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            id="Login nodes must be stopped to remove a pool",
+        ),
+        pytest.param(
+            "Pools",
+            ["LoginNodes"],
+            {
+                "Name": "pool-old",
+                "InstanceType": "t3.micro",
+                "GracetimePeriod": 3,
+                "Count": 1,
+                "Networking": {"SubnetIds": ["subnet-12345678901234567"]},
+                "Ssh": {"KeyName": "valid-key"},
+            },
+            None,
+            False,
+            True,
+            None,
+            None,
+            id="Login pools can be removed when Login Nodes stopped",
+        ),
+        pytest.param(
+            "Pools",
+            ["LoginNodes"],
+            None,
+            {
+                "Name": "pool-new",
+                "InstanceType": "t3.micro",
+                "GracetimePeriod": 3,
+                "Count": 1,
+                "Networking": {"SubnetIds": ["subnet-12345678901234567"]},
+                "Ssh": {"KeyName": "valid-key"},
+            },
+            True,
+            True,
+            None,
+            None,
+            id="Login pools can be added",
+        ),
+        pytest.param(
+            "Pools",
+            ["LoginNodes"],
+            None,
+            {
+                "Name": "pool-new",
+                "InstanceType": "t3.micro",
+                "GracetimePeriod": 3,
+                "Count": 1,
+                "Networking": {"SubnetIds": ["subnet-12345678901234567"]},
+                "Ssh": {"KeyName": "valid-key"},
+            },
+            False,
+            True,
+            None,
+            None,
+            id="Login pools can be added",
+        ),
+    ],
+)
+def test_login_nodes_pools_policy(
+    mocker,
+    key,
+    path,
+    old_value,
+    new_value,
+    expected_running_login_nodes,
+    expected_update_allowed,
+    expected_fail_reason,
+    expected_actions_needed,
+):
+    cluster = dummy_cluster()
+    mocker.patch.object(cluster, "has_running_login_nodes", return_value=expected_running_login_nodes)
+
+    patch_mock = mocker.MagicMock()
+    patch_mock.cluster = cluster
+    change_mock = mocker.MagicMock()
+    change_mock.path = path
+    change_mock.key = key
+    change_mock.old_value = old_value
+    change_mock.new_value = new_value
+
+    assert_that(UpdatePolicy.LOGIN_NODES_POOLS.condition_checker(change_mock, patch_mock)).is_equal_to(
+        expected_update_allowed
+    )
+    if not expected_update_allowed:
+        assert_that(UpdatePolicy.LOGIN_NODES_POOLS.fail_reason(change_mock, patch_mock)).is_equal_to(
+            expected_fail_reason
+        )
+        assert_that(UpdatePolicy.LOGIN_NODES_POOLS.action_needed(change_mock, patch_mock)).is_equal_to(
+            expected_actions_needed
+        )
+
+
+@pytest.mark.parametrize(
+    "base_config, target_config, change, login_nodes_running, expected_update_allowed, "
+    "pool_specific, expected_fail_reason, expected_action_needed",
+    [
+        pytest.param(
+            {
+                "LoginNodes": {"Pools": [{"Name": "mock-lp1", "Ssh": {"AllowedIps": "1.2.3.0/24"}}]},
+            },
+            {
+                "LoginNodes": {"Pools": [{"Name": "mock-lp1", "Ssh": {"AllowedIps": "5.6.7.0/24"}}]},
+            },
+            Change(
+                path=["LoginNodes", "Pools[mock-lp1]", "Ssh"],
+                key="AllowedIps",
+                old_value="1.2.3.0/24",
+                new_value="5.6.7.0/24",
+                update_policy={},
+                is_list=False,
+            ),
+            False,
+            True,
+            False,
+            None,
+            None,
+            id="Login nodes parameter covered by the policy can be updated when login nodes are stopped",
+        ),
+        pytest.param(
+            {
+                "LoginNodes": {"Pools": [{"Name": "mock-lp1", "Ssh": {"AllowedIps": "0.0.0.0/0"}}]},
+            },
+            {
+                "LoginNodes": {"Pools": [{"Name": "mock-lp1", "Ssh": {"AllowedIps": "1.1.1.1/1"}}]},
+            },
+            Change(
+                path=["LoginNodes", "Pools[mock-lp1]", "Ssh"],
+                key="AllowedIps",
+                old_value="0.0.0.0/0",
+                new_value="1.1.1.1/1",
+                update_policy={},
+                is_list=False,
+            ),
+            True,
+            False,
+            False,
+            "The update is not supported when login nodes are running",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            id="Login nodes parameter covered by the policy cannot be updated when login nodes are running",
+        ),
+        pytest.param(
+            {
+                "LoginNodes": {"Pools": [{"Name": "mock-lp1", "Ssh": {"AllowedIps": "0.0.0.0/0"}}]},
+            },
+            {
+                "LoginNodes": {"Pools": [{"Name": "mock-lp1", "Ssh": {"AllowedIps": "1.1.1.1/1"}}]},
+            },
+            Change(
+                path=["LoginNodes", "Pools[mock-lp1]", "Ssh"],
+                key="AllowedIps",
+                old_value="0.0.0.0/0",
+                new_value="1.1.1.1/1",
+                update_policy={},
+                is_list=False,
+            ),
+            True,
+            False,
+            True,
+            "The update is not supported when login nodes in mock-lp1 are running",
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            id="Login nodes parameter covered by the policy cannot be updated when login nodes are running",
+        ),
+    ],
+)
+def test_login_nodes_stop_policy(
+    mocker,
+    base_config,
+    target_config,
+    change,
+    login_nodes_running,
+    expected_update_allowed,
+    pool_specific,
+    expected_fail_reason,
+    expected_action_needed,
+):
+    update_policy = UpdatePolicy.LOGIN_NODES_POOL_STOP if pool_specific else UpdatePolicy.LOGIN_NODES_STOP
+    cluster = Cluster(name="mock-name", stack="mock-stack")
+    mocker.patch.object(cluster, "has_running_login_nodes", return_value=login_nodes_running)
+    patch = ConfigPatch(cluster=cluster, base_config=base_config, target_config=target_config)
+    assert_that(update_policy.condition_checker(change, patch)).is_equal_to(expected_update_allowed)
+    if not expected_update_allowed:
+        assert_that(update_policy.fail_reason(change, patch)).is_equal_to(expected_fail_reason)
+        assert_that(update_policy.action_needed(change, patch)).is_equal_to(expected_action_needed)
+
+
+@pytest.mark.parametrize(
+    "base_config, target_config, change, compute_nodes_running, login_nodes_running,"
+    "expected_update_allowed, expected_fail_reason, expected_action_needed",
+    [
+        pytest.param(
+            {
+                "DirectoryService": {"DomainName": "dn-1"},
+            },
+            {
+                "DirectoryService": {"DomainName": "dn-2"},
+            },
+            Change(
+                path=["DirectoryService", "DomainName"],
+                key="DomainName",
+                old_value="dn-1",
+                new_value="dn-2",
+                update_policy={},
+                is_list=False,
+            ),
+            False,
+            False,
+            True,
+            None,
+            None,
+            id="The parameter covered by the policy can be updated when login nodes and compute nodes are not running",
+        ),
+        pytest.param(
+            {
+                "DirectoryService": {"DomainName": "dn-1"},
+            },
+            {
+                "DirectoryService": {"DomainName": "dn-2"},
+            },
+            Change(
+                path=["DirectoryService", "DomainName"],
+                key="DomainName",
+                old_value="dn-1",
+                new_value="dn-2",
+                update_policy={},
+                is_list=False,
+            ),
+            True,
+            True,
+            False,
+            "The update is not supported when compute or login nodes are running",
+            "Stop the compute fleet with the pcluster update-compute-fleet command. "
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            id="The parameter covered by the policy cannot be updated when login nodes and compute nodes are running",
+        ),
+        pytest.param(
+            {
+                "DirectoryService": {"DomainName": "dn-1"},
+            },
+            {
+                "DirectoryService": {"DomainName": "dn-2"},
+            },
+            Change(
+                path=["DirectoryService", "DomainName"],
+                key="DomainName",
+                old_value="dn-1",
+                new_value="dn-2",
+                update_policy={},
+                is_list=False,
+            ),
+            True,
+            False,
+            False,
+            "The update is not supported when compute or login nodes are running",
+            "Stop the compute fleet with the pcluster update-compute-fleet command. "
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            id="The parameter covered by the policy cannot be updated when compute nodes are running",
+        ),
+        pytest.param(
+            {
+                "DirectoryService": {"DomainName": "dn-1"},
+            },
+            {
+                "DirectoryService": {"DomainName": "dn-2"},
+            },
+            Change(
+                path=["DirectoryService", "DomainName"],
+                key="DomainName",
+                old_value="dn-1",
+                new_value="dn-2",
+                update_policy={},
+                is_list=False,
+            ),
+            False,
+            True,
+            False,
+            "The update is not supported when compute or login nodes are running",
+            "Stop the compute fleet with the pcluster update-compute-fleet command. "
+            "Stop the login nodes by setting Count parameter to 0 "
+            "and update the cluster with the pcluster update-cluster command",
+            id="The parameter covered by the policy cannot be updated when login nodes are running",
+        ),
+    ],
+)
+def test_compute_and_login_nodes_stop_policy(
+    mocker,
+    base_config,
+    target_config,
+    change,
+    compute_nodes_running,
+    login_nodes_running,
+    expected_update_allowed,
+    expected_fail_reason,
+    expected_action_needed,
+):
+    update_policy = UpdatePolicy.COMPUTE_AND_LOGIN_NODES_STOP
+    cluster = Cluster(name="mock-name", stack="mock-stack")
+    mocker.patch.object(cluster, "has_running_capacity", return_value=compute_nodes_running)
+    mocker.patch.object(cluster, "has_running_login_nodes", return_value=login_nodes_running)
+    patch = ConfigPatch(cluster=cluster, base_config=base_config, target_config=target_config)
+    assert_that(update_policy.condition_checker(change, patch)).is_equal_to(expected_update_allowed)
+    if not expected_update_allowed:
+        assert_that(update_policy.fail_reason(change, patch)).is_equal_to(expected_fail_reason)
+        assert_that(update_policy.action_needed(change, patch)).is_equal_to(expected_action_needed)
+
+
+@pytest.mark.parametrize(
+    "old_storage_value, new_storage_value, expected_condition, expected_fail_reason, expected_action_needed",
+    [
+        pytest.param(
+            "/home",
+            "dummy",
+            False,
+            "The /home directory cannot be changed during an update",
+            "Please revert any changes to the /home mount",
+        ),
+        pytest.param(
+            "home",
+            "dummy",
+            False,
+            "The /home directory cannot be changed during an update",
+            "Please revert any changes to the /home mount",
+        ),
+        pytest.param(
+            "dummy",
+            "home",
+            False,
+            "The /home directory cannot be changed during an update",
+            "Please revert any changes to the /home mount",
+        ),
+        pytest.param(
+            "dummy",
+            "/home",
+            False,
+            "The /home directory cannot be changed during an update",
+            "Please revert any changes to the /home mount",
+        ),
+        pytest.param(
+            "dummy",
+            "not_home",
+            True,
+            None,
+            None,
+        ),
+    ],
+)
+def test_home_change_policy(
+    mocker, old_storage_value, new_storage_value, expected_condition, expected_fail_reason, expected_action_needed
+):
+    cluster = dummy_cluster()
+    mocker.patch.object(cluster, "has_running_capacity", return_value=False)
+    mocker.patch.object(cluster, "has_running_login_nodes", return_value=False)
+    patch_mock = mocker.MagicMock()
+    change_mock = mocker.MagicMock()
+    change_mock.new_value = {"MountDir": new_storage_value}
+    change_mock.old_value = {"MountDir": old_storage_value}
+    change_mock.key = "SharedStorage"
+
+    patch_mock.cluster = cluster
+    assert_that(UpdatePolicy.SHARED_STORAGE_UPDATE_POLICY.condition_checker(change_mock, patch_mock)).is_equal_to(
+        expected_condition
+    )
+    if expected_condition is False:
+        assert_that(UpdatePolicy.SHARED_STORAGE_UPDATE_POLICY.fail_reason(change_mock, patch_mock)).is_equal_to(
+            expected_fail_reason
+        )
+        assert_that(UpdatePolicy.SHARED_STORAGE_UPDATE_POLICY.action_needed(change_mock, patch_mock)).is_equal_to(
+            expected_action_needed
+        )
+
+
+# Tests for EXTRA_CHEF_ATTRIBUTES update policy
+@pytest.mark.parametrize(
+    "old_value, new_value, expected_result",
+    [
+        # No change - should succeed
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            True,
+            id="no change to updatable field",
+        ),
+        # Change only updatable field - should succeed
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            '{"cluster": {"slurm": {"reconfigure_timeout": "600"}}}',
+            True,
+            id="change updatable field from 300 to 600",
+        ),
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "600"}}}',
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            True,
+            id="change updatable field from 600 to 300",
+        ),
+        pytest.param(
+            None,
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            True,
+            id="add updatable field when none existed",
+        ),
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            None,
+            True,
+            id="remove updatable field",
+        ),
+        pytest.param(
+            "{}",
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            True,
+            id="add updatable field to empty json",
+        ),
+        # cluster_readiness_check_enabled - updatable field tests
+        pytest.param(
+            '{"cluster": {"cluster_readiness_check_enabled": true}}',
+            '{"cluster": {"cluster_readiness_check_enabled": false}}',
+            True,
+            id="change cluster_readiness_check_enabled value",
+        ),
+        pytest.param(
+            None,
+            '{"cluster": {"cluster_readiness_check_enabled": true}}',
+            True,
+            id="add cluster_readiness_check_enabled when none existed",
+        ),
+        pytest.param(
+            '{"cluster": {"cluster_readiness_check_enabled": true}}',
+            None,
+            True,
+            id="remove cluster_readiness_check_enabled",
+        ),
+        # cluster_readiness_check_ignore_failure - updatable field tests
+        pytest.param(
+            '{"cluster": {"cluster_readiness_check_ignore_failure": true}}',
+            '{"cluster": {"cluster_readiness_check_ignore_failure": false}}',
+            True,
+            id="change cluster_readiness_check_ignore_failure value",
+        ),
+        pytest.param(
+            None,
+            '{"cluster": {"cluster_readiness_check_ignore_failure": true}}',
+            True,
+            id="add cluster_readiness_check_ignore_failure when none existed",
+        ),
+        pytest.param(
+            '{"cluster": {"cluster_readiness_check_ignore_failure": true}}',
+            None,
+            True,
+            id="remove cluster_readiness_check_ignore_failure",
+        ),
+        # Change non-updatable field - should fail
+        pytest.param(
+            '{"cluster": {"some_other_field": "value1"}}',
+            '{"cluster": {"some_other_field": "value2"}}',
+            False,
+            id="change non-updatable field",
+        ),
+        pytest.param(
+            '{"other_key": "value1"}',
+            '{"other_key": "value2"}',
+            False,
+            id="change top-level non-updatable field",
+        ),
+        pytest.param(
+            None,
+            '{"cluster": {"some_other_field": "value"}}',
+            False,
+            id="add non-updatable field",
+        ),
+        pytest.param(
+            '{"cluster": {"some_other_field": "value"}}',
+            None,
+            False,
+            id="remove non-updatable field",
+        ),
+        # Mixed changes - should fail (non-updatable field changed)
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}, "other_field": "value1"}}',
+            '{"cluster": {"slurm": {"reconfigure_timeout": "600"}, "other_field": "value2"}}',
+            False,
+            id="change both updatable and non-updatable fields",
+        ),
+        # Change updatable field while keeping non-updatable field unchanged - should succeed
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}, "other_field": "same_value"}}',
+            '{"cluster": {"slurm": {"reconfigure_timeout": "600"}, "other_field": "same_value"}}',
+            True,
+            id="change updatable field while non-updatable field unchanged",
+        ),
+        # Empty to empty - should succeed
+        pytest.param(
+            "{}",
+            "{}",
+            True,
+            id="empty to empty",
+        ),
+        pytest.param(
+            None,
+            None,
+            True,
+            id="none to none",
+        ),
+        # Handle "-" as empty (used in config patch for missing values)
+        pytest.param(
+            "-",
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            True,
+            id="dash to updatable field",
+        ),
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}}}',
+            "-",
+            True,
+            id="updatable field to dash",
+        ),
+    ],
+)
+def test_extra_chef_attributes_condition_checker(mocker, old_value, new_value, expected_result):
+    patch_mock = mocker.MagicMock()
+    change_mock = mocker.MagicMock()
+    change_mock.old_value = old_value
+    change_mock.new_value = new_value
+    change_mock.key = "ExtraChefAttributes"
+
+    assert_that(UpdatePolicy.EXTRA_CHEF_ATTRIBUTES.condition_checker(change_mock, patch_mock)).is_equal_to(
+        expected_result
+    )
+
+
+@pytest.mark.parametrize(
+    "old_value, new_value, expected_fail_reason_contains",
+    [
+        pytest.param(
+            '{"cluster": {"some_other_field": "value1"}}',
+            '{"cluster": {"some_other_field": "value2"}}',
+            "cluster.some_other_field",
+            id="fail reason contains changed field path",
+        ),
+        pytest.param(
+            '{"other_key": "value1"}',
+            '{"other_key": "value2"}',
+            "other_key",
+            id="fail reason contains top-level changed field",
+        ),
+        pytest.param(
+            '{"cluster": {"slurm": {"reconfigure_timeout": "300"}, "other_field": "value1"}}',
+            '{"cluster": {"slurm": {"reconfigure_timeout": "600"}, "other_field": "value2"}}',
+            "cluster.other_field",
+            id="fail reason contains only non-updatable changed field",
+        ),
+    ],
+)
+def test_extra_chef_attributes_fail_reason(mocker, old_value, new_value, expected_fail_reason_contains):
+    patch_mock = mocker.MagicMock()
+    change_mock = mocker.MagicMock()
+    change_mock.old_value = old_value
+    change_mock.new_value = new_value
+    change_mock.key = "ExtraChefAttributes"
+
+    fail_reason = UpdatePolicy.EXTRA_CHEF_ATTRIBUTES.fail_reason(change_mock, patch_mock)
+    assert_that(fail_reason).contains(expected_fail_reason_contains)
+    assert_that(fail_reason).contains("cannot be updated")
+
+
+@pytest.mark.parametrize(
+    "old_value, new_value",
+    [
+        pytest.param(
+            '{"cluster": {"some_other_field": "value1"}}',
+            '{"cluster": {"some_other_field": "value2"}}',
+            id="action needed for non-updatable field change",
+        ),
+    ],
+)
+def test_extra_chef_attributes_action_needed(mocker, old_value, new_value):
+    patch_mock = mocker.MagicMock()
+    change_mock = mocker.MagicMock()
+    change_mock.old_value = old_value
+    change_mock.new_value = new_value
+    change_mock.key = "ExtraChefAttributes"
+
+    action_needed = UpdatePolicy.EXTRA_CHEF_ATTRIBUTES.action_needed(change_mock, patch_mock)
+    assert_that(action_needed).contains("Revert")
+    assert_that(action_needed).contains("non-updatable")
+
+
+# Tests for HeadNode LocalStorage update policy
+EBS_ACTION_NEEDED = (
+    "Follow the instructions at https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/"
+    "requesting-ebs-volume-modifications.html#modify-ebs-volume to modify your volume from AWS Console."
+)
+
+
+@pytest.mark.parametrize(
+    "base_config, target_config, expected_update_allowed, expected_action_needed",
+    [
+        pytest.param(
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                },
+            },
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                    "LocalStorage": {"RootVolume": {"Size": 100}},
+                },
+            },
+            False,
+            None,
+            id="Adding LocalStorage to HeadNode is blocked",
+        ),
+        pytest.param(
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                    "LocalStorage": {"RootVolume": {"Size": 50}},
+                },
+            },
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                },
+            },
+            False,
+            None,
+            id="Removing LocalStorage from HeadNode is blocked",
+        ),
+        pytest.param(
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                    "LocalStorage": {"RootVolume": {"Size": 50}},
+                },
+            },
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                    "LocalStorage": {"RootVolume": {"Size": 100}},
+                },
+            },
+            False,
+            EBS_ACTION_NEEDED,
+            id="Changing HeadNode RootVolume Size shows EBS action_needed",
+        ),
+        pytest.param(
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                    "LocalStorage": {"RootVolume": {"VolumeType": "gp2"}},
+                },
+            },
+            {
+                "HeadNode": {
+                    "InstanceType": "t3.micro",
+                    "Networking": {"SubnetId": "subnet-12345678"},
+                    "LocalStorage": {"RootVolume": {"VolumeType": "gp3"}},
+                },
+            },
+            False,
+            EBS_ACTION_NEEDED,
+            id="Changing HeadNode RootVolume VolumeType shows EBS action_needed",
+        ),
+    ],
+)
+def test_head_node_local_storage_update_blocked(
+    mocker, base_config, target_config, expected_update_allowed, expected_action_needed
+):
+    """Test that HeadNode LocalStorage changes during update are blocked.
+
+    LocalStorage affects the HeadNode launch template and cannot be updated without replacing the HeadNode.
+    When individual RootVolume fields (Size, VolumeType) are changed, the EBS action_needed message is shown.
+    When adding/removing the entire LocalStorage section, a generic "Restore value" message is shown instead.
+    """
+    cluster = Cluster(name="mock-name", stack="mock-stack")
+    patch = ConfigPatch(cluster=cluster, base_config=base_config, target_config=target_config)
+
+    patch_allowed, rows = patch.check()
+    assert_that(patch_allowed).is_equal_to(expected_update_allowed)
+
+    # Verify action_needed message
+    # rows format: [["param_path", "parameter", "old value", "new value", "check", "reason", "action_needed", ...], ...]
+    action_needed_index = 6
+    action_needed_messages = [row[action_needed_index] for row in rows[1:] if row[action_needed_index]]
+
+    if expected_action_needed:
+        assert_that(action_needed_messages).is_not_empty()
+        assert_that(action_needed_messages[0]).is_equal_to(expected_action_needed)
+
+
+@pytest.mark.parametrize(
+    "region, expected_result",
+    [
+        pytest.param("us-east-1", True, id="commercial region allows tag update"),
+        pytest.param("eu-west-1", True, id="commercial EU region allows tag update"),
+        pytest.param("us-gov-west-1", True, id="GovCloud region allows tag update"),
+        pytest.param("cn-north-1", True, id="China region allows tag update"),
+        pytest.param("us-iso-east-1", False, id="us-iso region blocks tag update"),
+        pytest.param("us-iso-west-1", False, id="us-iso-west region blocks tag update"),
+        pytest.param("us-isob-east-1", False, id="us-isob region blocks tag update"),
+        pytest.param("", True, id="empty region falls back to allowing update"),
+    ],
+)
+def test_supported_unless_adc_condition_checker(mocker, region, expected_result):
+    """SUPPORTED_UNLESS_ADC blocks updates only in ADC partitions (us-iso*, us-isob*)."""
+    mocker.patch("pcluster.config.update_policy.get_region", return_value=region)
+
+    change_mock = mocker.MagicMock()
+    patch_mock = mocker.MagicMock()
+
+    assert_that(UpdatePolicy.SUPPORTED_UNLESS_ADC.condition_checker(change_mock, patch_mock)).is_equal_to(
+        expected_result
+    )
+
+
+def test_supported_unless_adc_fail_reason_mentions_adc(mocker):
+    """The fail reason for SUPPORTED_UNLESS_ADC explains the ADC limitation."""
+    mocker.patch("pcluster.config.update_policy.get_region", return_value="us-iso-east-1")
+
+    change_mock = mocker.MagicMock()
+    change_mock.key = "Tags"
+    patch_mock = mocker.MagicMock()
+
+    result, fail_reason, action_needed, _ = UpdatePolicy.SUPPORTED_UNLESS_ADC.check(change_mock, patch_mock)
+
+    assert_that(result).is_equal_to(UpdatePolicy.CheckResult.ACTION_NEEDED)
+    assert_that(fail_reason).contains("ADC")
+    assert_that(fail_reason).contains("Tags")
+    assert_that(action_needed).contains("Tags")

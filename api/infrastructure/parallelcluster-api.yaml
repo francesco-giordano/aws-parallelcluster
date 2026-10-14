@@ -14,10 +14,18 @@ Parameters:
     Type: String
     Default: ''
 
+  ParallelClusterFunctionAdditionalPolicies:
+    Description: |
+      (OPTIONAL) ARN of the additional IAM policy to be attached to the default execution role for the ParallelCluster Lambda function.
+      Only one policy can be specified.
+    Type: String
+    Default: ''
+    AllowedPattern: "^(arn:.*:iam::.*:policy\\/([a-zA-Z0-9_-]+))|()$"
+
   ApiDefinitionS3Uri:
     Description: S3 URI of the ParallelCluster API spec
     Type: String
-    Default: s3://<REGION>-aws-parallelcluster/parallelcluster/3.7.0/api/ParallelCluster.openapi.yaml
+    Default: s3://<REGION>-aws-parallelcluster/parallelcluster/3.17.0/api/ParallelCluster.openapi.yaml
 
   CustomDomainName:
     Description: When specified, the custom domain name of the ParallelCluster API. Requires specifying a custom domain certificate
@@ -35,7 +43,7 @@ Parameters:
     Default: ''
 
   PoliciesTemplateUri:
-    Description: "S3 URI of the ParallelCluster Policies Template. Defaults to: s3://<REGION>-aws-parallelcluster/parallelcluster/3.7.0/templates/policies/policies.yaml"
+    Description: "S3 URI of the ParallelCluster Policies Template. Defaults to: s3://<REGION>-aws-parallelcluster/parallelcluster/3.17.0/templates/policies/policies.yaml"
     Type: String
     Default: ''
 
@@ -81,6 +89,8 @@ Parameters:
       When specified, IAM permissions assumed by the API are conditionally restricted to the usage of the given PermissionsBoundary
     Type: String
     Default: ''
+    ConstraintDescription: "The value must be a valid ARN in the format: arn:{AWS::Partition}:iam::{AWS::AccountId}:policy/PolicyNameParameter"
+    AllowedPattern: "^(arn:.*:iam::.*:policy\\/([a-zA-Z0-9_-]+))|()$"
 
   CreateApiUserRole:
     Description: Creates a IAM role authorized to invoke the API. The Api is configured with a resource based policy to grant invoke permission to the created user only.
@@ -95,11 +105,17 @@ Parameters:
     Type: String
     Default: ''
 
+  IAMRoleAndPolicyPrefix:
+    Type: String
+    Description: 'Prefix for IAM roles and policies'
+    Default: ''
+    MaxLength: 10
+
 Mappings:
   ParallelCluster:
     Constants:
-      Version: 3.7.0  # major.minor.patch+alpha/beta_identifier
-      ShortVersion: 3.7.0  # major.minor.patch
+      Version: 3.17.0  # major.minor.patch+alpha/beta_identifier
+      ShortVersion: 3.17.0  # major.minor.patch
       Stage: prod
 
 
@@ -115,19 +131,19 @@ Globals:
       DefaultAuthorizer: AWS_IAM
       ResourcePolicy:
         CustomStatements:
-          Effect: 'Deny'
-          Action: 'execute-api:Invoke'
-          Resource: ['execute-api:/*/*/*']
-          Principal: '*'
-          Condition:
-            StringNotLike:
-              # This allows also creds assumed through sts for the ParallelClusterApiUserRole role
-              aws:PrincipalArn: !If
-                - CreateApiUserRoleCondition
-                - !Sub
-                  - arn:${AWS::Partition}:*::${AWS::AccountId}:*/ParallelClusterApiUserRole-${StackIdSuffix}*
-                  - { StackIdSuffix: !Select [2, !Split ['/', !Ref 'AWS::StackId']] }
-                - '*'
+          - Effect: 'Deny'
+            Action: 'execute-api:Invoke'
+            Resource: ['execute-api:/*/*/*']
+            Principal: '*'
+            Condition:
+              StringNotLike:
+                # This allows also creds assumed through sts for the ParallelClusterApiUserRole role
+                aws:PrincipalArn: !If
+                  - CreateApiUserRoleCondition
+                  - !Sub
+                    - arn:${AWS::Partition}:*::${AWS::AccountId}:*/${IAMRoleAndPolicyPrefix}PCAPIUserRole-${StackIdSuffix}*
+                    - { StackIdSuffix: !Select [2, !Split ['/', !Ref 'AWS::StackId']] }
+                  - '*'
     TracingEnabled: True
     EndpointConfiguration:
       Type: REGIONAL
@@ -155,6 +171,7 @@ Conditions:
   CreateApiUserRoleCondition: !Equals [!Ref CreateApiUserRole, true]
   UseCustomBucket: !Not [!Equals [!Ref CustomBucket, '']]
   UseCustomPoliciesTemplateUri: !Not [!Equals [!Ref PoliciesTemplateUri, '']]
+  HasPermissionBoundary: !Not [!Equals [!Ref PermissionsBoundaryPolicy, '']]
 
 Resources:
   # Policies nested stack
@@ -175,7 +192,8 @@ Resources:
         EnableIamAdminAccess: !Ref EnableIamAdminAccess
         FsxS3Buckets: !Ref FsxS3Buckets
         PermissionsBoundaryPolicy: !Ref PermissionsBoundaryPolicy
-        EnableBatchAccess: true
+        IAMRoleAndPolicyPrefix: !Ref IAMRoleAndPolicyPrefix
+        AdditionalPolicies: !Ref ParallelClusterFunctionAdditionalPolicies
 
   PclusterLayer:
     Type: AWS::Lambda::LayerVersion
@@ -190,7 +208,7 @@ Resources:
           - parallelcluster/${Version}/layers/aws-parallelcluster/lambda-layer.zip
           - { Version: !FindInMap [ParallelCluster, Constants, Version]}
       CompatibleRuntimes:
-        - python3.9
+        - python3.14
 
   # We need to define three AWS::Serverless::Api due to an issue with the handling of AWS::NoValue
   # See related GitHub issue: https://github.com/aws/serverless-application-model/issues/1435
@@ -258,8 +276,12 @@ Resources:
                - apigateway.amazonaws.com
            Action:
              - 'sts:AssumeRole'
+     PermissionsBoundary: !If [HasPermissionBoundary, !Ref PermissionsBoundaryPolicy, !Ref 'AWS::NoValue']
+     RoleName: !Sub
+       - ${IAMRoleAndPolicyPrefix}APIGatewayExecutionRole-${StackIdSuffix}
+       - { StackIdSuffix: !Select [ 0, !Split [ '-', !Select [ 2, !Split [ '/', !Ref 'AWS::StackId']]]] }
      Policies:
-       - PolicyName: lambda-invoke
+       - PolicyName: !Sub ${IAMRoleAndPolicyPrefix}lambda-invoke
          PolicyDocument:
            Version: '2012-10-17'
            Statement:
@@ -280,7 +302,7 @@ Resources:
           Value: api
         - Key: 'parallelcluster:version'
           Value: !FindInMap [ParallelCluster, Constants, Version]
-      Runtime: python3.9
+      Runtime: python3.14
       Handler: pcluster.api.awslambda.entrypoint.lambda_handler
       Layers:
         - !Ref PclusterLayer
@@ -293,7 +315,7 @@ Resources:
     Condition: CreateApiUserRoleCondition
     Properties:
       RoleName:  !Sub
-        - ParallelClusterApiUserRole-${StackIdSuffix}
+        - ${IAMRoleAndPolicyPrefix}PCAPIUserRole-${StackIdSuffix}
         - { StackIdSuffix: !Select [2, !Split ['/', !Ref 'AWS::StackId']] }
       AssumeRolePolicyDocument:
         Statement:
@@ -302,8 +324,9 @@ Resources:
             Principal:
               AWS:
                 - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+      PermissionsBoundary: !If [HasPermissionBoundary, !Ref PermissionsBoundaryPolicy, !Ref 'AWS::NoValue']
       Policies:
-        - PolicyName: ParallelClusterApiInvokePolicy
+        - PolicyName: !Sub ${IAMRoleAndPolicyPrefix}ParallelClusterApiInvokePolicy
           PolicyDocument:
             Statement:
               - Action:

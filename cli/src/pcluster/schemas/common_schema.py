@@ -16,13 +16,14 @@
 import copy
 import enum
 import json
+import re
 
 from marshmallow import Schema, ValidationError, fields, post_dump, post_load, pre_dump, validate, validates
 
 from pcluster.config.cluster_config import BaseTag
-from pcluster.config.common import AdditionalIamPolicy, Cookbook, DeploymentSettings, Imds, LambdaFunctionsVpcConfig
+from pcluster.config.common import AdditionalIamPolicy, BaseDeploymentSettings, Cookbook, Imds, LambdaFunctionsVpcConfig
 from pcluster.config.update_policy import UpdatePolicy
-from pcluster.constants import PCLUSTER_PREFIX, SUPPORTED_ARCHITECTURES
+from pcluster.constants import IAM_POLICY_REGEX, PCLUSTER_PREFIX, SUPPORTED_ARCHITECTURES
 from pcluster.utils import to_pascal_case
 
 ALLOWED_VALUES = {
@@ -30,6 +31,7 @@ ALLOWED_VALUES = {
     r"([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])"
     r"(\/([0-9]|[1-2][0-9]|3[0-2]))$",
     "file_path": r"^\/?[^\/.\\][^\/\\]*(\/[^\/.\\][^\/]*)*$",
+    "prefix-list": r"^pl-[a-zA-Z0-9]",
     "security_group_id": r"^sg-[0-9a-z]{8}$|^sg-[0-9a-z]{17}$",
     "subnet_id": r"^subnet-[0-9a-z]{8}$|^subnet-[0-9a-z]{17}$",
     "architectures": SUPPORTED_ARCHITECTURES,
@@ -78,6 +80,16 @@ def validate_no_duplicate_tag(tags):
                 f"Duplicate tag key ({tag_key}) detected. Tags keys should be unique within the Tags section."
             )
         all_tags.add(tag_key)
+
+
+def _match_regex(regex_name, value):
+    _regex = re.compile(ALLOWED_VALUES[regex_name])
+    return _regex.match(value) is not None
+
+
+def is_cidr_or_prefix_list(value):
+    if (_match_regex("cidr", value) or _match_regex("prefix-list", value)) is not True:
+        raise ValidationError(f"Invalid value: '{value}' is neither a valid CIDR nor a valid prefix-list.")
 
 
 def get_field_validator(field_name):
@@ -169,10 +181,9 @@ class TagSchema(BaseSchema):
         metadata={"update_policy": UpdatePolicy.UNSUPPORTED},
     )
     value = fields.Str(
-        # TODO Tags can be updated with policy QUEUE_UPDATE_STRATEGY
         required=True,
         validate=validate.Length(max=256),
-        metadata={"update_policy": UpdatePolicy.UNSUPPORTED},
+        metadata={"update_policy": UpdatePolicy.SUPPORTED_UNLESS_ADC},
     )
 
     @post_load
@@ -185,7 +196,7 @@ class AdditionalIamPolicySchema(BaseSchema):
     """Represent the schema of Additional IAM policy."""
 
     policy = fields.Str(
-        required=True, metadata={"update_policy": UpdatePolicy.SUPPORTED}, validate=validate.Regexp("^arn:.*:policy/")
+        required=True, metadata={"update_policy": UpdatePolicy.SUPPORTED}, validate=validate.Regexp(IAM_POLICY_REGEX)
     )
 
     @post_load
@@ -204,13 +215,7 @@ class CookbookSchema(BaseSchema):
             )
         }
     )
-    extra_chef_attributes = fields.Str(
-        metadata={
-            "update_policy": UpdatePolicy(
-                UpdatePolicy.UNSUPPORTED, fail_reason=UpdatePolicy.FAIL_REASONS["cookbook_update"]
-            )
-        }
-    )
+    extra_chef_attributes = fields.Str(metadata={"update_policy": UpdatePolicy.EXTRA_CHEF_ATTRIBUTES})
 
     @post_load()
     def make_resource(self, data, **kwargs):
@@ -247,7 +252,7 @@ class LambdaFunctionsVpcConfigSchema(BaseSchema):
         return LambdaFunctionsVpcConfig(**data)
 
 
-class DeploymentSettingsSchema(BaseSchema):
+class BaseDeploymentSettingsSchema(BaseSchema):
     """Represent the common schema of DeploymentSettings for ImageBuilder and Cluster."""
 
     lambda_functions_vpc_config = fields.Nested(
@@ -257,15 +262,14 @@ class DeploymentSettingsSchema(BaseSchema):
     @post_load
     def make_resource(self, data, **kwargs):
         """Generate resource."""
-        return DeploymentSettings(**data)
+        return BaseDeploymentSettings(**data)
 
 
 class BaseDevSettingsSchema(BaseSchema):
     """Represent the common schema of Dev Setting for ImageBuilder and Cluster."""
 
-    cookbook = fields.Nested(CookbookSchema, metadata={"update_policy": UpdatePolicy.UNSUPPORTED})
+    cookbook = fields.Nested(CookbookSchema, metadata={"update_policy": UpdatePolicy.IGNORED})
     node_package = fields.Str(metadata={"update_policy": UpdatePolicy.UNSUPPORTED})
-    aws_batch_cli_package = fields.Str(metadata={"update_policy": UpdatePolicy.UNSUPPORTED})
 
 
 class ImdsSchema(BaseSchema):

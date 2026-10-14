@@ -15,16 +15,30 @@ from utils import run_command
 
 cli_credentials = {}
 
+# A pcluster command that never returns must not eat the whole pytest budget (6 hours) and, through the shared
+# fixtures the worker holds, fail the tests of the other workers too. Commands that wait on a stack or an export
+# legitimately run for hours; everything else answers in seconds. Values are in seconds, as subprocess.run expects
+# (the time_utils helpers return milliseconds for the retrying library).
+LONG_PCLUSTER_COMMAND_MARKERS = ("--wait", "export-cluster-logs", "export-image-logs")
+LONG_PCLUSTER_COMMAND_TIMEOUT = 3 * 60 * 60
+PCLUSTER_COMMAND_TIMEOUT = 60 * 60
+
 
 def register_cli_credentials_for_region(region, iam_role):
     """Register a IAM role to be used for the CLI commands in a given region."""
-    global cli_credentials
+    global cli_credentials  # noqa: F824
     logging.info("Configuring CLI IAM role %s for region %s", iam_role, region)
     cli_credentials[region] = iam_role
 
 
 def run_pcluster_command(*args, custom_cli_credentials=None, **kwargs):
     """Run a command after assuming the role configured through register_cli_credentials_for_region."""
+
+    if kwargs.get("timeout") is None:
+        command = args[0] if args else kwargs.get("command", [])
+        command_tokens = command.split() if isinstance(command, str) else [str(token) for token in command]
+        is_long_running = any(marker in command_tokens for marker in LONG_PCLUSTER_COMMAND_MARKERS)
+        kwargs["timeout"] = LONG_PCLUSTER_COMMAND_TIMEOUT if is_long_running else PCLUSTER_COMMAND_TIMEOUT
 
     region = kwargs.get("region")
     if not region:
@@ -54,45 +68,64 @@ def aws_credential_provider(region, credential_arg):
 @contextmanager
 def sts_credential_provider(region, credential_arn, credential_external_id=None, credential_endpoint=None):
     """Assume a role through STS and set such creds in the environment for the duration of the context."""
-    credentials_to_backup = _get_current_credentials()
-
-    logging.info("Assuming STS credentials for region %s and role %s", region, credential_arn)
-    aws_credentials = _retrieve_sts_credential(region, credential_arn, credential_external_id, credential_endpoint)
-    logging.info("Retrieved credentials %s", obfuscate_credentials(aws_credentials))
-
-    try:
-        logging.info("Unsetting current credentials %s", obfuscate_credentials(credentials_to_backup))
-        _unset_credentials()
-
-        os.environ["AWS_ACCESS_KEY_ID"] = aws_credentials["AccessKeyId"]
-        os.environ["AWS_SECRET_ACCESS_KEY"] = aws_credentials["SecretAccessKey"]
-        os.environ["AWS_SESSION_TOKEN"] = aws_credentials["SessionToken"]
-        os.environ["AWS_CREDENTIAL_EXPIRATION"] = aws_credentials["Expiration"].isoformat()
-        boto3.setup_default_session()
-
-        yield aws_credentials
-    finally:
-        logging.info("Restoring credentials %s", obfuscate_credentials(credentials_to_backup))
-        _restore_credentials(credentials_to_backup)
-
-
-# TODO: we could add caching but we need to refresh the creds if 1h is passed or increase the MaxSessionDuration
-def _retrieve_sts_credential(region, credential_arn, credential_external_id=None, credential_endpoint=None):
     if credential_endpoint:
         match = re.search(r"https://sts\.(.*?)\.", credential_endpoint)
         endpoint_region = match.group(1)
         sts = boto3.client("sts", region_name=endpoint_region, endpoint_url=credential_endpoint)
     else:
         sts = boto3.client("sts", region_name=region)
+    caller_arn = sts.get_caller_identity()["Arn"]
+    credentials_to_backup = _get_current_credentials()
+    caller_arn_split = re.split(":|/", caller_arn)
+    credential_arn_split = re.split(":|/", credential_arn)
+    if caller_arn_split[4] == credential_arn_split[4] and caller_arn_split[6] == credential_arn_split[6]:
+        # If account id and role name are the same, the role do not need to / cannot assume itself
+        # Caller ARN can be a IAM role arn or STS session ARN.
+        # Therefore, we have to check the account id and role name are the same, instead of checking the whole string.
+        # For example: User:
+        #   arn:aws:sts::123456700000:assumed-role/JenkinsStsRole-il-central-1/il-central-1_integration_tests_session
+        #   is not authorized to perform: sts:AssumeRole on resource:
+        #   arn:aws:iam::123456700000:role/JenkinsStsRole-il-central-1
+        logging.info("Using current credentials")
+        yield credentials_to_backup
+    else:
+        logging.info("Assuming STS credentials for region %s and role %s", region, credential_arn)
+        aws_credentials = _retrieve_sts_credential(region, credential_arn, sts, credential_external_id)
+        logging.info("Retrieved credentials %s", obfuscate_credentials(aws_credentials))
 
+        try:
+            logging.info("Unsetting current credentials %s", obfuscate_credentials(credentials_to_backup))
+            _unset_credentials()
+
+            os.environ["AWS_ACCESS_KEY_ID"] = aws_credentials["AccessKeyId"]
+            os.environ["AWS_SECRET_ACCESS_KEY"] = aws_credentials["SecretAccessKey"]
+            os.environ["AWS_SESSION_TOKEN"] = aws_credentials["SessionToken"]
+            os.environ["AWS_CREDENTIAL_EXPIRATION"] = aws_credentials["Expiration"].isoformat()
+            boto3.setup_default_session()
+
+            yield aws_credentials
+        finally:
+            logging.info("Restoring credentials %s", obfuscate_credentials(credentials_to_backup))
+            _restore_credentials(credentials_to_backup)
+
+
+# TODO: we could add caching but we need to refresh the creds if 1h is passed or increase the MaxSessionDuration
+def _retrieve_sts_credential(region, credential_arn, sts, credential_external_id=None):
     assume_role_kwargs = {
         "RoleArn": credential_arn,
         "RoleSessionName": region + "_integration_tests_session",
+        "DurationSeconds": 10000,
     }
     if credential_external_id:
         assume_role_kwargs["ExternalId"] = credential_external_id
 
-    assumed_role_object = sts.assume_role(**assume_role_kwargs)
+    try:
+        assumed_role_object = sts.assume_role(**assume_role_kwargs)
+    except Exception:
+        # Roles assumed by role chaining have 1-hour session limit.
+        # This exception handling block retries with default session duration.
+        assume_role_kwargs.pop("DurationSeconds", None)
+        assumed_role_object = sts.assume_role(**assume_role_kwargs)
     aws_credentials = assumed_role_object["Credentials"]
 
     return aws_credentials

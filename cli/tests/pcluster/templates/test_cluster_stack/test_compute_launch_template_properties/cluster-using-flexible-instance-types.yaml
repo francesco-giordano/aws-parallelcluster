@@ -1,8 +1,8 @@
 Region: eu-west-1
 Image:
-  Os: alinux2
+  Os: alinux2023
 HeadNode:
-  InstanceType: t2.micro
+  InstanceType: t3.micro
   Networking:
     SubnetId: subnet-12345678
   Ssh:
@@ -15,7 +15,7 @@ Scheduling:
     ComputeResources:
     - Name: testcomputeresource
       Instances:
-        - InstanceType: t2.micro
+        - InstanceType: t3.micro
         - InstanceType: c4.xlarge
       MinCount: 0
       MaxCount: 10

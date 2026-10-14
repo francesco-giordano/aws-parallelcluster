@@ -13,12 +13,14 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List
 
 import pytest
 import yaml
 from assertpy import assert_that
 from freezegun import freeze_time
+from marshmallow import ValidationError
 
 from pcluster.aws.aws_resources import InstanceTypeInfo
 from pcluster.constants import (
@@ -31,17 +33,20 @@ from pcluster.constants import (
 from pcluster.models.s3_bucket import S3FileFormat, format_content
 from pcluster.schemas.cluster_schema import ClusterSchema
 from pcluster.templates.cdk_builder import CDKTemplateBuilder
+from pcluster.templates.cdk_builder_utils import _get_resource_combination_name
 from pcluster.utils import load_json_dict, load_yaml_dict
 from tests.pcluster.aws.dummy_aws_api import mock_aws_api
 from tests.pcluster.models.dummy_s3_bucket import dummy_cluster_bucket, mock_bucket, mock_bucket_object_utils
 from tests.pcluster.utils import (
     assert_lambdas_have_expected_vpc_config_and_managed_policy,
+    assert_sg_rule,
     get_asset_content_with_resource_name,
+    get_resources,
     load_cluster_model_from_yaml,
 )
 
 EXAMPLE_CONFIGS_DIR = f"{os.path.abspath(os.path.join(__file__, '..', '..'))}/example_configs"
-MAX_SIZE_OF_CFN_TEMPLATE = 1024 * 1024
+MAX_SIZE_OF_CFN_TEMPLATE = 1000000
 MAX_RESOURCES_PER_TEMPLATE = 500
 
 
@@ -50,10 +55,6 @@ MAX_RESOURCES_PER_TEMPLATE = 500
     [
         "slurm.required.yaml",
         "slurm.full.yaml",
-        "awsbatch.simple.yaml",
-        "awsbatch.full.yaml",
-        "scheduler_plugin.required.yaml",
-        "scheduler_plugin.full.yaml",
     ],
 )
 def test_cluster_builder_from_configuration_file(
@@ -64,7 +65,10 @@ def test_cluster_builder_from_configuration_file(
     # mock bucket initialization parameters
     mock_bucket(mocker)
     mock_bucket_object_utils(mocker)
-
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_and_reservation_type_from_capacity_reservation",
+        return_value=("t3.micro", "capacity-reservation"),
+    )
     # Search config file from example_configs folder to test standard configuration
     _, cluster = load_cluster_model_from_yaml(config_file_name)
     _generate_template(cluster, capsys)
@@ -124,11 +128,13 @@ def test_cluster_config_limits(mocker, capsys, tmpdir, pcluster_config_reader, t
     mock_bucket(mocker)
     mock_bucket_object_utils(mocker)
 
+    max_number_of_queues = MAX_NUMBER_OF_QUEUES
+
     # The max number of queues cannot be used with the max number of compute resources
     # (it will exceed the max number of compute resources per cluster)
     # This workaround calculates the number of compute resources to use
     # as the quotient of dividing the max number of compute resources per cluster by the MAX_NUMBER_OF_QUEUES.
-    max_number_of_crs = MAX_NUMBER_OF_COMPUTE_RESOURCES_PER_CLUSTER // MAX_NUMBER_OF_QUEUES
+    max_number_of_crs = MAX_NUMBER_OF_COMPUTE_RESOURCES_PER_CLUSTER // max_number_of_queues
 
     # Try to search for jinja templates in the test_datadir, this is mainly to verify pcluster limits
     rendered_config_file = pcluster_config_reader(
@@ -137,7 +143,7 @@ def test_cluster_config_limits(mocker, capsys, tmpdir, pcluster_config_reader, t
         max_new_storage_count=MAX_NEW_STORAGE_COUNT,
         max_existing_storage_count=MAX_EXISTING_STORAGE_COUNT,
         # number of queues, compute resources and security groups highly impacts the size of AWS resources
-        max_number_of_queues=MAX_NUMBER_OF_QUEUES,
+        max_number_of_queues=max_number_of_queues,
         max_number_of_ondemand_crs=max_number_of_crs,
         max_number_of_spot_crs=max_number_of_crs,
         number_of_sg_per_queue=1,
@@ -174,9 +180,18 @@ def _assert_template_limits(template_path: str, template_content: str):
     Assert that size of the template doesn't exceed 1MB and number of resources doesn't exceed 500.
 
     :param template_path: path to the generated cfn template
+    :param template_content: content of the generated cfn template
     """
-    assert_that(os.stat(template_path).st_size).is_less_than(MAX_SIZE_OF_CFN_TEMPLATE)
-    matches = len(re.findall("Type.*AWS::", str()))
+    template_size = os.stat(template_path).st_size
+
+    print("Template {} has size {}, maximum is {}".format(template_path, template_size, MAX_SIZE_OF_CFN_TEMPLATE))
+
+    assert_that(template_size).is_less_than(MAX_SIZE_OF_CFN_TEMPLATE)
+
+    matches = len(re.findall("Type.*AWS::", str(template_content)))
+
+    print("Template {} has {} resources, maximum is {}".format(template_path, matches, MAX_RESOURCES_PER_TEMPLATE))
+
     assert_that(matches).is_less_than(MAX_RESOURCES_PER_TEMPLATE)
 
 
@@ -192,14 +207,48 @@ def _generate_template(cluster, capsys):
 
 
 @pytest.mark.parametrize(
+    "config_file_name, expected_file_system_properties",
+    [
+        pytest.param(
+            "config-default.yaml",
+            {"Encrypted": False, "FileSystemTags": [{"Key": "Name", "Value": "internal_pcluster_shared"}]},
+            id="test default Efs shared storage without SharedStorageEfsSettings",
+        ),
+        pytest.param(
+            "config-encrypted.yaml",
+            {"Encrypted": True, "FileSystemTags": [{"Key": "Name", "Value": "internal_pcluster_shared"}]},
+            id="test Efs shared storage with SharedStorageEfsSettings/Encrypted is True",
+        ),
+        pytest.param(
+            "config-unencrypted.yaml",
+            {"Encrypted": False, "FileSystemTags": [{"Key": "Name", "Value": "internal_pcluster_shared"}]},
+            id="test Efs shared storage with SharedStorageEfsSettings/Encrypted is False",
+        ),
+    ],
+)
+def test_add_efs_shared_storage(mocker, test_datadir, config_file_name, expected_file_system_properties):
+    mock_aws_api(mocker)
+    # mock bucket initialization parameters
+    mock_bucket(mocker)
+    mock_bucket_object_utils(mocker)
+
+    input_yaml = load_yaml_dict(test_datadir / config_file_name)
+    cluster = ClusterSchema(cluster_name="clustername").load(input_yaml)
+    generated_template, _ = CDKTemplateBuilder().build_cluster_template(
+        cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
+    )
+    matched_resources = get_resources(
+        generated_template, type="AWS::EFS::FileSystem", properties=expected_file_system_properties
+    )
+    assert_that(matched_resources).is_length(1)
+
+
+@pytest.mark.parametrize(
     "config_file_name",
     [
         "slurm.required.yaml",
         "slurm.full.yaml",
-        "awsbatch.simple.yaml",
-        "awsbatch.full.yaml",
-        "scheduler_plugin.required.yaml",
-        "scheduler_plugin.full.yaml",
+        "slurm.logging_disabled.yaml",
     ],
 )
 def test_add_alarms(mocker, config_file_name):
@@ -207,208 +256,129 @@ def test_add_alarms(mocker, config_file_name):
     # mock bucket initialization parameters
     mock_bucket(mocker)
     mock_bucket_object_utils(mocker)
-
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_and_reservation_type_from_capacity_reservation",
+        return_value=("t3.micro", "capacity-reservation"),
+    )
     input_yaml, cluster = load_cluster_model_from_yaml(config_file_name)
     generated_template, _ = CDKTemplateBuilder().build_cluster_template(
         cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
     )
-    output_yaml = yaml.dump(generated_template, width=float("inf"))
 
-    if cluster.is_cw_dashboard_enabled:
-        assert_that(output_yaml).contains("HeadNodeDiskAlarm")
-        assert_that(output_yaml).contains("HeadNodeMemAlarm")
+    simple_type = "AWS::CloudWatch::Alarm"
+    composite_type = "AWS::CloudWatch::CompositeAlarm"
+
+    # Expected alarm configurations with details
+    expected_alarms = {
+        "Health": {
+            "name": "clustername-HeadNode-Health",
+            "metric_name": "StatusCheckFailed",
+            "namespace": "AWS/EC2",
+            "threshold": 0,
+            "comparison_operator": "GreaterThanThreshold",
+            "evaluation_periods": 1,
+            "datapoints_to_alarm": 1,
+            "treat_missing_data": "missing",
+        },
+        "Cpu": {
+            "name": "clustername-HeadNode-Cpu",
+            "metric_name": "CPUUtilization",
+            "namespace": "AWS/EC2",
+            "threshold": 90,
+            "comparison_operator": "GreaterThanThreshold",
+            "evaluation_periods": 1,
+            "datapoints_to_alarm": 1,
+            "treat_missing_data": "missing",
+        },
+        "Mem": {
+            "name": "clustername-HeadNode-Mem",
+            "metric_name": "mem_used_percent",
+            "namespace": "CWAgent",
+            "threshold": 90,
+            "comparison_operator": "GreaterThanThreshold",
+            "evaluation_periods": 1,
+            "datapoints_to_alarm": 1,
+            "treat_missing_data": "missing",
+        },
+        "Disk": {
+            "name": "clustername-HeadNode-Disk",
+            "metric_name": "disk_used_percent",
+            "namespace": "CWAgent",
+            "threshold": 90,
+            "comparison_operator": "GreaterThanThreshold",
+            "evaluation_periods": 1,
+            "datapoints_to_alarm": 1,
+            "treat_missing_data": "missing",
+        },
+    }
+
+    if cluster.is_cw_logging_enabled:
+        expected_alarms["Clustermgtd-Heartbeat"] = {
+            "name": "clustername-HeadNode-ClustermgtdHeartbeat",
+            "metric_name": "ClustermgtdHeartbeat",
+            "namespace": "ParallelCluster",
+            "threshold": 1,
+            "comparison_operator": "LessThanThreshold",
+            "evaluation_periods": 10,
+            "datapoints_to_alarm": 10,
+            "treat_missing_data": "breaching",
+        }
+
+    if cluster.are_alarms_enabled:
+        # Find the HeadNode wait condition resource name
+        wait_condition_resources = get_resources(
+            generated_template, type="AWS::CloudFormation::WaitCondition", name_pattern="^HeadNodeWaitCondition"
+        )
+        assert_that(wait_condition_resources).is_length(1)
+        wait_condition_name = list(wait_condition_resources.keys())[0]
+
+        # Collect simple alarm resource names for composite alarm rule verification
+        simple_alarm_resource_names = []
+
+        # Verify each simple alarm exists with correct details and depends on wait condition
+        for _alarm_key, expected in expected_alarms.items():
+            matched_resources = get_resources(
+                generated_template, type=simple_type, properties={"AlarmName": expected["name"]}
+            )
+            assert_that(matched_resources).is_length(1)
+
+            alarm_resource_name = list(matched_resources.keys())[0]
+            simple_alarm_resource_names.append(alarm_resource_name)
+
+            alarm_resource = list(matched_resources.values())[0]
+            alarm_properties = alarm_resource["Properties"]
+            assert_that(alarm_properties.get("AlarmName")).is_equal_to(expected["name"])
+            assert_that(alarm_properties.get("MetricName")).is_equal_to(expected["metric_name"])
+            assert_that(alarm_properties.get("Namespace")).is_equal_to(expected["namespace"])
+            assert_that(alarm_properties.get("Threshold")).is_equal_to(expected["threshold"])
+            assert_that(alarm_properties.get("ComparisonOperator")).is_equal_to(expected["comparison_operator"])
+            assert_that(alarm_properties.get("EvaluationPeriods")).is_equal_to(expected["evaluation_periods"])
+            assert_that(alarm_properties.get("DatapointsToAlarm")).is_equal_to(expected["datapoints_to_alarm"])
+            assert_that(alarm_properties.get("TreatMissingData")).is_equal_to(expected["treat_missing_data"])
+            assert_that(alarm_resource.get("DependsOn")).contains(wait_condition_name)
+
+        # Verify composite alarm exists with correct properties
+        composite_alarms = get_resources(generated_template, type=composite_type)
+        assert_that(composite_alarms).is_length(1)
+        composite_alarm_resource = list(composite_alarms.values())[0]
+        composite_alarm_properties = composite_alarm_resource["Properties"]
+        assert_that(composite_alarm_properties["AlarmName"]).is_equal_to("clustername-HeadNode")
+        assert_that(composite_alarm_resource.get("DependsOn")).contains(wait_condition_name)
+
+        # Verify composite alarm rule triggers on ANY of the simple alarms (OR logic)
+        alarm_rule = composite_alarm_properties.get("AlarmRule")
+        assert_that(alarm_rule).is_not_none()
+        alarm_rule_str = str(alarm_rule)
+        for alarm_resource_name in simple_alarm_resource_names:
+            assert_that(alarm_rule_str).contains(alarm_resource_name)
+        expected_or_count = len(simple_alarm_resource_names) - 1
+        actual_or_count = alarm_rule_str.count(" OR ")
+        assert_that(actual_or_count).is_equal_to(expected_or_count)
     else:
-        assert_that(output_yaml).does_not_contain("HeadNodeDiskAlarm")
-        assert_that(output_yaml).does_not_contain("HeadNodeMemAlarm")
-
-
-@pytest.mark.parametrize(
-    "config_file_name, expected_scheduler_plugin_stack",
-    [
-        ("scheduler-plugin-without-template.yaml", {}),
-        (
-            "scheduler-plugin-with-template.yaml",
-            {
-                "Type": "AWS::CloudFormation::Stack",
-                "Properties": {
-                    "TemplateURL": "https://parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete.s3.fake-region.amazonaws."
-                    "com/parallelcluster/clusters/dummy-cluster-randomstring123/templates/"
-                    "scheduler-plugin-substack.cfn",
-                    "Parameters": {
-                        "ClusterName": "clustername",
-                        "ParallelClusterStackId": {"Ref": "AWS::StackId"},
-                        "VpcId": "vpc-123",
-                        "HeadNodeRoleName": {"Ref": "RoleHeadNode"},
-                        "ComputeFleetRoleNames": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesRole15b342af42246b70FB1D57C8Ref",
-                            ]
-                        },
-                        "LaunchTemplate1f8c19f38f8d4f7fVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplate1f8c19f38f8d4f7f6AD5CC0E"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                        "LaunchTemplateA6f65dee6703df4aVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplateA6f65dee6703df4a53C00131"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                    },
-                },
-            },
-        ),
-        (
-            "scheduler-plugin-with-head-node-instance-role.yaml",
-            {
-                "Type": "AWS::CloudFormation::Stack",
-                "Properties": {
-                    "TemplateURL": "https://parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete.s3.fake-region."
-                    "amazonaws.com/parallelcluster/clusters/dummy-cluster-randomstring123/templates/"
-                    "scheduler-plugin-substack.cfn",
-                    "Parameters": {
-                        "ClusterName": "clustername",
-                        "ParallelClusterStackId": {"Ref": "AWS::StackId"},
-                        "VpcId": "vpc-123",
-                        "HeadNodeRoleName": "",
-                        "ComputeFleetRoleNames": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesRole15b342af42246b70FB1D57C8Ref",
-                            ]
-                        },
-                        "LaunchTemplate1f8c19f38f8d4f7fVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplate1f8c19f38f8d4f7f6AD5CC0E"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                        "LaunchTemplateA6f65dee6703df4aVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplateA6f65dee6703df4a53C00131"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                    },
-                },
-            },
-        ),
-        (
-            "scheduler-plugin-with-compute-fleet-instance-role.yaml",
-            {
-                "Type": "AWS::CloudFormation::Stack",
-                "Properties": {
-                    "TemplateURL": "https://parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete.s3.fake-region.amazonaws."
-                    "com/parallelcluster/clusters/dummy-cluster-randomstring123/templates/"
-                    "scheduler-plugin-substack.cfn",
-                    "Parameters": {
-                        "ClusterName": "clustername",
-                        "ParallelClusterStackId": {"Ref": "AWS::StackId"},
-                        "VpcId": "vpc-123",
-                        "HeadNodeRoleName": "",
-                        "ComputeFleetRoleNames": "",
-                        "LaunchTemplate1f8c19f38f8d4f7fVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplate1f8c19f38f8d4f7f6AD5CC0E"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                        "LaunchTemplate7916067054f91933Version": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplate7916067054f9193305F5F96F"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                        "LaunchTemplateA6f65dee6703df4aVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplateA6f65dee6703df4a53C00131"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                    },
-                },
-            },
-        ),
-        (
-            "scheduler_plugin.full.yaml",
-            {
-                "Type": "AWS::CloudFormation::Stack",
-                "Properties": {
-                    "TemplateURL": "https://parallelcluster-a69601b5ee1fc2f2-v1-do-not-delete.s3.fake-region.amazonaws."
-                    "com/parallelcluster/clusters/dummy-cluster-randomstring123/templates/"
-                    "scheduler-plugin-substack.cfn",
-                    "Parameters": {
-                        "ClusterName": "clustername",
-                        "ParallelClusterStackId": {"Ref": "AWS::StackId"},
-                        "VpcId": "vpc-123",
-                        "HeadNodeRoleName": "",
-                        "ComputeFleetRoleNames": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesRole15b342af42246b70FB1D57C8Ref",
-                            ]
-                        },
-                        "LaunchTemplate1f8c19f38f8d4f7fVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplate1f8c19f38f8d4f7f6AD5CC0E"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                        "LaunchTemplate7916067054f91933Version": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplate7916067054f9193305F5F96F"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                        "LaunchTemplateA46d18b906a50d3aVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplateA46d18b906a50d3aADBCC4BA"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                        "LaunchTemplateA6f65dee6703df4aVersion": {
-                            "Fn::GetAtt": [
-                                "ComputeFleetQueuesNestedStackQueuesNestedStackResource4C142E85",
-                                "Outputs.clusternameComputeFleetQueuesLaunchTemplateA6f65dee6703df4a53C00131"
-                                + "LatestVersionNumber",
-                            ]
-                        },
-                    },
-                },
-            },
-        ),
-    ],
-)
-def test_scheduler_plugin_substack(mocker, config_file_name, expected_scheduler_plugin_stack, test_datadir):
-    mock_aws_api(mocker)
-    # mock bucket initialization parameters
-    mock_bucket(mocker)
-    mock_bucket_object_utils(mocker)
-
-    if config_file_name == "scheduler_plugin.full.yaml":
-        input_yaml, cluster = load_cluster_model_from_yaml(config_file_name)
-    else:
-        input_yaml, cluster = load_cluster_model_from_yaml(config_file_name, test_datadir)
-    generated_template, _ = CDKTemplateBuilder().build_cluster_template(
-        cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
-    )
-    print(yaml.dump(generated_template))
-    assert_that(generated_template["Resources"].get("SchedulerPluginStack", {})).is_equal_to(
-        expected_scheduler_plugin_stack
-    )
+        matched_simple_alarms = get_resources(generated_template, type=simple_type)
+        matched_composite_alarms = get_resources(generated_template, type=composite_type)
+        assert_that(matched_simple_alarms).is_empty()
+        assert_that(matched_composite_alarms).is_empty()
 
 
 def _mock_instance_type_info(instance_type):
@@ -424,13 +394,21 @@ def _mock_instance_type_info(instance_type):
                     "ValidThreadsPerCore": [1, 2],
                 },
                 "EbsInfo": {"EbsOptimizedSupport": "default"},
-                "NetworkInfo": {"EfaSupported": False, "MaximumNetworkCards": 3},
+                "NetworkInfo": {
+                    "EfaSupported": False,
+                    "MaximumNetworkCards": 3,
+                    "NetworkCards": [
+                        {"NetworkCardIndex": 0},
+                        {"NetworkCardIndex": 1},
+                        {"NetworkCardIndex": 2},
+                    ],
+                },
                 "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
             }
         ),
-        "t2.micro": InstanceTypeInfo(
+        "t3.micro": InstanceTypeInfo(
             {
-                "InstanceType": "t2.micro",
+                "InstanceType": "t3.micro",
                 "VCpuInfo": {
                     "DefaultVCpus": 4,
                     "DefaultCores": 2,
@@ -439,7 +417,14 @@ def _mock_instance_type_info(instance_type):
                     "ValidThreadsPerCore": [1, 2],
                 },
                 "EbsInfo": {"EbsOptimizedSupport": "unsupported"},
-                "NetworkInfo": {"EfaSupported": False, "MaximumNetworkCards": 2},
+                "NetworkInfo": {
+                    "EfaSupported": False,
+                    "MaximumNetworkCards": 2,
+                    "NetworkCards": [
+                        {"NetworkCardIndex": 0},
+                        {"NetworkCardIndex": 1},
+                    ],
+                },
                 "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
             }
         ),
@@ -493,6 +478,29 @@ class EbsLTAssertion(LTPropertyAssertion):
             assert_that(ebs_optimized).is_none()
 
 
+def get_generated_template_and_cdk_assets(
+    mocker,
+    config_file_name,
+    test_datadir,
+):
+    mock_aws_api(mocker, mock_instance_type_info=False)
+
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_info",
+        side_effect=_mock_instance_type_info,
+    )
+    # mock bucket initialization parameters
+    mock_bucket(mocker)
+    mock_bucket_object_utils(mocker)
+
+    input_yaml, cluster = load_cluster_model_from_yaml(config_file_name, test_datadir)
+    generated_template, cdk_assets = CDKTemplateBuilder().build_cluster_template(
+        cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
+    )
+
+    return generated_template, cdk_assets
+
+
 @pytest.mark.parametrize(
     "config_file_name, lt_assertions",
     [
@@ -518,58 +526,522 @@ def test_compute_launch_template_properties(
     mocker,
     config_file_name,
     lt_assertions,
+    pcluster_config_reader,
     test_datadir,
 ):
-    mock_aws_api(mocker, mock_instance_type_info=False)
-
-    mocker.patch(
-        "pcluster.aws.ec2.Ec2Client.get_instance_type_info",
-        side_effect=_mock_instance_type_info,
+    rendered_config_file = pcluster_config_reader(
+        config_file_name,
     )
-    # mock bucket initialization parameters
-    mock_bucket(mocker)
-    mock_bucket_object_utils(mocker)
-
-    input_yaml, cluster = load_cluster_model_from_yaml(config_file_name, test_datadir)
-    generated_template, cdk_assets = CDKTemplateBuilder().build_cluster_template(
-        cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
+    generated_template, cdk_assets = get_generated_template_and_cdk_assets(
+        mocker,
+        rendered_config_file,
+        test_datadir,
     )
-
-    asset_content = get_asset_content_with_resource_name(cdk_assets, "LaunchTemplate64e1c3597ca4c326")
+    launch_template_logical_id = "LaunchTemplate64e1c3597ca4c326"
+    asset_content = get_asset_content_with_resource_name(cdk_assets, launch_template_logical_id)
 
     for lt_assertion in lt_assertions:
-        lt_assertion.assert_lt_properties(asset_content, "LaunchTemplate64e1c3597ca4c326")
+        lt_assertion.assert_lt_properties(asset_content, launch_template_logical_id)
+
+    # Checking user data variables
+    user_data_variables = asset_content["Resources"][launch_template_logical_id]["Properties"]["LaunchTemplateData"][
+        "UserData"
+    ]["Fn::Base64"]["Fn::Sub"][1]
+    expected_user_data_variables = {
+        "DisableMultiThreadingManually": "true",
+        "ProxyServer": "NONE",
+    }
+    for k, v in expected_user_data_variables.items():
+        assert_that(user_data_variables[k]).is_equal_to(v)
+
+
+class LoginNodeLTAssertion:
+    def __init__(
+        self,
+        subnet_ids,
+        root_volume_encrypted,
+        image_id,
+        http_tokens,
+        iam_instance_profile_name,
+        custom_tags=None,
+        user_data_variables=None,
+    ):
+        self.subnet_ids = subnet_ids
+        self.root_volume_encrypted = root_volume_encrypted
+        self.image_id = image_id
+        self.http_tokens = http_tokens
+        self.iam_instance_profile_name = iam_instance_profile_name
+        self.custom_tags = custom_tags
+        self.user_data_variables = user_data_variables
+
+    def assert_lt_properties(self, generated_template, resource_type):
+        resources = generated_template["Resources"][resource_type]
+        properties = resources["Properties"]
+        assert properties["LaunchTemplateData"]["ImageId"] == self.image_id
+        assert properties["LaunchTemplateData"]["MetadataOptions"]["HttpTokens"] == self.http_tokens
+        assert properties["LaunchTemplateData"]["IamInstanceProfile"]["Name"] == self.iam_instance_profile_name
+        for network_interface in properties["LaunchTemplateData"]["NetworkInterfaces"]:
+            assert network_interface["SubnetId"] in self.subnet_ids
+        lt_block_device_mappings = properties["LaunchTemplateData"]["BlockDeviceMappings"]
+        assert (
+            lt_block_device_mappings[len(lt_block_device_mappings) - 1]["Ebs"]["Encrypted"]
+            == self.root_volume_encrypted
+        )
+        if self.custom_tags:
+            for tag in self.custom_tags:
+                assert tag in properties["LaunchTemplateData"]["TagSpecifications"][0]["Tags"]
+        # The new login node bootstrap delivers dna.json/extra.json via cloud-init write_files
+        # rather than cfn-init, so the LT should not carry any AWS::CloudFormation::Init metadata
+        # and the user_data substitutions must include DnaJson/ExtraJson.
+        assert "Metadata" not in resources or "AWS::CloudFormation::Init" not in resources.get("Metadata", {})
+        lt_user_data_variables = properties["LaunchTemplateData"]["UserData"]["Fn::Base64"]["Fn::Sub"][1]
+        assert "DnaJson" in lt_user_data_variables
+        assert "ExtraJson" in lt_user_data_variables
+        if self.user_data_variables:
+            for k, v in self.user_data_variables.items():
+                assert_that(lt_user_data_variables[k]).is_equal_to(v)
+
+
+@pytest.mark.parametrize(
+    "config_file_name, lt_assertions",
+    [
+        (
+            "test-login-nodes-stack.yaml",
+            [
+                LoginNodeLTAssertion(
+                    subnet_ids=["subnet-12345678"],
+                    root_volume_encrypted=True,
+                    image_id="dummy-ami-id",
+                    http_tokens="required",
+                    # Managed instance profile
+                    iam_instance_profile_name={"Ref": "InstanceProfileA50bdea9651dc48c"},
+                    user_data_variables={
+                        "ProxyServer": "NONE",
+                        "AutoScalingGroupName": "clustername-testloginnodespool1-AutoScalingGroup",
+                        "LaunchingLifecycleHookName": (
+                            "clustername-testloginnodespool1-LoginNodesLaunchingLifecycleHook"
+                        ),
+                    },
+                ),
+                NetworkInterfaceLTAssertion(no_of_network_interfaces=1, subnet_id="subnet-12345678"),
+                InstanceTypeLTAssertion(has_instance_type=True),
+            ],
+        ),
+        (
+            "test-login-nodes-stack-with-custom-instance-profile.yaml",
+            [
+                LoginNodeLTAssertion(
+                    subnet_ids=["subnet-12345678"],
+                    root_volume_encrypted=True,
+                    image_id="dummy-ami-id",
+                    http_tokens="required",
+                    # Custom instance profile
+                    iam_instance_profile_name="INSTANCE_PROFILE_NAME",
+                    user_data_variables={
+                        "ProxyServer": "NONE",
+                        "AutoScalingGroupName": "clustername-testloginnodespool1-AutoScalingGroup",
+                        "LaunchingLifecycleHookName": (
+                            "clustername-testloginnodespool1-LoginNodesLaunchingLifecycleHook"
+                        ),
+                    },
+                ),
+                NetworkInterfaceLTAssertion(no_of_network_interfaces=1, subnet_id="subnet-12345678"),
+                InstanceTypeLTAssertion(has_instance_type=True),
+            ],
+        ),
+        (
+            "test-login-nodes-stack-with-custom-instance-role.yaml",
+            [
+                LoginNodeLTAssertion(
+                    subnet_ids=["subnet-12345678"],
+                    root_volume_encrypted=True,
+                    image_id="dummy-ami-id",
+                    http_tokens="required",
+                    # Managed instance profile containing the custom instance role
+                    iam_instance_profile_name={"Ref": "InstanceProfileA50bdea9651dc48c"},
+                    user_data_variables={
+                        "ProxyServer": "NONE",
+                        "AutoScalingGroupName": "clustername-testloginnodespool1-AutoScalingGroup",
+                        "LaunchingLifecycleHookName": (
+                            "clustername-testloginnodespool1-LoginNodesLaunchingLifecycleHook"
+                        ),
+                    },
+                ),
+                NetworkInterfaceLTAssertion(no_of_network_interfaces=1, subnet_id="subnet-12345678"),
+                InstanceTypeLTAssertion(has_instance_type=True),
+            ],
+        ),
+        (
+            "test-login-nodes-stack-without-ssh.yaml",
+            [
+                LoginNodeLTAssertion(
+                    subnet_ids=["subnet-12345678"],
+                    root_volume_encrypted=True,
+                    image_id="dummy-ami-id",
+                    http_tokens="required",
+                    # Managed instance profile
+                    iam_instance_profile_name={"Ref": "InstanceProfileA50bdea9651dc48c"},
+                    user_data_variables={
+                        "ProxyServer": "NONE",
+                        "AutoScalingGroupName": "clustername-testloginnodespool1-AutoScalingGroup",
+                        "LaunchingLifecycleHookName": (
+                            "clustername-testloginnodespool1-LoginNodesLaunchingLifecycleHook"
+                        ),
+                    },
+                ),
+                NetworkInterfaceLTAssertion(no_of_network_interfaces=1, subnet_id="subnet-12345678"),
+                InstanceTypeLTAssertion(has_instance_type=True),
+            ],
+        ),
+        (
+            "test-login-nodes-stack-with-custom-tags.yaml",
+            [
+                LoginNodeLTAssertion(
+                    subnet_ids=["subnet-12345678"],
+                    root_volume_encrypted=True,
+                    image_id="dummy-ami-id",
+                    http_tokens="required",
+                    # Managed instance profile
+                    iam_instance_profile_name={"Ref": "InstanceProfileA50bdea9651dc48c"},
+                    custom_tags=[
+                        {"Key": "rs:environment", "Value": "development"},
+                        {"Key": "rs:project", "Value": "solutions"},
+                    ],
+                    user_data_variables={
+                        "ProxyServer": "NONE",
+                        "AutoScalingGroupName": "clustername-testloginnodespool1-AutoScalingGroup",
+                        "LaunchingLifecycleHookName": (
+                            "clustername-testloginnodespool1-LoginNodesLaunchingLifecycleHook"
+                        ),
+                    },
+                ),
+                NetworkInterfaceLTAssertion(no_of_network_interfaces=1, subnet_id="subnet-12345678"),
+                InstanceTypeLTAssertion(has_instance_type=True),
+            ],
+        ),
+    ],
+)
+def test_login_nodes_launch_template_properties(
+    mocker,
+    config_file_name,
+    lt_assertions,
+    pcluster_config_reader,
+    test_datadir,
+):
+    rendered_config_file = pcluster_config_reader(
+        config_file_name,
+    )
+    generated_template, cdk_assets = get_generated_template_and_cdk_assets(
+        mocker,
+        rendered_config_file,
+        test_datadir,
+    )
+    login_node_lt_id = "LoginNodeLaunchTemplateA50bdea9651dc48c"
+    asset_content = get_asset_content_with_resource_name(cdk_assets, login_node_lt_id)
+    for lt_assertion in lt_assertions:
+        lt_assertion.assert_lt_properties(asset_content, login_node_lt_id)
+
+
+class AutoScalingGroupAssertion:
+    def __init__(self, min_size: int, max_size: int, desired_capacity: int, expected_lifecycle_specification: List):
+        self.min_size = min_size
+        self.max_size = max_size
+        self.desired_capacity = desired_capacity
+        self.expected_lifecycle_specification = expected_lifecycle_specification
+
+    def assert_asg_properties(self, template, resource_name: str):
+        resource = template["Resources"][resource_name]
+        assert resource["Type"] == "AWS::AutoScaling::AutoScalingGroup"
+        properties = resource["Properties"]
+        assert int(properties["MinSize"]) == self.min_size
+        assert int(properties["MaxSize"]) == self.max_size
+        assert int(properties["DesiredCapacity"]) == self.desired_capacity
+        assert properties["LifecycleHookSpecificationList"] == self.expected_lifecycle_specification
+
+
+class NetworkLoadBalancerAssertion:
+    def __init__(self, expected_vpc_id: str, expected_internet_facing: bool):
+        self.expected_vpc_id = expected_vpc_id
+        self.expected_internet_facing = expected_internet_facing
+
+    def assert_nlb_properties(self, template, resource_name: str):
+        resource = template["Resources"][resource_name]
+        assert resource["Type"] == "AWS::ElasticLoadBalancingV2::LoadBalancer"
+        properties = resource["Properties"]
+        assert properties["Type"] == "network"
+        assert properties["Subnets"][0] == self.expected_vpc_id
+        assert properties["Scheme"] == ("internet-facing" if self.expected_internet_facing else "internal")
+
+
+class TargetGroupAssertion:
+    def __init__(self, expected_health_check: str, expected_port: int, expected_protocol: str):
+        self.expected_health_check = expected_health_check
+        self.expected_port = expected_port
+        self.expected_protocol = expected_protocol
+
+    def assert_tg_properties(self, template, resource_name: str):
+        resource = template["Resources"][resource_name]
+        assert resource["Type"] == "AWS::ElasticLoadBalancingV2::TargetGroup"
+        properties = resource["Properties"]
+        assert properties["HealthCheckProtocol"] == self.expected_health_check
+        assert int(properties["Port"]) == self.expected_port
+        assert properties["Protocol"] == self.expected_protocol
+
+
+class NetworkLoadBalancerListenerAssertion:
+    def __init__(self, expected_port: int, expected_protocol: str):
+        self.expected_port = expected_port
+        self.expected_protocol = expected_protocol
+
+    def assert_nlb_listener_properties(self, template, resource_name: str):
+        resource = template["Resources"][resource_name]
+        assert resource["Type"] == "AWS::ElasticLoadBalancingV2::Listener"
+        properties = resource["Properties"]
+        assert int(properties["Port"]) == self.expected_port
+        assert properties["Protocol"] == self.expected_protocol
+
+
+class IamRoleAssertion:
+    def __init__(self, expected_managed_policy_arn: str):
+        self.expected_managed_policy_arn = expected_managed_policy_arn
+
+    def assert_iam_role_properties(self, template, resource_name: str):
+        resource = template["Resources"][resource_name]
+        assert resource["Type"] == "AWS::IAM::Role"
+        properties = resource["Properties"]
+        assert properties["ManagedPolicyArns"][0] == self.expected_managed_policy_arn
+
+
+class IamPolicyAssertion:
+    def __init__(self, expected_statements: List[Dict[str, Any]]):
+        self.expected_statements = expected_statements
+
+    def assert_iam_policy_properties(self, template, resource_name: str):
+        resource = template["Resources"][resource_name]
+        assert resource["Type"] == "AWS::IAM::Policy"
+        properties = resource["Properties"]
+        policy_doc = properties["PolicyDocument"]
+        assert policy_doc["Statement"] == self.expected_statements
+
+
+@pytest.mark.parametrize(
+    "config_file_name, lt_assertions",
+    [
+        (
+            "test-login-nodes-stack.yaml",
+            [
+                AutoScalingGroupAssertion(
+                    min_size=2,
+                    max_size=2,
+                    desired_capacity=2,
+                    expected_lifecycle_specification=[
+                        {
+                            "DefaultResult": "ABANDON",
+                            "HeartbeatTimeout": 7200,
+                            "LifecycleHookName": "clustername-testloginnodespool1-LoginNodesTerminatingLifecycleHook",
+                            "LifecycleTransition": "autoscaling:EC2_INSTANCE_TERMINATING",
+                        },
+                        {
+                            "DefaultResult": "ABANDON",
+                            "HeartbeatTimeout": 600,
+                            "LifecycleHookName": "clustername-testloginnodespool1-LoginNodesLaunchingLifecycleHook",
+                            "LifecycleTransition": "autoscaling:EC2_INSTANCE_LAUNCHING",
+                        },
+                    ],
+                ),
+                NetworkLoadBalancerAssertion(expected_vpc_id="subnet-12345678", expected_internet_facing=True),
+                TargetGroupAssertion(expected_health_check="TCP", expected_port=22, expected_protocol="TCP"),
+                NetworkLoadBalancerListenerAssertion(expected_port=22, expected_protocol="TCP"),
+                IamRoleAssertion(expected_managed_policy_arn="arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"),
+                IamPolicyAssertion(
+                    expected_statements=[
+                        {
+                            "Action": "ec2:DescribeInstanceAttribute",
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Sid": "Ec2",
+                        },
+                        {
+                            "Action": "s3:GetObject",
+                            "Effect": "Allow",
+                            "Resource": {
+                                "Fn::Join": [
+                                    "",
+                                    [
+                                        "arn:",
+                                        {"Ref": "AWS::Partition"},
+                                        ":s3:::",
+                                        {"Ref": "AWS::Region"},
+                                        "-aws-parallelcluster/*",
+                                    ],
+                                ]
+                            },
+                            "Sid": "S3GetObj",
+                        },
+                        {
+                            "Action": "autoscaling:CompleteLifecycleAction",
+                            "Effect": "Allow",
+                            "Resource": {
+                                "Fn::Join": [
+                                    "",
+                                    [
+                                        "arn:",
+                                        {"Ref": "AWS::Partition"},
+                                        ":autoscaling:",
+                                        {"Ref": "AWS::Region"},
+                                        ":",
+                                        {"Ref": "AWS::AccountId"},
+                                        ":autoScalingGroup:*:autoScalingGroupName/clustername-"
+                                        "testloginnodespool1-AutoScalingGroup",
+                                    ],
+                                ]
+                            },
+                            "Sid": "Autoscaling",
+                        },
+                        {
+                            "Action": ["cloudformation:DescribeStackResource", "cloudformation:DescribeStacks"],
+                            "Effect": "Allow",
+                            "Resource": [
+                                {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "arn:",
+                                            {"Ref": "AWS::Partition"},
+                                            ":cloudformation:",
+                                            {"Ref": "AWS::Region"},
+                                            ":",
+                                            {"Ref": "AWS::AccountId"},
+                                            ":stack/clustername/*",
+                                        ],
+                                    ]
+                                },
+                                {"Ref": "AWS::StackId"},
+                            ],
+                            "Sid": "CloudFormation",
+                        },
+                        {
+                            "Action": ["dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:GetItem"],
+                            "Effect": "Allow",
+                            "Resource": {
+                                "Fn::Join": [
+                                    "",
+                                    [
+                                        "arn:",
+                                        {"Ref": "AWS::Partition"},
+                                        ":dynamodb:",
+                                        {"Ref": "AWS::Region"},
+                                        ":",
+                                        {"Ref": "AWS::AccountId"},
+                                        ":table/parallelcluster-clustername",
+                                    ],
+                                ]
+                            },
+                            "Sid": "DynamoDBTable",
+                        },
+                        {
+                            "Action": "s3:GetObject",
+                            "Effect": "Allow",
+                            "Resource": {
+                                "Fn::Join": [
+                                    "",
+                                    [
+                                        "arn:",
+                                        {"Ref": "AWS::Partition"},
+                                        ":s3:::dcv-license.",
+                                        {"Ref": "AWS::Region"},
+                                        "/*",
+                                    ],
+                                ]
+                            },
+                            "Sid": "DcvLicense",
+                        },
+                    ]
+                ),
+            ],
+        ),
+    ],
+)
+def test_login_nodes_traffic_management_resources_values_properties(
+    mocker,
+    config_file_name,
+    lt_assertions,
+    test_datadir,
+):
+    generated_template, cdk_assets = get_generated_template_and_cdk_assets(
+        mocker,
+        config_file_name,
+        test_datadir,
+    )
+
+    auto_scaling_group_id = "clusternametestloginnodespool1clusternametestloginnodespool1AutoScalingGroup5EBA3937"
+    load_balancer_id = "clusternametestloginnodespool1testloginnodespool1LoadBalancerE1D4FCC7"
+    target_group_id = "clusternametestloginnodespool1testloginnodespool1TargetGroup713F5EC5"
+    listener_id = (
+        "clusternametestloginnodespool1testloginnodespool1LoadBalancerLoginNodesListenertestloginnodespool165B4D3DC"
+    )
+    role_id = "RoleA50bdea9651dc48c"
+    policies_id = "ParallelClusterPoliciesA50bdea9651dc48c"
+
+    asset_content_asg = get_asset_content_with_resource_name(cdk_assets, auto_scaling_group_id)
+    asset_content_nlb = get_asset_content_with_resource_name(cdk_assets, load_balancer_id)
+    asset_content_target_group = get_asset_content_with_resource_name(cdk_assets, target_group_id)
+    asset_content_nlb_listener = get_asset_content_with_resource_name(
+        cdk_assets,
+        listener_id,
+    )
+    asset_content_iam_role = get_asset_content_with_resource_name(
+        cdk_assets,
+        role_id,
+    )
+    asset_content_iam_policy = get_asset_content_with_resource_name(
+        cdk_assets,
+        policies_id,
+    )
+    for lt_assertion in lt_assertions:
+        if isinstance(lt_assertion, AutoScalingGroupAssertion):
+            lt_assertion.assert_asg_properties(
+                asset_content_asg,
+                auto_scaling_group_id,
+            )
+        elif isinstance(lt_assertion, NetworkLoadBalancerAssertion):
+            lt_assertion.assert_nlb_properties(asset_content_nlb, load_balancer_id)
+        elif isinstance(lt_assertion, TargetGroupAssertion):
+            lt_assertion.assert_tg_properties(asset_content_target_group, target_group_id)
+        elif isinstance(lt_assertion, NetworkLoadBalancerListenerAssertion):
+            lt_assertion.assert_nlb_listener_properties(
+                asset_content_nlb_listener,
+                "clusternametestloginnodespool1testloginnodespool1"
+                "LoadBalancerLoginNodesListenertestloginnodespool165B4D3DC",
+            )
+        elif isinstance(lt_assertion, IamRoleAssertion):
+            lt_assertion.assert_iam_role_properties(asset_content_iam_role, role_id)
+        elif isinstance(lt_assertion, IamPolicyAssertion):
+            lt_assertion.assert_iam_policy_properties(asset_content_iam_policy, policies_id)
 
 
 @pytest.mark.parametrize(
     "config_file_name, expected_head_node_dna_json_fields",
     [
-        ("slurm-imds-secured-true.yaml", {"scheduler": "slurm", "head_node_imds_secured": "true"}),
+        (
+            "slurm-imds-secured-true.yaml",
+            {"scheduler": "slurm", "head_node_imds_secured": "true", "disable_sudo_access_for_default_user": "true"},
+        ),
         (
             "slurm-imds-secured-false.yaml",
             {"scheduler": "slurm", "head_node_imds_secured": "false", "compute_node_bootstrap_timeout": 1000},
         ),
         (
-            "awsbatch-imds-secured-false.yaml",
-            {"scheduler": "awsbatch", "head_node_imds_secured": "false", "compute_node_bootstrap_timeout": 1201},
-        ),
-        ("scheduler-plugin-imds-secured-true.yaml", {"scheduler": "plugin", "head_node_imds_secured": "true"}),
-        (
-            "scheduler-plugin-headnode-hooks-partial.yaml",
-            {
-                "scheduler": "plugin",
-            },
-        ),
-        (
-            "awsbatch-headnode-hooks-partial.yaml",
-            {
-                "scheduler": "awsbatch",
-            },
-        ),
-        (
             "slurm-headnode-hooks-full.yaml",
             {
                 "scheduler": "slurm",
+            },
+        ),
+        (
+            "default-user-local-home.yaml",
+            {
+                "scheduler": "slurm",
+                "default_user_home": "local",
             },
         ),
     ],
@@ -591,12 +1063,12 @@ def test_head_node_dna_json(mocker, test_datadir, config_file_name, expected_hea
     )
 
     generated_head_node_dna_json = json.loads(
-        _get_cfn_init_file_content(template=generated_template, resource="HeadNodeLaunchTemplate", file="/tmp/dna.json")
+        _get_cfn_init_file_content(
+            template=generated_template,
+            resource="HeadNodeLaunchTemplate",
+            file="/opt/parallelcluster/tmp/dna.json",
+        )
     )
-    plugin__specific_settings = {
-        "scheduler_plugin_substack_arn": "{'Ref': 'SchedulerPluginStack'}",
-        "ddb_table": "{'Ref': 'DynamoDBTable'}",
-    }
     slurm_specific_settings = {
         "ddb_table": "{'Ref': 'DynamoDBTable'}",
         "dns_domain": "{'Ref': 'ClusterDNSDomain'}",
@@ -605,10 +1077,7 @@ def test_head_node_dna_json(mocker, test_datadir, config_file_name, expected_hea
         "use_private_hostname": "false",
     }
 
-    if expected_head_node_dna_json_fields["scheduler"] == "slurm":
-        default_head_node_dna_json["cluster"].update(slurm_specific_settings)
-    elif expected_head_node_dna_json_fields["scheduler"] == "plugin":
-        default_head_node_dna_json["cluster"].update(plugin__specific_settings)
+    default_head_node_dna_json["cluster"].update(slurm_specific_settings)
 
     default_head_node_dna_json["cluster"].update(expected_head_node_dna_json_fields)
 
@@ -619,12 +1088,8 @@ def test_head_node_dna_json(mocker, test_datadir, config_file_name, expected_hea
 @pytest.mark.parametrize(
     "config_file_name, expected_head_node_bootstrap_timeout",
     [
-        ("slurm.required.yaml", "1800"),
+        ("slurm.required.yaml", "2100"),
         ("slurm.full.yaml", "1201"),
-        ("awsbatch.simple.yaml", "1800"),
-        ("awsbatch.full.yaml", "1000"),
-        ("scheduler_plugin.required.yaml", "1800"),
-        ("scheduler_plugin.full.yaml", "1201"),
     ],
 )
 def test_head_node_bootstrap_timeout(mocker, config_file_name, expected_head_node_bootstrap_timeout):
@@ -632,14 +1097,17 @@ def test_head_node_bootstrap_timeout(mocker, config_file_name, expected_head_nod
     # mock bucket initialization parameters
     mock_bucket(mocker)
     mock_bucket_object_utils(mocker)
-
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_and_reservation_type_from_capacity_reservation",
+        return_value=("t3.micro", "capacity-reservation"),
+    )
     input_yaml, cluster = load_cluster_model_from_yaml(config_file_name)
     generated_template, _ = CDKTemplateBuilder().build_cluster_template(
         cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
     )
     assert_that(
         generated_template["Resources"]
-        .get("HeadNodeWaitCondition" + datetime.utcnow().strftime("%Y%m%d%H%M%S"))
+        .get("HeadNodeWaitCondition" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
         .get("Properties")
         .get("Timeout")
     ).is_equal_to(expected_head_node_bootstrap_timeout)
@@ -653,42 +1121,63 @@ def _get_cfn_init_file_content(template, resource, file):
     return content_separator.join(str(elem) for elem in content_elements)
 
 
+@pytest.mark.parametrize(
+    "config_file_name, expected_login_pools",
+    [
+        (
+            "test-login-nodes-stack.yaml",
+            {
+                "testloginnodespool1": {
+                    "LaunchTemplate": {
+                        "Name": "clustername-testloginnodespool1",
+                        "Version": "$Latest",
+                        "LogicalId": "LoginNodeLaunchTemplateA50bdea9651dc48c",
+                    }
+                }
+            },
+        ),
+        ("no-login-nodes-stack.yaml", None),
+    ],
+)
+def test_launch_templates_config_login_pools(
+    mocker, pcluster_config_reader, test_datadir, config_file_name, expected_login_pools
+):
+    """The head node launch-templates-config.json carries LoginPools with Name/Version/LogicalId."""
+    rendered_config_file = pcluster_config_reader(config_file_name)
+    generated_template, _ = get_generated_template_and_cdk_assets(mocker, rendered_config_file, test_datadir)
+
+    cfn_init = generated_template["Resources"]["HeadNodeLaunchTemplate"]["Metadata"]["AWS::CloudFormation::Init"]
+    content = cfn_init["deployConfigFiles"]["files"]["/opt/parallelcluster/shared/launch-templates-config.json"][
+        "content"
+    ]
+    # The content embeds CFN tokens (Ref/GetAtt) for the compute fleet, so CDK serializes it
+    # as an Fn::Join. Stringify the whole content and assert on the LoginPools literals, which
+    # are plain strings preserved verbatim.
+    content_blob = json.dumps(content, default=str)
+    if expected_login_pools is None:
+        assert_that(content_blob).does_not_contain("LoginPools")
+    else:
+        for _, pool in expected_login_pools.items():
+            lt = pool["LaunchTemplate"]
+            assert_that(content_blob).contains("LoginPools")
+            assert_that(content_blob).contains(lt["Name"])
+            assert_that(content_blob).contains(lt["Version"])
+            assert_that(content_blob).contains(lt["LogicalId"])
+
+
 @freeze_time("2021-01-01T01:01:01")
 @pytest.mark.parametrize(
-    "config_file_name, expected_instance_tags, expected_volume_tags",
+    "config_file_name, expected_head_node_tags",
     [
         (
             "slurm.full.yaml",
-            {},
             {
+                "Name": "HeadNode",
                 "parallelcluster:cluster-name": "clustername",
                 "parallelcluster:node-type": "HeadNode",
-                # TODO The tag 'parallelcluster:version' is actually included within head node volume tags,
-                #  but some refactoring is required to check it within this test.
-                # "parallelcluster:version": "[0-9\\.A-Za-z]+",
-                "String": "String",
-                "two": "two22",
-            },
-        ),
-        (
-            "awsbatch.full.yaml",
-            {},
-            {
-                "parallelcluster:cluster-name": "clustername",
-                "parallelcluster:node-type": "HeadNode",
-                # TODO The tag 'parallelcluster:version' is actually included within head node volume tags,
-                #  but some refactoring is required to check it within this test.
-                # "parallelcluster:version": "[0-9\\.A-Za-z]+",
-                "String": "String",
-                "two": "two22",
-            },
-        ),
-        (
-            "scheduler_plugin.full.yaml",
-            {},
-            {
-                "parallelcluster:cluster-name": "clustername",
-                "parallelcluster:node-type": "HeadNode",
+                "parallelcluster:attributes": "alinux2023, slurm, [0-9\\.A-Za-z]+, x86_64",
+                "parallelcluster:filesystem": "efs=2, multiebs=1, raid=0, fsx=3",
+                "parallelcluster:networking": "EFA=NONE",
                 # TODO The tag 'parallelcluster:version' is actually included within head node volume tags,
                 #  but some refactoring is required to check it within this test.
                 # "parallelcluster:version": "[0-9\\.A-Za-z]+",
@@ -698,14 +1187,21 @@ def _get_cfn_init_file_content(template, resource, file):
         ),
     ],
 )
-def test_head_node_tags_from_launch_template(mocker, config_file_name, expected_instance_tags, expected_volume_tags):
+def test_head_node_tags(mocker, config_file_name, expected_head_node_tags):
     mock_aws_api(mocker)
     mock_bucket(mocker)
     mock_bucket_object_utils(mocker)
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_and_reservation_type_from_capacity_reservation",
+        return_value=("t3.micro", "capacity-reservation"),
+    )
     input_yaml, cluster = load_cluster_model_from_yaml(config_file_name)
     generated_template, _ = CDKTemplateBuilder().build_cluster_template(
         cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
     )
+
+    # Verify no volume TagSpecifications in the launch template.
+    # Volume tags are propagated via PropagateTagsToVolumeOnCreation on the HeadNode instance.
     tags_specifications = (
         generated_template.get("Resources")
         .get("HeadNodeLaunchTemplate")
@@ -713,88 +1209,18 @@ def test_head_node_tags_from_launch_template(mocker, config_file_name, expected_
         .get("LaunchTemplateData")
         .get("TagSpecifications", [])
     )
+    volume_tag_specs = [specs for specs in tags_specifications if specs["ResourceType"] == "volume"]
+    assert_that(volume_tag_specs).is_empty()
 
-    instance_tags = next((specs for specs in tags_specifications if specs["ResourceType"] == "instance"), {}).get(
-        "Tags", []
-    )
-    actual_instance_tags = {tag["Key"]: tag["Value"] for tag in instance_tags}
-    assert_that(actual_instance_tags).is_equal_to(expected_instance_tags)
+    # Verify PropagateTagsToVolumeOnCreation is enabled and instance tags are correct.
+    head_node_props = generated_template.get("Resources").get("HeadNode").get("Properties")
+    assert_that(head_node_props.get("PropagateTagsToVolumeOnCreation")).is_true()
 
-    volume_tags = next((specs for specs in tags_specifications if specs["ResourceType"] == "volume"), {}).get(
-        "Tags", []
-    )
-    actual_volume_tags = {tag["Key"]: tag["Value"] for tag in volume_tags}
-    assert_that(actual_volume_tags).is_equal_to(expected_volume_tags)
-
-
-@freeze_time("2021-01-01T01:01:01")
-@pytest.mark.parametrize(
-    "config_file_name, expected_tags",
-    [
-        (
-            "slurm.full.yaml",
-            {
-                "Name": "HeadNode",
-                "parallelcluster:cluster-name": "clustername",
-                "parallelcluster:node-type": "HeadNode",
-                "parallelcluster:attributes": "centos7, slurm, [0-9\\.A-Za-z]+, x86_64",
-                "parallelcluster:filesystem": "efs=1, multiebs=1, raid=0, fsx=3",
-                "parallelcluster:networking": "EFA=NONE",
-                # TODO The tag 'parallelcluster:version' is actually included within head node volume tags,
-                #  but some refactoring is required to check it within this test.
-                # "parallelcluster:version": "[0-9\\.A-Za-z]+",
-                "String": "String",
-                "two": "two22",
-            },
-        ),
-        (
-            "awsbatch.full.yaml",
-            {
-                "Name": "HeadNode",
-                "parallelcluster:cluster-name": "clustername",
-                "parallelcluster:node-type": "HeadNode",
-                "parallelcluster:attributes": "alinux2, awsbatch, [0-9\\.A-Za-z]+, x86_64",
-                "parallelcluster:filesystem": "efs=1, multiebs=0, raid=2, fsx=0",
-                "parallelcluster:networking": "EFA=NONE",
-                # TODO The tag 'parallelcluster:version' is actually included within head node volume tags,
-                #  but some refactoring is required to check it within this test.
-                # "parallelcluster:version": "[0-9\\.A-Za-z]+",
-                "String": "String",
-                "two": "two22",
-            },
-        ),
-        (
-            "scheduler_plugin.full.yaml",
-            {
-                "Name": "HeadNode",
-                "parallelcluster:cluster-name": "clustername",
-                "parallelcluster:node-type": "HeadNode",
-                "parallelcluster:attributes": "centos7, plugin, [0-9\\.A-Za-z]+, x86_64",
-                "parallelcluster:filesystem": "efs=1, multiebs=1, raid=0, fsx=1",
-                "parallelcluster:networking": "EFA=NONE",
-                # TODO The tag 'parallelcluster:version' is actually included within head node volume tags,
-                #  but some refactoring is required to check it within this test.
-                # "parallelcluster:version": "[0-9\\.A-Za-z]+",
-                "String": "String",
-                "two": "two22",
-            },
-        ),
-    ],
-)
-def test_head_node_tags_from_instance_definition(mocker, config_file_name, expected_tags):
-    mock_aws_api(mocker)
-    mock_bucket(mocker)
-    mock_bucket_object_utils(mocker)
-    input_yaml, cluster = load_cluster_model_from_yaml(config_file_name)
-    generated_template, _ = CDKTemplateBuilder().build_cluster_template(
-        cluster_config=cluster, bucket=dummy_cluster_bucket(), stack_name="clustername"
-    )
-    tags = generated_template.get("Resources").get("HeadNode").get("Properties").get("Tags", [])
-
-    actual_tags = {tag["Key"]: tag["Value"] for tag in tags}
-    assert_that(actual_tags.keys()).is_equal_to(expected_tags.keys())
-    for key in actual_tags.keys():
-        assert_that(actual_tags[key]).matches(expected_tags[key])
+    tags = head_node_props.get("Tags", [])
+    head_node_actual_tags = {tag["Key"]: tag["Value"] for tag in tags}
+    assert_that(head_node_actual_tags.keys()).is_equal_to(expected_head_node_tags.keys())
+    for key in head_node_actual_tags.keys():
+        assert_that(head_node_actual_tags[key]).matches(expected_head_node_tags[key])
 
 
 @freeze_time("2021-01-01T01:01:01")
@@ -802,14 +1228,8 @@ def test_head_node_tags_from_instance_definition(mocker, config_file_name, expec
     "config_file_name, imds_support, http_tokens",
     [
         ("slurm.required.yaml", "v1.0", "optional"),
-        ("awsbatch.simple.yaml", "v1.0", "optional"),
-        ("scheduler_plugin.required.yaml", "v1.0", "optional"),
-        ("slurm.required.yaml", None, "optional"),
-        ("awsbatch.simple.yaml", None, "optional"),
-        ("scheduler_plugin.required.yaml", None, "optional"),
+        ("slurm.required.yaml", None, "required"),
         ("slurm.required.yaml", "v2.0", "required"),
-        ("awsbatch.simple.yaml", "v2.0", "required"),
-        ("scheduler_plugin.required.yaml", "v2.0", "required"),
     ],
 )
 def test_cluster_imds_settings(mocker, config_file_name, imds_support, http_tokens):
@@ -839,14 +1259,7 @@ def test_cluster_imds_settings(mocker, config_file_name, imds_support, http_toke
     "config_file_name, vpc_config",
     [
         ("slurm.required.yaml", {"SubnetIds": ["subnet-8e482ce8"], "SecurityGroupIds": ["sg-028d73ae220157d96"]}),
-        ("awsbatch.simple.yaml", {"SubnetIds": ["subnet-8e482ce8"], "SecurityGroupIds": ["sg-028d73ae220157d96"]}),
-        (
-            "scheduler_plugin.required.yaml",
-            {"SubnetIds": ["subnet-8e482ce8"], "SecurityGroupIds": ["sg-028d73ae220157d96"]},
-        ),
         ("slurm.required.yaml", None),
-        ("awsbatch.simple.yaml", None),
-        ("scheduler_plugin.required.yaml", None),
     ],
 )
 def test_cluster_lambda_functions_vpc_config(mocker, config_file_name, vpc_config):
@@ -865,3 +1278,200 @@ def test_cluster_lambda_functions_vpc_config(mocker, config_file_name, vpc_confi
     )
 
     assert_lambdas_have_expected_vpc_config_and_managed_policy(generated_template, vpc_config)
+
+
+@pytest.mark.parametrize(
+    "config_file_name",
+    [
+        "config.yaml",
+    ],
+)
+def test_head_node_security_group(mocker, test_datadir, config_file_name):
+    mock_aws_api(mocker)
+    mock_bucket_object_utils(mocker)
+
+    input_yaml = load_yaml_dict(test_datadir / config_file_name)
+
+    cluster_config = ClusterSchema(cluster_name="clustername").load(input_yaml)
+
+    generated_template, _ = CDKTemplateBuilder().build_cluster_template(
+        cluster_config=cluster_config, bucket=dummy_cluster_bucket(), stack_name="clustername"
+    )
+
+    head_node_sg_name = "HeadNodeSecurityGroup"
+
+    login_nodes_networking = cluster_config.login_nodes.pools[0].networking
+    login_nodes_sg_name = (
+        login_nodes_networking.security_groups[0]
+        if login_nodes_networking.security_groups
+        else f"{cluster_config.login_nodes.pools[0].name}LoginNodesSecurityGroup"
+    )
+    for sg in ["ComputeSecurityGroup", login_nodes_sg_name]:
+        ingress_ip_protocol = "tcp" if sg == login_nodes_sg_name else "-1"
+        ingress_port_ranges = [[6819, 6829], [2049, 2049]] if sg == login_nodes_sg_name else [[0, 65535]]
+        for port_range in ingress_port_ranges:
+            assert_sg_rule(
+                generated_template,
+                head_node_sg_name,
+                rule_type="ingress",
+                protocol=ingress_ip_protocol,
+                port_range=port_range,
+                target_sg=sg,
+            )
+
+
+@pytest.mark.parametrize(
+    "config_file_name, expected_field, expected_value, should_fail, error_message",
+    [
+        ("config_restricted_ssh_cidr.yaml", "CidrIp", "1.2.3.4/19", False, ""),
+        ("config_restricted_ssh_prefix_list.yaml", "SourcePrefixListId", "pl-012345abcdABCD", False, ""),
+        (
+            "config_restricted_ssh_invalid.yaml",
+            None,
+            None,
+            True,
+            "Invalid value: 'invalid-cidr' is neither a valid CIDR or a valid prefix-list.",
+        ),
+    ],
+)
+def test_security_group_with_restricted_ssh_access(
+    mocker, test_datadir, config_file_name, expected_field, expected_value, should_fail, error_message
+):
+    """
+    Validates that both HeadNode and LoginNoes SecurityGroups have restricted SSH access.
+
+    If AllowedIPs setting is defined in the HeadNode SSH section but not in the LoginNodes Pools section, then both
+    HeadNode and LoginNodes SecurityGroups should have same restricted SSH access.
+    """
+    mock_aws_api(mocker)
+    mock_bucket_object_utils(mocker)
+    input_yaml = load_yaml_dict(test_datadir / config_file_name)
+
+    if should_fail:
+        with pytest.raises(ValidationError) as e:
+            ClusterSchema(cluster_name="clustername").load(input_yaml)
+            assert e.is_instance_of(ValidationError)
+            assert str(e.value).is_equal_to(error_message)
+    else:
+        cluster_config = ClusterSchema(cluster_name="clustername").load(input_yaml)
+
+        generated_template, _ = CDKTemplateBuilder().build_cluster_template(
+            cluster_config=cluster_config, bucket=dummy_cluster_bucket(), stack_name="clustername"
+        )
+
+        head_node_sg = generated_template["Resources"]["HeadNodeSecurityGroup"]
+        hn_ingress_rules = head_node_sg["Properties"]["SecurityGroupIngress"]
+        for rule in hn_ingress_rules:
+            if rule["FromPort"] == 22:  # SSH
+                assert rule[expected_field] == expected_value
+
+        login_node_sg = generated_template["Resources"][
+            f"{cluster_config.login_nodes.pools[0].name}LoginNodesSecurityGroup"
+        ]
+        ln_ingress_rules = login_node_sg["Properties"]["SecurityGroupIngress"]
+        for rule in ln_ingress_rules:
+            if rule["FromPort"] == 22:  # SSH
+                assert rule[expected_field] == expected_value
+
+
+@pytest.mark.parametrize(
+    "config_file_name",
+    [
+        ("config.yaml"),
+        ("config_with_login_nodes.yaml"),
+    ],
+)
+def test_custom_munge_key_iam_policy(mocker, test_datadir, config_file_name):
+    mock_aws_api(mocker)
+    mock_bucket_object_utils(mocker)
+
+    input_yaml = load_yaml_dict(test_datadir / config_file_name)
+    cluster_config = ClusterSchema(cluster_name="clustername").load(input_yaml)
+
+    generated_template, _ = CDKTemplateBuilder().build_cluster_template(
+        cluster_config=cluster_config, bucket=dummy_cluster_bucket(), stack_name="clustername"
+    )
+    assert_that(
+        generated_template["Resources"]["ParallelClusterPoliciesHeadNode"]["Properties"]["PolicyDocument"]["Statement"]
+    ).contains(
+        {
+            "Action": "secretsmanager:GetSecretValue",
+            "Effect": "Allow",
+            "Resource": "arn:aws:secretsmanager:us-east-1:123456789012:secret:TestCustomMungeKey",
+            "Sid": "SecretsManager",
+        }
+    )
+
+    if config_file_name == "config_with_login_nodes.yaml":
+        iam_policies = generated_template["Resources"]["ParallelClusterPoliciesHeadNode"]["Properties"][
+            "PolicyDocument"
+        ]["Statement"]
+        assert_that(iam_policies).contains(
+            {
+                "Action": ["elasticloadbalancing:DescribeTargetGroups", "elasticloadbalancing:DescribeTargetHealth"],
+                "Effect": "Allow",
+                "Resource": "*",
+                "Sid": "TargetGroupDescribe",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "resource_name_1, resource_name_2, partial_length, hash_length, expected_combination_name",
+    [
+        ("test-cluster", "test-pool", 7, 16, "test-cl-test-po-18c74b16dfbc78ac"),
+        ("abcdefghijk", "lmnopqrst", 8, 14, "abcdefgh-lmnopqrs-dd65eea0329dcb"),
+        ("a", "b", 7, 16, "a-b-fb8e20fc2e4c3f24"),
+    ],
+)
+def test_resource_combination_name(
+    resource_name_1, resource_name_2, partial_length, hash_length, expected_combination_name
+):
+    combination_name = _get_resource_combination_name(
+        resource_name_1,
+        resource_name_2,
+        partial_length=partial_length,
+        hash_length=hash_length,
+    )
+    assert_that(combination_name).is_equal_to(expected_combination_name)
+
+
+def test_storage_security_group_deduplication(mocker, test_datadir):
+    """
+    Test that storage security group rules are deduplicated when head, compute, and login nodes share the same SG.
+
+    When head node, compute nodes, and login nodes all use the same security group (sg-12345678),
+    only one set of ingress/egress rules should be created for that security group, not three separate sets.
+    The deduplicated rule uses the first occurrence's settings (Head node), which uses all protocols (-1).
+    """
+    mock_aws_api(mocker)
+    mock_bucket(mocker)
+    mock_bucket_object_utils(mocker)
+
+    input_yaml = load_yaml_dict(test_datadir / "config-shared-sg.yaml")
+    cluster_config = ClusterSchema(cluster_name="clustername").load(input_yaml)
+
+    generated_template, _ = CDKTemplateBuilder().build_cluster_template(
+        cluster_config=cluster_config, bucket=dummy_cluster_bucket(), stack_name="clustername"
+    )
+
+    # Test both EFS and FSx storage types
+    for storage_type in ["EFS", "FSX"]:
+        storage_sg_ingress_rules = [
+            (name, resource)
+            for name, resource in generated_template["Resources"].items()
+            if resource["Type"] == "AWS::EC2::SecurityGroupIngress"
+            and name.startswith(storage_type)
+            and "SecurityGroup" in name
+        ]
+
+        # Verify deduplication: only 2 rules instead of 4 (Head, Compute, Login share same SG + Storage SG)
+        assert_that(len(storage_sg_ingress_rules)).is_equal_to(2)
+
+        # Verify each unique source security group has exactly one ingress rule
+        source_sgs = {
+            str(rule["Properties"].get("SourceSecurityGroupId"))
+            for _, rule in storage_sg_ingress_rules
+            if rule["Properties"].get("SourceSecurityGroupId")
+        }
+        assert_that(len(storage_sg_ingress_rules)).is_equal_to(len(source_sgs))

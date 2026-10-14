@@ -29,7 +29,7 @@ Scheduling:
       ComputeSettings:
         LocalStorage:
           RootVolume:
-            Size: 40
+            Size: {{ root_volume_size }}
       CustomActions:
         OnNodeStart:
           Script: s3://{{ resource_bucket }}/scripts/preinstall.sh
@@ -43,14 +43,16 @@ Scheduling:
       ComputeResources:
         - Name: queue1-i1
           Instances:
-            - InstanceType: c5.xlarge
-            - InstanceType: c5n.xlarge
-            - InstanceType: c5d.xlarge
+            - InstanceType: c5.large
+            - InstanceType: c5n.large
+            - InstanceType: c5d.large
           MinCount: 1
           MaxCount: 2
         - Name: queue1-i2
           Instances:
-            - InstanceType: t2.micro
+          {% for instance_type in spot_instance_types %}
+            - InstanceType: {{ instance_type }}
+          {% endfor %}
           MinCount: 1
       Networking:
         SubnetIds:
@@ -63,7 +65,7 @@ Scheduling:
       ComputeSettings:
         LocalStorage:
           RootVolume:
-            Size: 40
+            Size: {{ root_volume_size }}
       ComputeResources:
         - Name: queue2-i1
           Efa:
@@ -84,7 +86,7 @@ SharedStorage:
     Name: ebs
     StorageType: Ebs
     EbsSettings:
-      VolumeType: {% if "-iso" in region %}gp2{% else %}gp3{% endif %}
+      VolumeType: gp3
 #      Iops: 3200 #Initially not set
 #      Throughput: 130 #Initially not set
   - MountDir: efs
@@ -97,20 +99,18 @@ SharedStorage:
     StorageType: Ebs
     Name: raid
     EbsSettings:
-      VolumeType: {% if "-iso" in region %}gp2{% else %}gp3{% endif %}
+      VolumeType: gp3
 #      Iops: 3200 #Initially not set
 #     Throughput: 130 #Initially not set
       Raid:
         Type: 0
         NumberOfVolumes: 2
-{% if "-iso" not in region %}
   - MountDir: fsx
     Name: fsx
     StorageType: FsxLustre
     FsxLustreSettings:
       StorageCapacity: 2400
 #     WeeklyMaintenanceStartTime: "3:02:30" #Initially not set
-{% endif %}
 Monitoring:
   DetailedMonitoring: false
   Logs:

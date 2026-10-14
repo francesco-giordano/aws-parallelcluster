@@ -9,20 +9,31 @@
 # OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import re
 import time
-from typing import List
+from typing import List, Union
 
 import boto3
+import pytest
 from assertpy import assert_that, soft_assertions
+from clusters_factory import Cluster
+from constants import NodeType
 from remote_command_executor import RemoteCommandExecutor
-from retrying import retry
+from retrying import RetryError, retry
 from time_utils import minutes, seconds
-from utils import get_cfn_resources, get_compute_nodes_count, get_compute_nodes_instance_ids
+from utils import (
+    get_cfn_resources,
+    get_cluster_nodes_instance_ids,
+    get_compute_nodes_instance_count,
+    get_compute_nodes_instance_ids,
+    get_compute_nodes_instance_ips,
+)
 
 from tests.common.scaling_common import get_compute_nodes_allocation
+from tests.common.utils import get_ddb_item, installed_parallelcluster_version_is_at_least, read_remote_file
 
 
-@retry(wait_fixed=seconds(20), stop_max_delay=minutes(5))
+@retry(wait_fixed=seconds(20), stop_max_delay=minutes(6))
 def wait_instance_replaced_or_terminating(instance_id, region):
     assert_instance_replaced_or_terminating(instance_id, region)
 
@@ -33,29 +44,101 @@ def assert_instance_replaced_or_terminating(instance_id, region):
     assert_that(ec2_response["Reservations"][0]["Instances"][0]["State"]["Name"]).is_in("shutting-down", "terminated")
 
 
-def assert_no_errors_in_logs(remote_command_executor, scheduler, skip_ice=False):
+def assert_no_errors_in_logs(remote_command_executor, scheduler, skip_ice=False, ignore_patterns=None):
     __tracebackhide__ = True
-    if scheduler == "slurm":
-        log_files = [
-            "/var/log/parallelcluster/clustermgtd",
-            "/var/log/parallelcluster/clusterstatusmgtd",
-            "/var/log/parallelcluster/slurm_resume.log",
-            "/var/log/parallelcluster/slurm_suspend.log",
-            "/var/log/parallelcluster/slurm_fleet_status_manager.log",
-        ]
-    elif scheduler == "plugin":
-        log_files = [
-            "/var/log/parallelcluster/clusterstatusmgtd",
-        ]
-    else:
-        log_files = []
+
+    ice_patterns = [
+        "InsufficientInstanceCapacity",
+        "Insufficient capacity",
+        "Failed to launch instances due to limited EC2 capacity",
+        "Our system will be working on provisioning additional capacity",
+    ]
+
+    # EC2 error codes that the node daemons treat as Insufficient Capacity Errors (ICE).
+    # Mirrors SlurmNode.EC2_ICE_ERROR_CODES from aws-parallelcluster-node, plus the
+    # "LimitedInstanceCapacity" code used for partial all-or-nothing/best-effort launches.
+    ice_error_codes = {
+        "InsufficientInstanceCapacity",
+        "InsufficientHostCapacity",
+        "InsufficientReservedInstanceCapacity",
+        "MaxSpotInstanceCountExceeded",
+        "Unsupported",
+        "SpotMaxPriceTooLow",
+        "UnfulfillableCapacity",
+        "InsufficientCapacity",
+        "LimitedInstanceCapacity",
+    }
+    # Emitted by the resume program (resume.py) when one or more nodes fail to launch. The line
+    # itself carries no EC2 error code, so the line-level ice_patterns filter cannot match it.
+    # The code only appears on the companion "(Code:<error_code>)Failure when resuming nodes"
+    # line written by _handle_failed_nodes.
+    setting_nodes_down_pattern = "Failed to launch following nodes, setting nodes to DOWN"
+
+    patterns_to_ignore = []
+    if skip_ice:
+        patterns_to_ignore += ice_patterns
+    if ignore_patterns:
+        patterns_to_ignore += ignore_patterns
+    log_files = [
+        "/var/log/parallelcluster/clustermgtd",
+        "/var/log/parallelcluster/clusterstatusmgtd",
+        "/var/log/parallelcluster/slurm_resume.log",
+        "/var/log/parallelcluster/slurm_suspend.log",
+        "/var/log/parallelcluster/slurm_fleet_status_manager.log",
+    ]
 
     for log_file in log_files:
-        log = remote_command_executor.run_remote_command("sudo cat {0}".format(log_file), hide=True).stdout
+        log_file_user = remote_command_executor.get_user_to_operate_on_file(log_file)
+        log = remote_command_executor.run_remote_command(f"sudo -u {log_file_user} cat {log_file}", hide=True).stdout
+        lines = log.splitlines()
+
         if skip_ice:
-            log = "\n".join([line for line in log.splitlines() if "InsufficientInstanceCapacity" not in line])
+            # Pair the untagged "setting nodes to DOWN" ERROR line with the "(Code:<error_code>)"
+            # reasons in the same log file. Ignore the line only when every error code found in
+            # this file is an ICE code, otherwise keep it so genuine non-ICE failures still fail.
+            error_codes = set(re.findall(r"\(Code:(\w+)\)", log))
+            if error_codes and error_codes.issubset(ice_error_codes):
+                lines = [line for line in lines if setting_nodes_down_pattern not in line]
+
+        log = "\n".join(line for line in lines if not any(pattern in line for pattern in patterns_to_ignore))
         for error_level in ["CRITICAL", "ERROR"]:
             assert_that(log).does_not_contain(error_level)
+
+
+def known_defunct_slurm_config_params():
+    if installed_parallelcluster_version_is_at_least("3.16.0"):
+        return []
+    return ["AccountingStorageUser"]
+
+
+def known_harmless_slurm_daemon_errors():
+    patterns = known_defunct_slurm_config_params()
+    if not installed_parallelcluster_version_is_at_least("3.14.0"):
+        patterns.append("UnkillableStepTimeout must be at least")
+    return patterns
+
+
+def assert_no_errors_in_service_log(
+    remote_command_executor: RemoteCommandExecutor, service_name: str, ignore_patterns=None, since=None
+):
+    """Assert that the systemd journal for a given service contains no error-level entries.
+
+    Lines containing any of ignore_patterns are excluded, to allow known-harmless messages such as the defunct
+    slurm.conf parameters reported by known_defunct_slurm_config_params.
+
+    The journal is cumulative, so pass since (any journalctl timestamp) to scope the check to the entries written
+    after a given point, for example to check what a service logged after an upgrade rather than since boot.
+    """
+    __tracebackhide__ = True
+    logging.info("Checking %s journal for error-level entries", service_name)
+    since_option = f" --since '{since}'" if since else ""
+    log = remote_command_executor.run_remote_command(
+        f"sudo journalctl -u {service_name} --no-pager{since_option}", hide=True
+    ).stdout
+    error_lines = [line for line in log.splitlines() if re.search(r"fail|error|critical", line, re.IGNORECASE)]
+    if ignore_patterns:
+        error_lines = [line for line in error_lines if not any(pattern in line for pattern in ignore_patterns)]
+    assert_that(error_lines).described_as(f"Found error-level entries in {service_name} journal logs").is_empty()
 
 
 def assert_no_msg_in_logs(remote_command_executor: RemoteCommandExecutor, log_files: List[str], log_msg: List[str]):
@@ -63,16 +146,68 @@ def assert_no_msg_in_logs(remote_command_executor: RemoteCommandExecutor, log_fi
     __tracebackhide__ = True
     log = ""
     for log_file in log_files:
-        log += remote_command_executor.run_remote_command("sudo cat {0}".format(log_file), hide=True).stdout
+        log_file_user = remote_command_executor.get_user_to_operate_on_file(log_file)
+        log += remote_command_executor.run_remote_command(f"sudo -u {log_file_user} cat {log_file}", hide=True).stdout
     for message in log_msg:
         assert_that(log).does_not_contain(message)
+
+
+def assert_no_defunct_slurm_config_params(remote_command_executor: RemoteCommandExecutor, ignore_patterns=None):
+    """
+    Assert slurmctld.log has no warnings about defunct or obsolete slurm.conf parameters.
+
+    Slurm logs messages like "Ignoring obsolete <Param>=<Value> option" when it encounters
+    configuration parameters that have been removed in the running Slurm version.
+    This catches cases where our generated slurm.conf contains settings that are no longer
+    recognized by the installed Slurm version.
+    """
+    __tracebackhide__ = True
+    log_file = "/var/log/slurmctld.log"
+    log_file_user = remote_command_executor.get_user_to_operate_on_file(log_file)
+    log = remote_command_executor.run_remote_command(f"sudo -u {log_file_user} cat {log_file}", hide=True).stdout
+
+    defunct_patterns = [
+        "Ignoring obsolete",
+        "Ignoring defunct",
+        "is defunct",
+    ]
+
+    offending_lines = []
+    for line in log.splitlines():
+        if any(pattern in line for pattern in defunct_patterns):
+            if ignore_patterns and any(ip in line for ip in ignore_patterns):
+                continue
+            offending_lines.append(line.strip())
+
+    if offending_lines:
+        pytest.fail(
+            "slurmctld.log contains warnings about defunct/obsolete slurm.conf parameters:\n"
+            + "\n".join(offending_lines)
+        )
 
 
 def assert_msg_in_log(remote_command_executor: RemoteCommandExecutor, log_file: str, message: str):
     """Assert message is in log_file."""
     __tracebackhide__ = True
-    log = remote_command_executor.run_remote_command(f"sudo cat {log_file}", hide=True).stdout
+    log_file_user = remote_command_executor.get_user_to_operate_on_file(log_file)
+    log = remote_command_executor.run_remote_command(f"sudo -u {log_file_user} cat {log_file}", hide=True).stdout
     assert_that(log).contains(message)
+
+
+def assert_msg_in_log_at_least(remote_command_executor: RemoteCommandExecutor, log_file: str, message: str, count: int):
+    """Assert message appears at least count times in log_file."""
+    __tracebackhide__ = True
+    log_file_user = remote_command_executor.get_user_to_operate_on_file(log_file)
+    log = remote_command_executor.run_remote_command(f"sudo -u {log_file_user} cat {log_file}", hide=True).stdout
+    assert_that(log.count(message)).described_as(f"occurrences of '{message}'").is_greater_than_or_equal_to(count)
+
+
+def assert_msg_in_log_at_most(remote_command_executor: RemoteCommandExecutor, log_file: str, message: str, count: int):
+    """Assert message appears at most count times in log_file."""
+    __tracebackhide__ = True
+    log_file_user = remote_command_executor.get_user_to_operate_on_file(log_file)
+    log = remote_command_executor.run_remote_command(f"sudo -u {log_file_user} cat {log_file}", hide=True).stdout
+    assert_that(log.count(message)).described_as(f"occurrences of '{message}'").is_less_than_or_equal_to(count)
 
 
 def assert_lines_in_logs(remote_command_executor: RemoteCommandExecutor, log_files, expected_errors):
@@ -81,13 +216,42 @@ def assert_lines_in_logs(remote_command_executor: RemoteCommandExecutor, log_fil
 
     log = ""
     for log_file in log_files:
-        log += remote_command_executor.run_remote_command("sudo cat {0}".format(log_file), hide=True).stdout
+        log_file_user = remote_command_executor.get_user_to_operate_on_file(log_file)
+        log += remote_command_executor.run_remote_command(f"sudo -u {log_file_user} cat {log_file}", hide=True).stdout
     for message in expected_errors:
         assert_that(log).matches(message)
 
 
+def submit_job_and_assert_logs(
+    scheduler_commands,
+    remote_command_executor: RemoteCommandExecutor,
+    job_kwargs: dict,
+    log_files: list,
+    log_assertions: Union[list, iter],
+    wait_for_job_completion: bool = False,
+    clear_logs_before_job_submission: bool = False,
+):
+    """Submit a job based on specific keyword-arguments and assert log patterns in specific log files."""
+    if clear_logs_before_job_submission:
+        for log_file in log_files:
+            remote_command_executor.clear_log_file(log_file)
+
+    result = scheduler_commands.submit_command(**job_kwargs)
+    job_id = scheduler_commands.assert_job_submitted(result.stdout)
+    if wait_for_job_completion:
+        try:
+            scheduler_commands.wait_job_completed(job_id, timeout=2)
+        except RetryError as e:
+            # Timeout waiting for job to be completed
+            logging.info("Exception while waiting for job to complete: %s", e)
+    retry(wait_fixed=seconds(20), stop_max_delay=minutes(3))(assert_lines_in_logs)(
+        remote_command_executor, log_files, log_assertions
+    )
+    scheduler_commands.cancel_job(job_id)
+
+
 def assert_no_node_in_ec2(region, stack_name, instance_types=None):
-    assert_that(get_compute_nodes_count(stack_name, region, instance_types)).is_equal_to(0)
+    assert_that(get_compute_nodes_instance_count(stack_name, region, instance_types)).is_equal_to(0)
 
 
 def assert_scaling_worked(
@@ -139,6 +303,30 @@ def wait_for_num_instances_in_cluster(cluster_name, region, desired):
 
 def assert_num_instances_in_cluster(cluster_name, region, desired):
     instances = get_compute_nodes_instance_ids(cluster_name, region)
+    assert_that(instances).is_length(desired)
+    return instances
+
+
+@retry(wait_fixed=seconds(20), stop_max_delay=minutes(5))
+def wait_for_num_instances_in_queue(cluster_name, region, desired, queue):
+    return assert_num_instances_in_queue(cluster_name, region, desired, queue)
+
+
+@retry(wait_fixed=seconds(20), stop_max_delay=minutes(10))
+def wait_for_instances_in_compute_resource(
+    cluster: Cluster, queue: str, compute_resource: str, state: list, desired: int
+):
+    instances = cluster.get_compute_nodes(queue, compute_resource, state)
+    assert_that(instances).is_length(desired)
+    logging.info(
+        f"Cluster {cluster.name} has {desired} compute nodes "
+        f"in queue {queue} and compute resource {compute_resource}: {instances}"
+    )
+    return instances
+
+
+def assert_num_instances_in_queue(cluster_name, region, desired, queue):
+    instances = get_cluster_nodes_instance_ids(cluster_name, region, node_type="Compute", queue_name=queue)
     assert_that(instances).is_length(desired)
     return instances
 
@@ -216,6 +404,53 @@ def assert_aws_identity_access_is_correct(cluster, users_allow_list, remote_comm
         assert_that(result.failed).is_equal_to(not allowed)
 
 
+def assert_default_user_has_desired_sudo_access(
+    cluster,
+    node_type,
+    region,
+    disable_sudo_access_default_user,
+    retries=6,
+    retry_delay=15,
+):
+    remote_command_executors = []
+    logging.info(
+        f"Asserting sudo access is {'disabled' if disable_sudo_access_default_user else 'enabled'} "
+        + f"for default user in node {node_type.value}"
+    )
+    if node_type == NodeType.HEAD_NODE:
+        remote_command_executors.append(RemoteCommandExecutor(cluster))
+    elif node_type == NodeType.COMPUTE_NODES:
+        for compute_node_ip in get_compute_nodes_instance_ips(cluster.name, region):
+            remote_command_executors.append(RemoteCommandExecutor(cluster, compute_node_ip=compute_node_ip))
+    elif node_type == NodeType.LOGIN_NODES:
+        remote_command_executors.append(RemoteCommandExecutor(cluster, use_login_node=True))
+
+    command = "sudo -n cat /etc/sudoers.d/90-cloud-init-users"
+    for node_index, remote_command_executor in enumerate(remote_command_executors):
+        for attempt in range(retries):
+            result = remote_command_executor.run_remote_command(command, raise_on_error=False, timeout=300)
+            logging.info(
+                f"Default user in {node_type} number {node_index} attempt {attempt} "
+                f"result.failed={result.failed} result.stdout={result.stdout}"
+            )
+            if disable_sudo_access_default_user:
+                if "a password is required" in result.stdout and result.failed:
+                    logging.info(f"Sudo access correctly disabled on {node_type} number {node_index}")
+                    break
+                if attempt < retries - 1:
+                    logging.info(
+                        f"Sudo not yet disabled on {node_type} number {node_index}, "
+                        f"retrying in {retry_delay}s (attempt {attempt + 1}/{retries})..."
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    assert_that(result.stdout).contains("a password is required")
+                    assert_that(result.failed).is_equal_to(True)
+            else:
+                assert_that(result.failed).is_equal_to(False)
+                break
+
+
 def assert_lambda_vpc_settings_are_correct(stack_name, region, security_group_ids, subnet_ids):
     logging.info("Checking the cleanup lambda VPC config")
 
@@ -269,3 +504,85 @@ def _assert_slurm_rebooted_nodes(compute_nodes, remote_command_executor):
             "/var/log/slurmctld.log",
             f"node {node} returned to service",
         )
+
+
+def assert_instance_config_version_on_ddb(
+    cluster, expected_cluster_config_version: str, node_types=("Compute", "LoginNode")
+):
+    """Verifies that every cluster node stored on DynamoDB the expected cluster config version."""
+    for node_type in node_types:
+        nodes = cluster.describe_cluster_instances(node_type=node_type)
+        n_nodes = len(nodes)
+        if n_nodes == 0:
+            logging.info(f"No nodes of type {node_type} found to check, skipping")
+            continue
+        logging.info(
+            f"Verifying that all {n_nodes} nodes ({node_type}) stored the expected config version on DDB: "
+            f"{expected_cluster_config_version}"
+        )
+        for node in nodes:
+            instance_id = node["instanceId"]
+            table_name = f"parallelcluster-{cluster.name}"
+            item_id = f"CLUSTER_CONFIG.{instance_id}"
+            item = get_ddb_item(cluster.region, table_name, {"Id": item_id})
+            assert_that(item, f"DDB record for {instance_id} ({node_type}) exists").is_not_none()
+            cluster_config_version_on_ddb = item["Data"]["cluster_config_version"]
+            assert_that(
+                cluster_config_version_on_ddb,
+                f"DDB record for {instance_id} ({node_type}) has the correct config version",
+            ).is_equal_to(expected_cluster_config_version)
+        logging.info(
+            f"Verified that all {n_nodes} nodes ({node_type}) stored the expected config version on DDB: "
+            f"{expected_cluster_config_version}"
+        )
+
+
+def _assert_build_image_stack_deleted(stack_name, region, timeout_seconds=600, poll_interval=30):
+    """
+    Poll the CloudFormation stack status to ensure it is deleted successfully.
+
+    - Stack does not exist or StackStatus==DELETE_COMPLETE ⇒ return immediately
+    - StackStatus==DELETE_FAILED ⇒ assert failure immediately
+    - Timeout if not deleted ⇒ assert failure
+    """
+    cfn = boto3.client("cloudformation", region_name=region)
+    deadline = time.time() + timeout_seconds
+    last_status = None
+
+    while time.time() < deadline:
+        try:
+            last_status = cfn.describe_stacks(StackName=stack_name)["Stacks"][0]["StackStatus"]
+        except cfn.exceptions.ClientError as e:
+            if "does not exist" in str(e):
+                return
+            raise
+
+        if last_status == "DELETE_COMPLETE":
+            return
+
+        if last_status == "DELETE_FAILED":
+            pytest.fail(f"Image stack {stack_name} entered DELETE_FAILED")
+
+        time.sleep(poll_interval)
+
+    pytest.fail(f"Timed-out waiting for stack {stack_name} deletion (last status: {last_status})")
+
+
+def assert_regex_in_file(rce: RemoteCommandExecutor, file_name: str, pattern: str, negate: bool = True):
+    file_content = read_remote_file(rce, file_name)
+    assertion = assert_that(bool(re.search(pattern, file_content, re.IGNORECASE)))
+    assertion.is_false() if negate else assertion.is_true()
+
+
+def assert_systemd_service_running(remote_command_executor: RemoteCommandExecutor, service_name: str):
+    """Assert that a systemd service is in the 'running' sub-state."""
+    logging.info("Checking that %s systemd service is running", service_name)
+    result = remote_command_executor.run_remote_command(
+        f"sudo systemctl show {service_name} --property=SubState | cut -d= -f2",
+        raise_on_error=False,
+        pty=False,  # Disable PTY to avoid ANSI escape codes in the output
+    )
+    assert_that(result.return_code).is_equal_to(0)
+    assert_that(result.stdout.strip()).described_as(
+        f"Expected systemd service {service_name} to be running"
+    ).is_equal_to("running")

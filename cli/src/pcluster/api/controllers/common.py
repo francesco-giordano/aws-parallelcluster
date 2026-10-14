@@ -17,7 +17,8 @@ import os
 from typing import List, Optional, Set, Union
 
 import boto3
-from pkg_resources import packaging
+from botocore.exceptions import ProfileNotFound
+from packaging import version as packaging_version
 
 from pcluster.api.errors import (
     BadRequestException,
@@ -29,10 +30,10 @@ from pcluster.api.errors import (
 )
 from pcluster.aws.common import BadRequestError, LimitExceededError, StackNotFoundError, get_region
 from pcluster.config.common import AllValidatorsSuppressor, TypeMatchValidatorsSuppressor, ValidatorSuppressor
-from pcluster.constants import SUPPORTED_REGIONS, UNSUPPORTED_OPERATIONS_MAP, Operation
+from pcluster.constants import UNSUPPORTED_OPERATIONS_MAP, Operation
 from pcluster.models.cluster import Cluster
 from pcluster.models.common import BadRequest, Conflict, LimitExceeded, NotFound, parse_config
-from pcluster.utils import get_installed_version, to_utc_datetime
+from pcluster.utils import get_installed_version, retrieve_supported_regions, to_utc_datetime
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,11 +41,24 @@ LOGGER = logging.getLogger(__name__)
 def _set_region(region):
     if not region:
         raise BadRequestException("region needs to be set")
-    if region not in SUPPORTED_REGIONS:
-        raise BadRequestException(f"invalid or unsupported region '{region}'")
-
+    region_backup = os.environ.get("AWS_DEFAULT_REGION")
     LOGGER.info("Setting AWS Region to %s", region)
     os.environ["AWS_DEFAULT_REGION"] = region
+    try:
+        supported_regions = retrieve_supported_regions()
+    except ProfileNotFound as e:
+        _restore_region(region_backup)
+        raise BadRequestException(str(e))
+    if region not in supported_regions:
+        _restore_region(region_backup)
+        raise BadRequestException(f"invalid or unsupported region '{region}'")
+
+
+def _restore_region(region_backup):
+    if region_backup:
+        os.environ["AWS_DEFAULT_REGION"] = region_backup
+    else:
+        del os.environ["AWS_DEFAULT_REGION"]
 
 
 def configure_aws_region_from_config(region: Union[None, str], config_str: str):
@@ -58,7 +72,10 @@ def configure_aws_region_from_config(region: Union[None, str], config_str: str):
     if region and config_region and region != config_region:
         raise BadRequestException("region is set in both parameter and configuration and conflicts.")
 
-    _set_region(region or config_region or boto3.Session().region_name)
+    try:
+        _set_region(region or config_region or boto3.Session().region_name)
+    except ProfileNotFound as e:
+        raise BadRequestException(str(e))
 
 
 def configure_aws_region():
@@ -73,7 +90,10 @@ def configure_aws_region():
     def _decorator_validate_region(func):
         @functools.wraps(func)
         def _wrapper_validate_region(*args, **kwargs):
-            _set_region(kwargs.get("region") or boto3.Session().region_name)
+            try:
+                _set_region(kwargs.get("region") or boto3.Session().region_name)
+            except ProfileNotFound as e:
+                raise BadRequestException(str(e))
             return func(*args, **kwargs)
 
         return _wrapper_validate_region
@@ -106,12 +126,12 @@ def check_cluster_version(cluster: Cluster, exact_match: bool = False) -> bool:
         return False
 
     if exact_match:
-        return packaging.version.parse(cluster.stack.version) == packaging.version.parse(get_installed_version())
+        return packaging_version.parse(cluster.stack.version) == packaging_version.parse(get_installed_version())
     else:
         return (
-            packaging.version.parse(packaging.version.parse(get_installed_version()).base_version)
-            >= packaging.version.parse(cluster.stack.version)
-            >= packaging.version.parse("3.0.0a0")
+            packaging_version.parse(packaging_version.parse(get_installed_version()).base_version)
+            >= packaging_version.parse(cluster.stack.version)
+            >= packaging_version.parse("3.0.0a0")
         )
 
 

@@ -1,5 +1,3 @@
-Imds:
-  ImdsSupport: {{ imds_support }}
 Image:
   Os: {{ os }}
 HeadNode:
@@ -12,7 +10,7 @@ HeadNode:
     Secured: {{ imds_secured }}
 Scheduling:
   Scheduler: {{ scheduler }}
-  {% if scheduler == "awsbatch" %}AwsBatchQueues:{% else %}SlurmQueues:{% endif %}
+  SlurmQueues:
     - Name: compute
       ComputeResources:
         - Name: compute-i1

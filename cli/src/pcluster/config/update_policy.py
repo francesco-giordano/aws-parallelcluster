@@ -11,8 +11,15 @@
 import re
 from enum import Enum
 
+from pcluster.aws.common import get_region
 from pcluster.config.cluster_config import QueueUpdateStrategy
-from pcluster.constants import AWSBATCH, DEFAULT_MAX_COUNT, SLURM
+from pcluster.config.update_policy_utils import SharedStorageChangeInfo
+from pcluster.constants import (
+    DEFAULT_MAX_COUNT,
+    DEFAULT_MIN_COUNT,
+    STORAGE_TYPES_SUPPORTING_LIVE_UPDATES,
+)
+from pcluster.utils import get_dictionary_diff, parse_json_string
 
 
 class UpdatePolicy:
@@ -113,6 +120,13 @@ def actions_needed_queue_update_strategy(change, _):
     return actions
 
 
+def actions_needed_resize_update_strategy_on_remove(*_):
+    return (
+        "Stop the compute fleet or set QueueUpdateStrategy:TERMINATE in config "
+        "to remove nodes from the scheduler, terminate the associated instances & any running jobs"
+    )
+
+
 def actions_needed_managed_placement_group(change, patch):
     if is_managed_placement_group_deletion(change, patch):
         actions = "Stop the compute fleet with the pcluster update-compute-fleet command."
@@ -132,6 +146,12 @@ def condition_checker_compute_fleet_stop_on_remove(change, patch):
 
 def is_slurm_queues_change(change):
     return any(path.startswith("SlurmQueues[") for path in change.path)
+
+
+def _is_adc_region():
+    """Return True if the currently configured AWS region belongs to an ADC partition."""
+    region = get_region() or ""
+    return region.startswith("us-iso")
 
 
 def extract_type_and_name_from_path(path):
@@ -205,37 +225,66 @@ def unchanged_managed_fsx_lustre_names(_, patch):
     return managed_fsx_names_before_update.intersection(managed_fsx_names_after_update)
 
 
-def is_slurm_scheduler(patch):
-    return patch.cluster.stack.scheduler == SLURM
+def is_compute_fleet_stop_required_for_shared_storage_change(change, patch):
+    return (
+        patch.cluster.has_running_capacity()
+        and not is_compute_fleet_update_supported_for_shared_storage(change)
+        and not is_queue_update_strategy_set(patch)
+    )
 
 
-def is_awsbatch_scheduler(_, patch):
-    return patch.cluster.stack.scheduler == AWSBATCH
+def is_login_fleet_stop_required_for_shared_storage_change(change, patch):
+    return patch.cluster.has_running_login_nodes() and not is_login_fleet_update_supported_for_shared_storage(change)
 
 
-def is_stop_required_for_shared_storage(change):
+def is_login_fleet_update_supported_for_shared_storage(change):
     """
-    Cluster stop is required for unmount operation.
+    Check if the live update of the running login fleet is supported for the given change to SharedStorage.
 
-    1. Remove managed/external EBS EFS and FSx sections, which indicates unmount operation.
-    2. Change MountDir, which indicates unmount operation.
+    We are referring here to a live update, that does not require the replacement of login nodes.
+    In particular, the live update is supported only in the following cases:
+      1. mount/unmount of external EFS
+      1. mount/unmount of external FSx
     """
-    if change.is_list and change.key == "SharedStorage" and change.old_value is not None and change.new_value is None:
-        return True
-    elif not change.is_list and change.key == "MountDir":
-        return True
+    change_info = SharedStorageChangeInfo(change)
+
+    return change_info.is_external and (change_info.storage_type in STORAGE_TYPES_SUPPORTING_LIVE_UPDATES)
+
+
+def is_compute_fleet_update_supported_for_shared_storage(change):
+    """
+    Check if the live update of the running compute fleet is supported for the given change to SharedStorage.
+
+    We are referring here to a live update, that does not require the replacement of compute nodes.
+    In particular, the live update is supported only in the following cases:
+      1. mount/unmount of external EFS
+      1. mount/unmount of external FSx
+    """
+    change_info = SharedStorageChangeInfo(change)
+
+    return change_info.is_external and (change_info.storage_type in STORAGE_TYPES_SUPPORTING_LIVE_UPDATES)
+
+
+def is_home_change(change):
+    if change.key == "SharedStorage":
+        if (change.old_value and change.old_value.get("MountDir") in ["home", "/home"]) or (
+            change.new_value and change.new_value.get("MountDir") in ["home", "/home"]
+        ):
+            return True
     return False
 
 
 def fail_reason_shared_storage_update_policy(change, patch):
-    if is_awsbatch_scheduler(change, patch):
-        return f"Update actions are not currently supported for the '{change.key}' parameter"
-    reason = "All compute nodes must be stopped"
-    # QueueUpdateStrategy can override UpdatePolicy of parameters under SlurmQueues
-    if not is_stop_required_for_shared_storage(change) and is_slurm_scheduler(patch):
-        reason += " or QueueUpdateStrategy must be set"
+    if is_home_change(change):
+        return "The /home directory cannot be changed during an update"
 
-    return reason
+    reasons = []
+    if is_compute_fleet_stop_required_for_shared_storage_change(change, patch):
+        reasons.append("All compute nodes must be stopped or QueueUpdateStrategy must be set.")
+    if is_login_fleet_stop_required_for_shared_storage_change(change, patch):
+        reasons.append("All login nodes must be stopped")
+
+    return " ".join(reasons)
 
 
 def fail_reason_queue_update_strategy(change, _):
@@ -245,6 +294,10 @@ def fail_reason_queue_update_strategy(change, _):
         reason += " or QueueUpdateStrategy must be set"
 
     return reason
+
+
+def fail_reason_resize_update_strategy_on_remove(*_):
+    return "All compute nodes must be stopped or QueueUpdateStrategy must be set to TERMINATE"
 
 
 def fail_reason_managed_placement_group(change, patch):
@@ -276,6 +329,16 @@ def is_queue_update_strategy_set(patch):
     )
 
 
+def is_resize_update_strategy_terminate(patch):
+    # Return true if the update strategy is set to TERMINATE
+    update_strategy = (
+        patch.target_config.get("Scheduling")
+        .get("SlurmSettings", {})
+        .get("QueueUpdateStrategy", QueueUpdateStrategy.COMPUTE_FLEET_STOP.value)
+    )
+    return update_strategy == QueueUpdateStrategy.TERMINATE.value
+
+
 def condition_checker_queue_update_strategy(change, patch):
     result = not patch.cluster.has_running_capacity()
     # QueueUpdateStrategy can override UpdatePolicy of parameters under SlurmQueues
@@ -283,6 +346,46 @@ def condition_checker_queue_update_strategy(change, patch):
         result = result or is_queue_update_strategy_set(patch)
 
     return result
+
+
+def condition_checker_resize_update_strategy_on_remove(change, patch):
+    # Check if fleet is stopped
+    result = not patch.cluster.has_running_capacity()
+
+    # Check if the change is inside a Queue section
+    if not result and (is_slurm_queues_change(change) or change.key == "SlurmQueues"):
+        # Check if QueueUpdateStrategy is TERMINATE
+        result = is_resize_update_strategy_terminate(patch)
+
+        # Queue or ComputeResource can be added
+        if not result and change.is_list:
+            result = change.old_value is None and change.new_value is not None
+
+    # Check if MaxCount is increased
+    if not result and change.key == "MaxCount":
+        result = convert_value_to_int(change.new_value, DEFAULT_MAX_COUNT) >= convert_value_to_int(
+            change.old_value, DEFAULT_MAX_COUNT
+        )
+
+    # Check if MinCount is increased and MaxCount is increased of at least the same amount
+    if not result and change.key == "MinCount":
+        path = change.path
+        for other_change in patch.changes:
+            # Check the value of MaxCount next to MinCount.
+            # MinCount and MaxCount next to each other have the same path
+            if path == other_change.path and other_change.key == "MaxCount":
+                other_change_new_value = convert_value_to_int(other_change.new_value, DEFAULT_MAX_COUNT)
+                other_change_old_value = convert_value_to_int(other_change.old_value, DEFAULT_MAX_COUNT)
+                change_new_value = convert_value_to_int(change.new_value, DEFAULT_MIN_COUNT)
+                change_old_value = convert_value_to_int(change.old_value, DEFAULT_MIN_COUNT)
+                result = (other_change_new_value - other_change_old_value) >= (change_new_value - change_old_value)
+                break
+
+    return result
+
+
+def convert_value_to_int(value, default):
+    return int(value) if value is not None else default
 
 
 def condition_checker_queue_update_strategy_on_remove(change, patch):
@@ -318,18 +421,15 @@ def condition_checker_managed_fsx(change, patch):
 
 
 def actions_needed_shared_storage_update(change, patch):
-    if is_awsbatch_scheduler(change, patch):
-        return (
-            f"Restore '{change.key}' value to '{change.old_value}'"
-            if change.old_value is not None
-            else "{0} the parameter '{1}'".format("Restore" if change.is_list else "Remove", change.key)
-            + ". If you need this change, please consider creating a new cluster instead of updating the existing one."
-        )
-    actions = "Stop the compute fleet with the pcluster update-compute-fleet command"
-    if not is_stop_required_for_shared_storage(change) and is_slurm_scheduler(patch):
-        actions += ", or set QueueUpdateStrategy in the configuration used for the 'update-cluster' operation"
+    if is_home_change(change):
+        return "Please revert any changes to the /home mount"
+    actions = []
+    if is_compute_fleet_stop_required_for_shared_storage_change(change, patch):
+        actions.append(f"{UpdatePolicy.ACTIONS_NEEDED['compute_nodes_stop'](change, patch)}")
+    if is_login_fleet_stop_required_for_shared_storage_change(change, patch):
+        actions.append(f"{UpdatePolicy.ACTIONS_NEEDED['login_nodes_stop'](change, patch)}")
 
-    return actions
+    return " ".join(actions)
 
 
 def actions_needed_managed_fsx(change, patch):
@@ -347,17 +447,87 @@ def condition_checker_shared_storage_update_policy(change, patch):
     """
     Check different requirements for different schedulers.
 
-    Compute fleet stop is required for plugin scheduler.
-    Update for awsbatch scheduler is not supported.
+    Compute and login fleet stop is required for plugin scheduler.
     QueueUpdateStrategy can override UpdatePolicy of parameters under SlurmQueues for slurm scheduler.
     """
-    if is_awsbatch_scheduler(change, patch):
+    if is_home_change(change):
         return False
-    result = not patch.cluster.has_running_capacity()
-    if is_slurm_scheduler(patch) and not is_stop_required_for_shared_storage(change):
-        result = result or is_queue_update_strategy_set(patch)
+    if patch.cluster.has_running_login_nodes() and not is_login_fleet_update_supported_for_shared_storage(change):
+        return False
+    if (
+        patch.cluster.has_running_capacity()
+        and not is_compute_fleet_update_supported_for_shared_storage(change)
+        and not is_queue_update_strategy_set(patch)
+    ):
+        return False
+
+    return True
+
+
+def condition_checker_login_nodes_pools_policy(change, patch):
+    """Login pools can be added but removal require LoginNodes stop."""
+    result = not patch.cluster.has_running_login_nodes()
+    if change.is_list and change.key == "Pools":
+        result = result or (change.old_value is None and change.new_value is not None)
 
     return result
+
+
+def condition_checker_login_nodes_stop_policy(_, patch):
+    return not patch.cluster.has_running_login_nodes()
+
+
+def condition_checker_login_nodes_pool_stop_policy(change, patch):
+    """Check if login nodes are running in the pool in which update was requested."""
+    pool_name = get_pool_name_from_change_paths(change)
+    return not patch.cluster.has_running_login_nodes(pool_name=pool_name)
+
+
+def get_pool_name_from_change_paths(change):
+    """
+    Return the name of the pool in which update was requested.
+
+    Example path=['LoginNodes', 'Pools[pool2]', 'Ssh'].
+    """
+    for path in change.path:
+        if re.search("Pools\\[", path):
+            _, pool_name = extract_type_and_name_from_path(path)
+            return pool_name
+    return ""
+
+
+# ExtraChefAttributes update policy helpers
+# Define which paths within ExtraChefAttributes JSON are updatable (dot-notation)
+# IMPORTANT: We assume this set to contain the path to leaf fields.
+EXTRA_CHEF_ATTRIBUTES_UPDATABLE_PATHS: set[str] = {
+    "cluster.slurm.reconfigure_timeout",
+    "cluster.cluster_readiness_check_enabled",
+    "cluster.cluster_readiness_check_ignore_failure",
+}
+
+
+def _get_non_updatable_changes(old_value: str, new_value: str) -> list[str]:
+    """Parse and compare two ExtraChefAttributes JSON strings, returning paths that are not updatable."""
+    old_attrs = parse_json_string(old_value, raise_on_error=False, default={}) if old_value else {}
+    new_attrs = parse_json_string(new_value, raise_on_error=False, default={}) if new_value else {}
+
+    return [p for p in get_dictionary_diff(old_attrs, new_attrs) if p not in EXTRA_CHEF_ATTRIBUTES_UPDATABLE_PATHS]
+
+
+def condition_checker_extra_chef_attributes(change, _) -> bool:
+    """
+    Check if ExtraChefAttributes changes are allowed.
+
+    Only changes to paths defined in EXTRA_CHEF_ATTRIBUTES_UPDATABLE_PATHS are allowed.
+    """
+    return len(_get_non_updatable_changes(change.old_value, change.new_value)) == 0
+
+
+def fail_reason_extra_chef_attributes(change, _) -> str:
+    """Generate fail reason for ExtraChefAttributes update."""
+    non_updatable_changes = _get_non_updatable_changes(change.old_value, change.new_value)
+    paths_str = ", ".join(sorted(non_updatable_changes))
+    return f"The following ExtraChefAttributes fields cannot be updated: {paths_str}"
 
 
 # Common fail_reason messages
@@ -369,6 +539,14 @@ UpdatePolicy.FAIL_REASONS = {
         "applies updates to compute nodes. If you still want to proceed, first stop the compute fleet with the "
         "pcluster update-compute-fleet command and then run an update with the --force-update flag"
     ),
+    "login_nodes_running": lambda change, patch: "The update is not supported when login nodes are running",
+    "login_nodes_pool_running": lambda change, patch: (
+        f"The update is not supported when login nodes in {get_pool_name_from_change_paths(change)} are running"
+    ),
+    "compute_or_login_nodes_running": lambda change, patch: (
+        "The update is not supported when compute or login nodes are running"
+    ),
+    "extra_chef_attributes_update": fail_reason_extra_chef_attributes,
 }
 
 # Common action_needed messages
@@ -379,9 +557,21 @@ UpdatePolicy.ACTIONS_NEEDED = {
     ),
     "pcluster_stop": lambda change, patch: "Stop the compute fleet with the pcluster update-compute-fleet command",
     "pcluster_stop_conditional": actions_needed_queue_update_strategy,
+    "pcluster_resize_conditional": actions_needed_resize_update_strategy_on_remove,
     "managed_placement_group": actions_needed_managed_placement_group,
     "shared_storage_update_conditional": actions_needed_shared_storage_update,
     "managed_fsx": actions_needed_managed_fsx,
+    "compute_nodes_stop": lambda change, patch: (
+        "Stop the compute fleet with the pcluster update-compute-fleet command"
+        ", or set QueueUpdateStrategy in the configuration used for the 'update-cluster' operation."
+    ),
+    "login_nodes_stop": lambda change, patch: (
+        "Stop the login nodes by setting Count parameter to 0 "
+        "and update the cluster with the pcluster update-cluster command"
+    ),
+    "extra_chef_attributes_update": lambda change, patch: (
+        "Revert the non-updatable ExtraChefAttributes fields to their original values."
+    ),
 }
 
 # Base policies
@@ -401,27 +591,13 @@ UpdatePolicy.SUPPORTED = UpdatePolicy(
     name="SUPPORTED", level=0, fail_reason="-", condition_checker=(lambda change, patch: True)
 )
 
-# Checks resize of max_vcpus in Batch Compute Environment
-UpdatePolicy.AWSBATCH_CE_MAX_RESIZE = UpdatePolicy(
-    name="AWSBATCH_CE_MAX_RESIZE",
-    level=1,
-    fail_reason=lambda change, patch: "Max vCPUs can not be lower than the current Desired vCPUs ({0})".format(
-        patch.cluster.get_running_capacity()
-    ),
-    action_needed=UpdatePolicy.ACTIONS_NEEDED["pcluster_stop"],
-    condition_checker=lambda change, patch: patch.cluster.get_running_capacity()
-    <= patch.target_config["Scheduling"]["AwsBatchQueues"][0]["ComputeResources"][0]["MaxvCpus"],
-)
-
-# Checks resize of max_count
-UpdatePolicy.MAX_COUNT = UpdatePolicy(
-    name="MAX_COUNT",
-    level=1,
-    fail_reason=lambda change, patch: "Shrinking a queue requires the compute fleet to be stopped first",
-    action_needed=UpdatePolicy.ACTIONS_NEEDED["pcluster_stop"],
-    condition_checker=lambda change, patch: not patch.cluster.has_running_capacity()
-    or (int(change.new_value) if change.new_value is not None else DEFAULT_MAX_COUNT)
-    >= (int(change.old_value) if change.old_value is not None else DEFAULT_MAX_COUNT),
+# Update policy for ExtraChefAttributes - allows updates to specific fields only
+UpdatePolicy.EXTRA_CHEF_ATTRIBUTES = UpdatePolicy(
+    name="EXTRA_CHEF_ATTRIBUTES",
+    level=5,
+    fail_reason=UpdatePolicy.FAIL_REASONS["extra_chef_attributes_update"],
+    action_needed=UpdatePolicy.ACTIONS_NEEDED["extra_chef_attributes_update"],
+    condition_checker=condition_checker_extra_chef_attributes,
 )
 
 # Update supported only with all compute nodes down or with replacement policy set different from COMPUTE_FLEET_STOP
@@ -431,6 +607,15 @@ UpdatePolicy.QUEUE_UPDATE_STRATEGY = UpdatePolicy(
     fail_reason=fail_reason_queue_update_strategy,
     action_needed=UpdatePolicy.ACTIONS_NEEDED["pcluster_stop_conditional"],
     condition_checker=condition_checker_queue_update_strategy,
+)
+
+# Update supported with fleet stopped or with replacement policy set to TERMINATE
+UpdatePolicy.RESIZE_UPDATE_STRATEGY_ON_REMOVE = UpdatePolicy(
+    name="RESIZE_UPDATE_STRATEGY_ON_REMOVE",
+    level=5,
+    fail_reason=fail_reason_resize_update_strategy_on_remove,
+    action_needed=UpdatePolicy.ACTIONS_NEEDED["pcluster_resize_conditional"],
+    condition_checker=condition_checker_resize_update_strategy_on_remove,
 )
 
 # We must force COMPUTE_FLEET_STOP for the deletion of managed groups, otherwise fall back to QUEUE_UPDATE_STRATEGY
@@ -445,7 +630,7 @@ UpdatePolicy.MANAGED_PLACEMENT_GROUP = UpdatePolicy(
 # Update policy for updating SharedStorage
 UpdatePolicy.SHARED_STORAGE_UPDATE_POLICY = UpdatePolicy(
     name="SHARED_STORAGE_UPDATE_POLICY",
-    level=6 if not is_awsbatch_scheduler else 1000,
+    level=6,
     fail_reason=fail_reason_shared_storage_update_policy,
     action_needed=UpdatePolicy.ACTIONS_NEEDED["shared_storage_update_conditional"],
     condition_checker=condition_checker_shared_storage_update_policy,
@@ -518,6 +703,25 @@ UpdatePolicy.UNSUPPORTED = UpdatePolicy(
     + ". If you need this change, please consider creating a new cluster instead of updating the existing one.",
 )
 
+# Update supported everywhere except ADC regions (us-iso*, us-isob*).
+#
+# In ADC regions there is a CloudFormation behavior where an UpdateStack call that includes
+# both a Tags change and a resource whose change is only in Metadata does not update that
+# resource. This breaks the head node update flow because cfn-hup on the head node polls
+# DescribeStackResource for Metadata changes on HeadNodeLaunchTemplate and never sees them,
+# leaving the HeadNodeWaitCondition to time out.
+#
+# Until the CloudFormation behavior is fixed in ADC, block tag updates in those regions.
+UpdatePolicy.SUPPORTED_UNLESS_ADC = UpdatePolicy(
+    name="SUPPORTED_UNLESS_ADC",
+    level=1000,
+    fail_reason=lambda change, patch: (
+        f"Updating '{change.key}' during a cluster update is not supported in ADC regions."
+    ),
+    action_needed=lambda change, patch: f"Restore '{change.key}' to its previous value.",
+    condition_checker=lambda change, patch: not _is_adc_region(),
+)
+
 # Block update if cluster has a managed Fsx for Lustre FileSystem, otherwise fallback to QueueUpdateStrategy
 UpdatePolicy.MANAGED_FSX = UpdatePolicy(
     name="MANAGED_FSX",
@@ -525,4 +729,46 @@ UpdatePolicy.MANAGED_FSX = UpdatePolicy(
     fail_reason=fail_reason_managed_fsx,
     action_needed=UpdatePolicy.ACTIONS_NEEDED["managed_fsx"],
     condition_checker=condition_checker_managed_fsx,
+)
+
+# Update policy for adding or removing a login node pool
+UpdatePolicy.LOGIN_NODES_POOLS = UpdatePolicy(
+    name="LOGIN_NODES_POOLS_UPDATE_POLICY",
+    level=6,
+    condition_checker=condition_checker_login_nodes_pools_policy,
+    fail_reason=UpdatePolicy.FAIL_REASONS["login_nodes_running"],
+    action_needed=UpdatePolicy.ACTIONS_NEEDED["login_nodes_stop"],
+)
+
+# Update supported only with all login nodes in the cluster down
+UpdatePolicy.LOGIN_NODES_STOP = UpdatePolicy(
+    name="LOGIN_NODES_STOP",
+    level=10,
+    condition_checker=condition_checker_login_nodes_stop_policy,
+    fail_reason=UpdatePolicy.FAIL_REASONS["login_nodes_running"],
+    action_needed=UpdatePolicy.ACTIONS_NEEDED["login_nodes_stop"],
+)
+
+# Update supported only with all login nodes in the pool down
+UpdatePolicy.LOGIN_NODES_POOL_STOP = UpdatePolicy(
+    name="LOGIN_NODES_POOL_STOP",
+    level=10,
+    condition_checker=condition_checker_login_nodes_pool_stop_policy,
+    fail_reason=UpdatePolicy.FAIL_REASONS["login_nodes_pool_running"],
+    action_needed=UpdatePolicy.ACTIONS_NEEDED["login_nodes_stop"],
+)
+
+# Update supported only with all computre and login nodes down
+UpdatePolicy.COMPUTE_AND_LOGIN_NODES_STOP = UpdatePolicy(
+    name="COMPUTE_AND_LOGIN_NODES_STOP",
+    level=10,
+    condition_checker=lambda change, patch: (
+        UpdatePolicy.COMPUTE_FLEET_STOP.condition_checker(change, patch)
+        and UpdatePolicy.LOGIN_NODES_STOP.condition_checker(change, patch)
+    ),
+    fail_reason=UpdatePolicy.FAIL_REASONS["compute_or_login_nodes_running"],
+    action_needed=lambda change, patch: "{}. {}".format(
+        UpdatePolicy.COMPUTE_FLEET_STOP.action_needed(change, patch),
+        UpdatePolicy.LOGIN_NODES_STOP.action_needed(change, patch),
+    ),
 )

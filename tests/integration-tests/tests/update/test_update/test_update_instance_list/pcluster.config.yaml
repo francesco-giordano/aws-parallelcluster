@@ -2,6 +2,9 @@ Image:
   Os: {{ os }}
 HeadNode:
   InstanceType: {{ instance }}
+  Iam:
+    S3Access:
+      - BucketName: {{ bucket_name }}
   Networking:
     SubnetId: {{ public_subnet_id }}
   Ssh:
@@ -13,9 +16,13 @@ Scheduling:
       ComputeResources:
         - Name: queue1-i1
           Instances:
-            - InstanceType: c5d.xlarge
+            - InstanceType: c5d.large
           MinCount: 1
           MaxCount: 2
       Networking:
         SubnetIds:
           - {{ private_subnet_id }}
+      Iam:
+        S3Access:
+          - BucketName: {{ bucket_name }}
+

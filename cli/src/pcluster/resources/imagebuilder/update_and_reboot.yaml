@@ -10,13 +10,13 @@ constants:
 phases:
   - name: build
     steps:
-      # Check input base AMI OS and get OS information, the output should be like centos.7 | amzn.2 | ubuntu.18.04 | ubuntu.20.04 | rhel.8.7
+      # Check input base AMI OS and get OS information, the output should be like amzn.2 | ubuntu.20.04 | ubuntu.22.04 | rhel.8.7 | rocky.8.8
       - name: OperatingSystemRelease
         action: ExecuteBash
         inputs:
           commands:
             - |
-              set -v
+              set -x
               FILE=/etc/os-release
               if [ -e ${!FILE} ]; then
                 . ${!FILE}
@@ -32,19 +32,23 @@ phases:
         inputs:
           commands:
             - |
-              set -v
+              set -x
               RELEASE='{{ build.OperatingSystemRelease.outputs.stdout }}'
 
-              if [ `echo "${!RELEASE}" | grep -w '^amzn\.2'` ]; then
-                OS='alinux2'
-              elif [ `echo "${!RELEASE}" | grep '^centos\.7'` ]; then
-                OS='centos7'
-              elif [ `echo "${!RELEASE}" | grep '^ubuntu\.18'` ]; then
-                OS='ubuntu1804'
-              elif [ `echo "${!RELEASE}" | grep '^ubuntu\.20'` ]; then
-                OS='ubuntu2004'
+              if [ `echo "${!RELEASE}" | grep -w '^amzn\.2023'` ]; then
+                OS='alinux2023'
+              elif [ `echo "${!RELEASE}" | grep '^ubuntu\.22'` ]; then
+                OS='ubuntu2204'
+              elif [ `echo "${!RELEASE}" | grep '^ubuntu\.24'` ]; then
+                OS='ubuntu2404'
               elif [ `echo "${!RELEASE}" | grep '^rhel\.8'` ]; then
                 OS='rhel8'
+              elif [ `echo "${!RELEASE}" | grep '^rocky\.8'` ]; then
+                OS='rocky8'
+              elif [ `echo "${!RELEASE}" | grep '^rhel\.9'` ]; then
+                OS='rhel9'
+              elif [ `echo "${!RELEASE}" | grep '^rocky\.9'` ]; then
+                OS='rocky9'
               else
                 echo "Operating System '${!RELEASE}' is not supported. Failing build."
                 exit {{ FailExitCode }}
@@ -58,10 +62,10 @@ phases:
         inputs:
           commands:
             - |
-               set -v
+               set -x
                OS='{{ build.OperatingSystemName.outputs.stdout }}'
 
-               if [ `echo "${!OS}" | grep -E '^(alinux|centos|rhel)'` ]; then
+               if [ `echo "${!OS}" | grep -E '^(alinux|rhel|rocky)'` ]; then
                  PLATFORM='RHEL'
                elif [ `echo "${!OS}" | grep -E '^ubuntu'` ]; then
                  PLATFORM='DEBIAN'
@@ -75,47 +79,169 @@ phases:
         inputs:
           commands:
             - |
-              set -v
+              set -x
               RELEASE='{{ build.OperatingSystemRelease.outputs.stdout }}'
-              if [ `echo "${!RELEASE}" | grep -Ev '^(amzn|centos|ubuntu|rhel)'` ]; then
+              if [ `echo "${!RELEASE}" | grep -Ev '^(amzn|ubuntu|rhel|rocky)'` ]; then
                 echo "This component does not support '${!RELEASE}'. Failing build."
                 exit {{ FailExitCode }}
               fi
 
-              # This component only supports aarch64 CPUs on Amazon Linux 2, Ubuntu1804, Ubuntu2004, Centos7 and RHEL 8
+              # This component only supports aarch64 CPUs on Amazon Linux 2, Ubuntu2204, RHEL8, Rocky8, RHEL9 and Rocky9
               ARCH=$(uname -m)
               if [[ `echo ${!ARCH}` == 'aarch64' ]]; then
-                if [ `echo "${!RELEASE}" | grep -Ev '^(amzn\.2|centos\.7|ubuntu\.18\.04|ubuntu\.20\.04|rhel\.8)'` ]; then
+                if [ `echo "${!RELEASE}" | grep -Ev '^(amzn\.2|ubuntu\.20\.04|ubuntu\.22\.04|ubuntu\.24\.04|rhel\.8|rocky\.8|rhel\.9|rocky\.9)'` ]; then
                   echo "This component does not support '${!RELEASE}' on ARM64 CPUs. Failing build."
                   exit {{ FailExitCode }}
                 fi
               fi
 
-      - name: DisableNouveau
+      - name: CreatingJsonFile
+        action: CreateFile
+        inputs:
+          - path: /etc/parallelcluster/image_dna.json
+            content: |
+              ${CfnParamChefDnaJson}
+            overwrite: true
+
+      # Configure the proxy for isolated (no-internet) builds, matching the setup_proxy.rb cookbook recipe.
+      - name: ConfigureProxy
         action: ExecuteBash
         inputs:
           commands:
             - |
-              set -v
+              set -x
+              PROXY_ENV_FILE=/etc/parallelcluster/pcluster_proxy_env.sh
               PLATFORM='{{ build.PlatformName.outputs.stdout }}'
-              /bin/sed -r -i -e 's/GRUB_CMDLINE_LINUX="(.*)"/GRUB_CMDLINE_LINUX="\1 rd.driver.blacklist=nouveau nouveau.modeset=0"/' /etc/default/grub
-              if [[ ${!PLATFORM} == RHEL ]]; then
-                grub2-mkconfig -o /boot/grub2/grub.cfg
-              elif [[ ${!PLATFORM} == DEBIAN ]]; then
-                update-grub
+              REGION=${AWS::Region}
+              # Parse the proxy address without jq (jq is installed later, over the proxy).
+              PROXY=$(sed -n 's/.*"install_http_proxy_address"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/parallelcluster/image_dna.json | head -n1)
+
+              # stdout is consumed as a step output (the env-file path), so every informational
+              # message goes to stderr and only the path is written to stdout.
+              if [ -z "${!PROXY}" ]; then
+                echo "No install_http_proxy_address set; skipping proxy configuration." >&2
+                exit 0
+              fi
+              if ! [[ ${!PROXY} =~ ^https?://[^/:]+:[0-9]+/?$ ]]; then
+                echo "Invalid install_http_proxy_address '${!PROXY}'. Expected format: http(s)://host:port." >&2
+                exit {{ FailExitCode }}
               fi
 
-      - name: InstallEfiBootManager
+              # aws_domain: China / US-ISO / US-ISOB / classic (see setup_proxy.rb).
+              case "${!REGION}" in
+                cn-*)      DOMAIN=amazonaws.com.cn ;;
+                us-iso-*)  DOMAIN=c2s.ic.gov ;;
+                us-isob-*) DOMAIN=sc2s.sgov.gov ;;
+                *)         DOMAIN=amazonaws.com ;;
+              esac
+              NO_PROXY="localhost,127.0.0.1,169.254.169.254,.s3.${!REGION}.${!DOMAIN},s3.${!REGION}.${!DOMAIN},.s3-${!REGION}.${!DOMAIN},s3-${!REGION}.${!DOMAIN},.s3.dualstack.${!REGION}.${!DOMAIN},s3.dualstack.${!REGION}.${!DOMAIN}"
+
+              echo "Configuring proxy: ${!PROXY}" >&2
+              {
+                echo "export http_proxy=${!PROXY}"
+                echo "export https_proxy=${!PROXY}"
+                echo "export HTTP_PROXY=${!PROXY}"
+                echo "export HTTPS_PROXY=${!PROXY}"
+                echo "export no_proxy=${!NO_PROXY}"
+                echo "export NO_PROXY=${!NO_PROXY}"
+              } > ${!PROXY_ENV_FILE}
+
+              # snapd uses its own HTTP client (not the transparent proxy); without this an apt
+              # upgrade that triggers snap (e.g. the Firefox transitional package) holds the dpkg
+              # lock and hangs.
+              if [[ ${!PLATFORM} == DEBIAN ]] && [ -e /run/snapd.socket ]; then
+                snap set system proxy.http="${!PROXY}"
+                snap set system proxy.https="${!PROXY}"
+              fi
+
+              # Emit the env-file path as this step's output.
+              echo "${!PROXY_ENV_FILE}"
+
+      - name: DisableUnattendedUpgrades
         action: ExecuteBash
         inputs:
           commands:
             - |
-              set -v
+              set -x
               PLATFORM='{{ build.PlatformName.outputs.stdout }}'
-              ARCH=$(uname -m)
-              if [[ `echo ${!ARCH}` == 'aarch64' ]] && [[ ${!PLATFORM} == DEBIAN ]]; then
-                # temporary workaround to solve https://bugs.launchpad.net/ubuntu/+source/grub2-signed/+bug/1936857
-                apt-get -y install efibootmgr
+              PROXY_ENV='{{ build.ConfigureProxy.outputs.stdout }}'
+              [ -f "${!PROXY_ENV}" ] && . "${!PROXY_ENV}"
+
+              if [[ ${!PLATFORM} == DEBIAN ]]; then
+                # wait for completion of os updates performed by cloud-init
+                while [ ! -f /var/lib/cloud/instance/boot-finished ]; do echo 'Waiting for cloud-init...'; sleep 1; done
+                # disable apt-daily.timer to avoid dpkg lock
+                flock $(apt-config shell StateDir Dir::State/d | sed -r "s/.*'(.*)\/?'$/\1/")/daily_lock systemctl disable --now apt-daily.timer apt-daily.service apt-daily-upgrade.timer apt-daily-upgrade.service
+                # disable unattended upgrades
+                sed "/Update-Package-Lists/s/\"1\"/\"0\"/; /Unattended-Upgrade/s/\"1\"/\"0\"/;" /etc/apt/apt.conf.d/20auto-upgrades > "/etc/apt/apt.conf.d/51pcluster-unattended-upgrades"
+                # update package index
+                DEBIAN_FRONTEND=noninteractive apt-get -y update
+              fi
+      - name: InstallPrerequisites
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -x
+              OS='{{ build.OperatingSystemName.outputs.stdout }}'
+              PLATFORM='{{ build.PlatformName.outputs.stdout }}'
+              PROXY_ENV='{{ build.ConfigureProxy.outputs.stdout }}'
+              [ -f "${!PROXY_ENV}" ] && . "${!PROXY_ENV}"
+
+              if [[ ${!PLATFORM} == RHEL ]]; then
+                yum -y install jq
+              elif [[ ${!PLATFORM} == DEBIAN ]]; then
+                apt-get -y install jq
+              fi
+
+      # Get AWS Region
+      - name: AWSRegion
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -x
+              echo ${AWS::Region}
+
+      - name: DisableKernelUpdate
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -x
+              DISABLE_KERNEL_UPDATE=$(cat /etc/parallelcluster/image_dna.json | jq -r '.cluster.disable_kernel_update')
+              echo "${!DISABLE_KERNEL_UPDATE}"
+
+      - name: PinKernelVersion
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -x
+              OS='{{ build.OperatingSystemName.outputs.stdout }}'
+              PLATFORM='{{ build.PlatformName.outputs.stdout }}'
+              DISABLE_KERNEL_UPDATE='{{ build.DisableKernelUpdate.outputs.stdout }}'
+              if [[ $OS == alinux2023 && $(uname -r) == 6.12.* ]]; then
+                KERNEL_PACKAGES_PREFIX="kernel6.12"
+              else
+                KERNEL_PACKAGES_PREFIX="kernel"
+              fi
+
+              if [[ ${!DISABLE_KERNEL_UPDATE} == true ]]; then
+                if [[ ${!PLATFORM} == RHEL ]]; then
+                  PROXY_ENV='{{ build.ConfigureProxy.outputs.stdout }}'
+                  [ -f "${!PROXY_ENV}" ] && . "${!PROXY_ENV}"
+                  yum install -y yum-plugin-versionlock
+                  # listing all the packages because wildcard does not work as expected
+                  yum versionlock ${!KERNEL_PACKAGES_PREFIX} ${!KERNEL_PACKAGES_PREFIX}-core ${!KERNEL_PACKAGES_PREFIX}-modules
+
+                  if [[ ${!OS} == "rocky8" ]] || [[ ${!OS} == "rocky9" ]] ; then
+                    yum versionlock rocky-release rocky-repos
+                  elif [[ ${!OS} == "rhel8" ]] || [[ ${!OS} == "rhel9" ]] ; then
+                    yum versionlock redhat-release
+                  fi
+                  echo "Kernel version locked"
+                fi
               fi
 
       - name: UpdateOS
@@ -123,37 +249,64 @@ phases:
         inputs:
           commands:
             - |
-              set -v
+              set -x
               OS='{{ build.OperatingSystemName.outputs.stdout }}'
               PLATFORM='{{ build.PlatformName.outputs.stdout }}'
+              DISABLE_KERNEL_UPDATE='{{ build.DisableKernelUpdate.outputs.stdout }}'
+              PROXY_ENV='{{ build.ConfigureProxy.outputs.stdout }}'
+              [ -f "${!PROXY_ENV}" ] && . "${!PROXY_ENV}"
 
               if [[ ${!PLATFORM} == RHEL ]]; then
                 yum -y update
-              
-                if [[ ${!OS} != "rhel8" ]]; then
-                  package-cleanup -y --oldkernels --count=1
+
+                if [[ ${!OS} == "rhel8" ]] || [[ ${!OS} == "rocky8" ]] || [[ ${!OS} == "rhel9" ]] || [[ ${!OS} == "rocky9" ]] || [[ ${!OS} == "alinux2023" ]] ; then
+                  # package-cleanup has changed in RHEL8 and it works differently https://access.redhat.com/solutions/1227
+                  yum remove -y $(yum repoquery --installonly --latest-limit=-2 -q)
                 else
-                  # package-cleanup has changed in RHEL8 and it works differently
-                  # RHEL8 keeps at least 2 kernel for fallback reason https://access.redhat.com/solutions/1227
-                  # The kernel cleanup should be performed manually
-              
-                  # get the default kernel for the next boot
-                  LAST_KERNEL_VERSION=$(grubby --default-kernel | sed -e "s/.*-\(4.18.0-.*\).$(uname -m)/\1/g")
-                  
-                  # get all the installed kernel versions except the one for the next boot
-                  KERNEL_VERSIONS_CLEANUP=$(rpm -q --qf "%{VERSION}-%{RELEASE}\n" kernel | grep -v "$LAST_KERNEL_VERSION")
-                  for VERSION in $KERNEL_VERSIONS_CLEANUP; do
-                    echo "Removing kernel-$VERSION kernel-core-$VERSION kernel-modules-$VERSION"
-                    rpm -e kernel-$VERSION kernel-core-$VERSION kernel-modules-$VERSION;
-                  done
+                  package-cleanup -y --oldkernels --count=1
                 fi
-                yum -y install kernel-devel
+
               elif [[ ${!PLATFORM} == DEBIAN ]]; then
-                while [ ! -f /var/lib/cloud/instance/boot-finished ]; do echo 'Waiting for cloud-init...'; sleep 1; done
-                flock $(apt-config shell StateDir Dir::State/d | sed -r "s/.*'(.*)\/?'$/\1/")/daily_lock systemctl disable --now apt-daily.timer apt-daily.service apt-daily-upgrade.timer apt-daily-upgrade.service
-                sed "/Update-Package-Lists/s/\"1\"/\"0\"/; /Unattended-Upgrade/s/\"1\"/\"0\"/;" /etc/apt/apt.conf.d/20auto-upgrades > "/etc/apt/apt.conf.d/51pcluster-unattended-upgrades"
-                DEBIAN_FRONTEND=noninteractive apt-get -y update && DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --with-new-pkgs upgrade && apt-get --purge autoremove -y
-                apt-get -y install linux-aws linux-headers-aws linux-image-aws
+                DEBIAN_FRONTEND=noninteractive apt-get -y update
+                if [[ ${!DISABLE_KERNEL_UPDATE} == true ]]; then
+                  DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
+                else
+                  DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --with-new-pkgs upgrade
+                fi
+                apt-get --purge autoremove -y
+              fi
+      - name: RebootStep
+        action: Reboot
+        onFailure: Abort
+        maxAttempts: 2
+        inputs:
+          delaySeconds: 10
+
+      - name: RemoveKernelPin
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -x
+              OS='{{ build.OperatingSystemName.outputs.stdout }}'
+              PLATFORM='{{ build.PlatformName.outputs.stdout }}'
+              DISABLE_KERNEL_UPDATE='{{ build.DisableKernelUpdate.outputs.stdout }}'
+              if [[ $OS == alinux2023 && $(uname -r) == 6.12.* ]]; then
+                KERNEL_PACKAGES_PREFIX="kernel6.12"
+              else
+                KERNEL_PACKAGES_PREFIX="kernel"
+              fi
+
+              # Remove kernel version lock
+              if [[ ${!DISABLE_KERNEL_UPDATE} == true ]] && [[ ${!PLATFORM} == RHEL ]]; then
+                yum versionlock delete ${!KERNEL_PACKAGES_PREFIX} ${!KERNEL_PACKAGES_PREFIX}-core ${!KERNEL_PACKAGES_PREFIX}-modules
+
+                if [[ ${!OS} == "rocky8" ]] || [[ ${!OS} == "rocky9" ]] ; then
+                  yum versionlock delete rocky-release
+                elif [[ ${!OS} == "rhel8" ]] || [[ ${!OS} == "rhel9" ]] ; then
+                  yum versionlock delete redhat-release
+                fi
+                echo "Kernel version unlocked"
               fi
 
       - name: KeepSSM
@@ -161,7 +314,7 @@ phases:
         inputs:
           commands:
             - |
-              set -v
+              set -x
               if [[ -f /tmp/imagebuilder_service/ssm_installed ]]; then
                 echo "Keeping SSM agent installed"
                 rm -rf /tmp/imagebuilder_service/ssm_installed
@@ -169,12 +322,21 @@ phases:
                  echo "SSM agent is installed by default"
               fi
 
-      - name: RebootStep
+      - name: RebootStep2
         action: Reboot
         onFailure: Abort
         maxAttempts: 2
         inputs:
             delaySeconds: 10
+
+      - name: Cleanup
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -x
+              PROXY_ENV='{{ build.ConfigureProxy.outputs.stdout }}'
+              if [ -n "${!PROXY_ENV}" ]; then rm -f "${!PROXY_ENV}"; fi
 
   - name: validate
     steps:

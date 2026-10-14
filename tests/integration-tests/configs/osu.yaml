@@ -1,0 +1,9 @@
+{%- import 'common.jinja2' as common with context -%}
+test-suites:
+  performance_tests:
+    test_osu.py::test_osu:
+      dimensions:
+        - regions: [{{ c5n_18xlarge_CAPACITY_RESERVATION_35_INSTANCES_6_HOURS }}]
+          instances: [ "c5n.18xlarge" ]
+          oss: {{ common.OSS_COMMERCIAL_X86 }}
+          schedulers: [ "slurm" ]

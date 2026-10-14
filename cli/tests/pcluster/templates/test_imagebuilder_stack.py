@@ -59,8 +59,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -69,7 +71,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "UpdateOSComponent": {},
                     "ParallelClusterComponent": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
@@ -110,8 +111,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -160,8 +163,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -208,8 +213,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceProfile": {},
@@ -218,7 +225,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "BuildNotificationTopic": {},
                     "BuildNotificationSubscription": {},
@@ -258,8 +264,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InfrastructureConfiguration": {},
@@ -267,7 +275,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "BuildNotificationTopic": {},
                     "BuildNotificationSubscription": {},
@@ -307,8 +314,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -318,7 +327,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "BuildNotificationTopic": {},
                     "BuildNotificationSubscription": {},
@@ -355,15 +363,16 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
                     "InstanceProfile": {},
                     "InfrastructureConfiguration": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
@@ -405,8 +414,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -416,7 +427,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
                     "ParallelClusterComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "BuildNotificationTopic": {},
                     "BuildNotificationSubscription": {},
@@ -454,8 +464,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -465,7 +477,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
                     "ParallelClusterComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "BuildNotificationTopic": {},
                     "BuildNotificationSubscription": {},
@@ -511,8 +522,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -522,7 +535,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
                     "ParallelClusterComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "BuildNotificationTopic": {},
                     "BuildNotificationSubscription": {},
@@ -561,8 +573,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -570,7 +584,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "InfrastructureConfiguration": {},
                     "ParallelClusterComponent": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
@@ -610,8 +623,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {"Default": "https://presigned.url"},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -619,7 +634,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "InfrastructureConfiguration": {},
                     "ParallelClusterComponent": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
@@ -659,8 +673,10 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "CfnParamChefDnaJson": {},
                     "CfnParamChefCookbook": {"Default": "https://custom.cookbook.url"},
                     "CfnParamCincInstaller": {},
+                    "CfnParamCincVersion": {},
                     "CfnParamCookbookVersion": {},
                     "CfnParamUpdateOsAndReboot": {},
+                    "CfnParamIsOfficialAmiBuild": {},
                 },
                 "Resources": {
                     "InstanceRole": {},
@@ -668,7 +684,6 @@ from tests.pcluster.utils import assert_lambdas_have_expected_vpc_config_and_man
                     "InfrastructureConfiguration": {},
                     "ParallelClusterComponent": {},
                     "ParallelClusterTagComponent": {},
-                    "ParallelClusterValidateComponent": {},
                     "ParallelClusterTestComponent": {},
                     "ImageRecipe": {},
                     "ParallelClusterImage": {},
@@ -740,7 +755,6 @@ def _test_resources(generated_resources, expected_resources):
             },
             {
                 "Type": "AWS::IAM::Role",
-                "DependsOn": ["DeleteStackFunctionExecutionRole"],
                 "Properties": {
                     "RoleName": {
                         "Fn::Join": [
@@ -806,7 +820,6 @@ def _test_resources(generated_resources, expected_resources):
             },
             {
                 "Type": "AWS::IAM::InstanceProfile",
-                "DependsOn": ["DeleteStackFunctionExecutionRole"],
                 "Properties": {
                     "Roles": [{"Ref": "InstanceRole"}],
                     "Path": "/parallelcluster/",
@@ -848,7 +861,6 @@ def _test_resources(generated_resources, expected_resources):
             },
             {
                 "Type": "AWS::IAM::Role",
-                "DependsOn": ["DeleteStackFunctionExecutionRole"],
                 "Properties": {
                     "RoleName": {
                         "Fn::Join": [
@@ -915,7 +927,6 @@ def _test_resources(generated_resources, expected_resources):
             },
             {
                 "Type": "AWS::IAM::InstanceProfile",
-                "DependsOn": ["DeleteStackFunctionExecutionRole"],
                 "Properties": {
                     "Roles": [{"Ref": "InstanceRole"}],
                     "Path": "/parallelcluster/",
@@ -958,7 +969,6 @@ def _test_resources(generated_resources, expected_resources):
             None,
             {
                 "Type": "AWS::IAM::InstanceProfile",
-                "DependsOn": ["DeleteStackFunctionExecutionRole"],
                 "Properties": {
                     "Roles": ["test-InstanceRole"],
                     "Path": "/parallelcluster/",
@@ -1033,988 +1043,6 @@ def test_imagebuilder_instance_role(
         .get("Properties")
         .get("InstanceProfileName")
     ).is_equal_to(expected_instance_profile_in_infrastructure_configuration)
-
-
-@pytest.mark.parametrize(
-    "resource, response, expected_execution_role, expected_execution_role_in_lambda_function",
-    [
-        (
-            {
-                "imagebuilder": {
-                    "build": {
-                        "parent_image": "ami-0185634c5a8a37250",
-                        "instance_type": "c5.xlarge",
-                        "components": [
-                            {"type": "script", "value": "s3://test/post_install.sh"},
-                            {"type": "script", "value": "s3://test/post_install2.sh"},
-                        ],
-                        "update_os_packages": {"enabled": True},
-                    },
-                }
-            },
-            {
-                "Architecture": "x86_64",
-                "BlockDeviceMappings": [
-                    {
-                        "DeviceName": "/dev/xvda",
-                        "Ebs": {
-                            "VolumeSize": 50,
-                        },
-                    }
-                ],
-            },
-            {
-                "Type": "AWS::IAM::Role",
-                "Properties": {
-                    "RoleName": {
-                        "Fn::Join": [
-                            "",
-                            [
-                                "ParallelClusterImageCleanup-",
-                                {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                            ],
-                        ]
-                    },
-                    "AssumeRolePolicyDocument": {
-                        "Statement": [
-                            {
-                                "Action": "sts:AssumeRole",
-                                "Effect": "Allow",
-                                "Principal": {"Service": "lambda.amazonaws.com"},
-                            }
-                        ],
-                        "Version": "2012-10-17",
-                    },
-                    "ManagedPolicyArns": [
-                        {"Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"},
-                    ],
-                    "Path": "/parallelcluster/",
-                    "Policies": [
-                        {
-                            "PolicyDocument": {
-                                "Statement": [
-                                    {
-                                        "Action": "iam:DeleteRole",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":role/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "iam:DeleteInstanceProfile",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":instance-profile/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteInfrastructureConfiguration",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":infrastructure-configuration/parallelclusterimage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-updateos-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-tag-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-script-0-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-script-1-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteImageRecipe",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":image-recipe/parallelclusterimage-my-image/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteDistributionConfiguration",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":distribution-configuration/parallelclusterimage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": [
-                                            "imagebuilder:DeleteImage",
-                                            "imagebuilder:GetImage",
-                                            "imagebuilder:CancelImageCreation",
-                                        ],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":image/parallelclusterimage-my-image/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "cloudformation:DeleteStack",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":cloudformation:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":stack/My-Image/",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "ec2:CreateTags",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":ec2:",
-                                                    {"Ref": "AWS::Region"},
-                                                    "::image/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "tag:TagResources",
-                                        "Effect": "Allow",
-                                        "Resource": "*",
-                                    },
-                                    {
-                                        "Action": ["iam:DetachRolePolicy", "iam:DeleteRole", "iam:DeleteRolePolicy"],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":role/parallelcluster/" "ParallelClusterImageCleanup-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": ["lambda:DeleteFunction", "lambda:RemovePermission"],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":lambda:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":function:ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "logs:DeleteLogGroup",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":logs:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":log-group:/aws/lambda/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    ":*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "iam:RemoveRoleFromInstanceProfile",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":instance-profile/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": ["iam:DetachRolePolicy", "iam:DeleteRolePolicy"],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":role/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": [
-                                            "SNS:GetTopicAttributes",
-                                            "SNS:DeleteTopic",
-                                            "SNS:Unsubscribe",
-                                        ],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":sns:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                ],
-                                "Version": "2012-10-17",
-                            },
-                            "PolicyName": "LambdaCleanupPolicy",
-                        }
-                    ],
-                    "Tags": [
-                        {
-                            "Key": "parallelcluster:image_id",
-                            "Value": "My-Image",
-                        },
-                        {
-                            "Key": "parallelcluster:image_name",
-                            "Value": "My-Image",
-                        },
-                    ],
-                },
-            },
-            {"Fn::GetAtt": ["DeleteStackFunctionExecutionRole", "Arn"]},
-        ),
-        (
-            {
-                "imagebuilder": {
-                    "build": {
-                        "parent_image": "ami-0185634c5a8a37250",
-                        "instance_type": "c5.xlarge",
-                        "components": [
-                            {"type": "script", "value": "s3://test/post_install.sh"},
-                            {"type": "script", "value": "s3://test/post_install2.sh"},
-                        ],
-                        "update_os_packages": {"enabled": True},
-                    },
-                    "dev_settings": {
-                        "disable_validate_and_test": False,
-                    },
-                }
-            },
-            {
-                "Architecture": "x86_64",
-                "BlockDeviceMappings": [
-                    {
-                        "DeviceName": "/dev/xvda",
-                        "Ebs": {
-                            "VolumeSize": 50,
-                        },
-                    }
-                ],
-            },
-            {
-                "Type": "AWS::IAM::Role",
-                "Properties": {
-                    "RoleName": {
-                        "Fn::Join": [
-                            "",
-                            [
-                                "ParallelClusterImageCleanup-",
-                                {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                            ],
-                        ]
-                    },
-                    "AssumeRolePolicyDocument": {
-                        "Statement": [
-                            {
-                                "Action": "sts:AssumeRole",
-                                "Effect": "Allow",
-                                "Principal": {"Service": "lambda.amazonaws.com"},
-                            }
-                        ],
-                        "Version": "2012-10-17",
-                    },
-                    "ManagedPolicyArns": [
-                        {"Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"},
-                    ],
-                    "Path": "/parallelcluster/",
-                    "Policies": [
-                        {
-                            "PolicyDocument": {
-                                "Statement": [
-                                    {
-                                        "Action": "iam:DeleteRole",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":role/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "iam:DeleteInstanceProfile",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":instance-profile/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteInfrastructureConfiguration",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":infrastructure-configuration/parallelclusterimage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-updateos-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-tag-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-script-0-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-script-1-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-validate-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteComponent",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":component/parallelclusterimage-test-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    "/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteImageRecipe",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":image-recipe/parallelclusterimage-my-image/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "imagebuilder:DeleteDistributionConfiguration",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":distribution-configuration/parallelclusterimage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": [
-                                            "imagebuilder:DeleteImage",
-                                            "imagebuilder:GetImage",
-                                            "imagebuilder:CancelImageCreation",
-                                        ],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":imagebuilder:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":image/parallelclusterimage-my-image/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "cloudformation:DeleteStack",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":cloudformation:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":stack/My-Image/",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "ec2:CreateTags",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":ec2:",
-                                                    {"Ref": "AWS::Region"},
-                                                    "::image/*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "tag:TagResources",
-                                        "Effect": "Allow",
-                                        "Resource": "*",
-                                    },
-                                    {
-                                        "Action": ["iam:DetachRolePolicy", "iam:DeleteRole", "iam:DeleteRolePolicy"],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":role/parallelcluster/" "ParallelClusterImageCleanup-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": ["lambda:DeleteFunction", "lambda:RemovePermission"],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":lambda:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":function:ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "logs:DeleteLogGroup",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":logs:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":log-group:/aws/lambda/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                    ":*",
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": "iam:RemoveRoleFromInstanceProfile",
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":instance-profile/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": ["iam:DetachRolePolicy", "iam:DeleteRolePolicy"],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":iam::",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":role/parallelcluster/ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                    {
-                                        "Action": [
-                                            "SNS:GetTopicAttributes",
-                                            "SNS:DeleteTopic",
-                                            "SNS:Unsubscribe",
-                                        ],
-                                        "Effect": "Allow",
-                                        "Resource": {
-                                            "Fn::Join": [
-                                                "",
-                                                [
-                                                    "arn:",
-                                                    {"Ref": "AWS::Partition"},
-                                                    ":sns:",
-                                                    {"Ref": "AWS::Region"},
-                                                    ":",
-                                                    {"Ref": "AWS::AccountId"},
-                                                    ":ParallelClusterImage-",
-                                                    {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
-                                                ],
-                                            ]
-                                        },
-                                    },
-                                ],
-                                "Version": "2012-10-17",
-                            },
-                            "PolicyName": "LambdaCleanupPolicy",
-                        }
-                    ],
-                    "Tags": [
-                        {
-                            "Key": "parallelcluster:image_id",
-                            "Value": "My-Image",
-                        },
-                        {
-                            "Key": "parallelcluster:image_name",
-                            "Value": "My-Image",
-                        },
-                    ],
-                },
-            },
-            {"Fn::GetAtt": ["DeleteStackFunctionExecutionRole", "Arn"]},
-        ),
-        (
-            {
-                "imagebuilder": {
-                    "build": {
-                        "parent_image": "ami-0185634c5a8a37250",
-                        "instance_type": "c5.xlarge",
-                        "iam": {
-                            "cleanup_lambda_role": "arn:aws:iam::346106133209:role/custom_lambda_cleanup_role",
-                        },
-                    },
-                }
-            },
-            {
-                "Architecture": "x86_64",
-                "BlockDeviceMappings": [
-                    {
-                        "DeviceName": "/dev/xvda",
-                        "Ebs": {
-                            "VolumeSize": 50,
-                        },
-                    }
-                ],
-            },
-            None,
-            "arn:aws:iam::346106133209:role/custom_lambda_cleanup_role",
-        ),
-    ],
-)
-def test_imagebuilder_lambda_execution_role(
-    mocker,
-    resource,
-    response,
-    expected_execution_role,
-    expected_execution_role_in_lambda_function,
-):
-    mock_aws_api(mocker)
-    mocker.patch("pcluster.imagebuilder_utils.get_ami_id", return_value="ami-0185634c5a8a37250")
-    mocker.patch(
-        "pcluster.aws.ec2.Ec2Client.describe_image",
-        return_value=ImageInfo(response),
-    )
-    # mock bucket initialization parameters
-    mock_bucket(mocker)
-
-    imagebuild = imagebuilder_factory(resource).get("imagebuilder")
-    generated_template = CDKTemplateBuilder().build_imagebuilder_template(
-        imagebuild, "My-Image", dummy_imagebuilder_bucket()
-    )
-    assert_that(generated_template.get("Resources").get("DeleteStackFunctionExecutionRole")).is_equal_to(
-        expected_execution_role
-    )
-    assert_that(
-        generated_template.get("Resources").get("DeleteStackFunction").get("Properties").get("Role")
-    ).is_equal_to(expected_execution_role_in_lambda_function)
 
 
 @pytest.mark.parametrize(
@@ -2218,8 +1246,64 @@ def test_imagebuilder_lambda_execution_role(
                 {"ComponentArn": {"Ref": "ParallelClusterTagComponent"}},
                 {"ComponentArn": "arn:aws:imagebuilder:us-east-1:aws:component/apache-tomcat-9-linux/1.0.0"},
                 {"ComponentArn": "arn:aws:imagebuilder:us-east-1:aws:component/amazon-cloudwatch-agent-linux/1.0.0"},
-                {"ComponentArn": {"Ref": "ParallelClusterValidateComponent"}},
                 {"ComponentArn": {"Ref": "ParallelClusterTestComponent"}},
+            ],
+        ),
+        (
+            {
+                "imagebuilder": {
+                    "build": {
+                        "parent_image": "ami-0185634c5a8a37250",
+                        "installation": {"nvidia_software": {"enabled": True}, "lustre_client": {"enabled": True}},
+                        "imds": {"imds_support": "v2.0"},
+                        "subnet_id": "subnet-0292c5356eadc531f",
+                        "iam": {
+                            "instance_role": "arn:aws:iam::123456789012:role/pcluster",
+                            "instance_profile": "arn:aws:iam::123456789012:instance-profile/pcluster",
+                            "cleanup_lambda_role": "arn:aws:iam::123456789012:role/pcluster",
+                            "additional_iam_policies": [{"policy": "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"}],
+                        },
+                        "instance_type": "c5.xlarge",
+                        "security_group_ids": ["sg-b0bbeacc", "sg-0fc70b22048995b07"],
+                        "components": [
+                            {
+                                "type": "arn",
+                                "value": "arn:aws:imagebuilder:us-east-1:aws:component/apache-tomcat-9-linux/1.0.0",
+                            },
+                            {
+                                "type": "arn",
+                                "value": "arn:aws:imagebuilder:us-east-1:"
+                                "aws:component/amazon-cloudwatch-agent-linux/1.0.0",
+                            },
+                        ],
+                        "update_os_packages": {"enabled": True},
+                    },
+                    "dev_settings": {
+                        "cookbook": {
+                            "chef_cookbook": "https://tests/aws-parallelcluster-cookbook-3.0.tgz",
+                            "extra_chef_attributes": '{"cluster": {"test_attribute": "test_attribute_values"}}',
+                        },
+                        "node_package": "https://tests/aws-parallelcluster-node-3.0.tgz",
+                    },
+                }
+            },
+            {
+                "Architecture": "x86_64",
+                "BlockDeviceMappings": [
+                    {
+                        "DeviceName": "/dev/xvda",
+                        "Ebs": {
+                            "VolumeSize": 50,
+                        },
+                    }
+                ],
+            },
+            [
+                {"ComponentArn": {"Ref": "UpdateOSComponent"}},
+                {"ComponentArn": {"Ref": "ParallelClusterComponent"}},
+                {"ComponentArn": {"Ref": "ParallelClusterTagComponent"}},
+                {"ComponentArn": "arn:aws:imagebuilder:us-east-1:aws:component/apache-tomcat-9-linux/1.0.0"},
+                {"ComponentArn": "arn:aws:imagebuilder:us-east-1:aws:component/amazon-cloudwatch-agent-linux/1.0.0"},
             ],
         ),
     ],
@@ -2241,6 +1325,24 @@ def test_imagebuilder_components(mocker, resource, response, expected_components
     assert_that(generated_template.get("Resources").get("ImageRecipe").get("Properties").get("Components")).is_equal_to(
         expected_components
     )
+
+    # Check size Limits of ImageBuilder Components
+    imagebuilder_resources = generated_template.get("Resources")
+    for component_name, _ in imagebuilder_resources.items():
+        if (
+            imagebuilder_resources.get(component_name)
+            and imagebuilder_resources.get(component_name).get("Type") == "AWS::ImageBuilder::Component"
+        ):
+            print(
+                "Component {} has size {}".format(
+                    component_name, len(str(imagebuilder_resources.get(component_name).get("Properties").get("Data")))
+                )
+            )
+            assert_that(
+                len(str(imagebuilder_resources.get(component_name).get("Properties").get("Data")))
+            ).is_less_than(13600)
+            # The limit of image builder is 16000.
+            # This check is stricter to consider the parameters os stack might add in more length
 
 
 @pytest.mark.parametrize(
@@ -3317,7 +2419,7 @@ def test_imagebuilder_distribution_configuraton(mocker, resource, response, expe
                     }
                 ],
             },
-            {"Encrypted": False, "VolumeSize": 35, "VolumeType": "gp3"},
+            {"Encrypted": False, "VolumeSize": 45, "VolumeType": "gp3"},
         ),
         (
             {
@@ -3350,7 +2452,7 @@ def test_imagebuilder_distribution_configuraton(mocker, resource, response, expe
             {
                 "imagebuilder": {
                     "image": {
-                        "root_volume": {"size": 40, "encrypted": True},
+                        "root_volume": {"size": 45, "encrypted": True},
                     },
                     "build": {
                         "parent_image": "arn:aws:imagebuilder:us-east-1:aws:image/amazon-linux-2-x86/x.x.x",
@@ -3369,7 +2471,7 @@ def test_imagebuilder_distribution_configuraton(mocker, resource, response, expe
                     }
                 ],
             },
-            {"Encrypted": True, "VolumeSize": 40, "VolumeType": "gp3"},
+            {"Encrypted": True, "VolumeSize": 45, "VolumeType": "gp3"},
         ),
         (
             {
@@ -3399,7 +2501,7 @@ def test_imagebuilder_distribution_configuraton(mocker, resource, response, expe
             },
             {
                 "Encrypted": True,
-                "VolumeSize": 77,
+                "VolumeSize": 87,
                 "VolumeType": "gp3",
                 "KmsKeyId": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
             },
@@ -3503,7 +2605,7 @@ def test_imagebuilder_root_volume(mocker, resource, response, expected_root_volu
                     }
                 ],
             },
-            "optional",
+            "required",
         ),
     ],
 )

@@ -13,12 +13,29 @@ import pytest
 from assertpy import assert_that
 
 from pcluster.aws.aws_api import AWSApi
+from pcluster.aws.aws_resources import FsxStorageInfo
 from tests.utils import MockedBoto3Request
 
 
 @pytest.fixture()
 def boto3_stubber_path():
     return "pcluster.aws.common.boto3"
+
+
+@pytest.mark.parametrize(
+    "file_storage_info, expected_network_interface_ids",
+    [
+        # NetworkInterfaceIds present: return them as-is.
+        ({"NetworkInterfaceIds": ["eni-12345678", "eni-23456789"]}, ["eni-12345678", "eni-23456789"]),
+        # NetworkInterfaceIds explicitly empty: return the empty list.
+        ({"NetworkInterfaceIds": []}, []),
+        # NetworkInterfaceIds omitted (e.g. storage not yet AVAILABLE): must default to [] rather than None,
+        # otherwise callers iterating/extending over it fail with a generic "NoneType is not iterable" error.
+        ({}, []),
+    ],
+)
+def test_fsx_storage_info_network_interface_ids(file_storage_info, expected_network_interface_ids):
+    assert_that(FsxStorageInfo(file_storage_info).network_interface_ids).is_equal_to(expected_network_interface_ids)
 
 
 def get_describe_file_systems_mocked_request(fsxs, lifecycle):
@@ -131,6 +148,45 @@ def get_describe_file_caches_mocked_request(file_cache_ids):
         method="describe_file_caches",
         response={"FileCaches": [{"FileCacheId": file_cache_id} for file_cache_id in file_cache_ids]},
         expected_params={"FileCacheIds": file_cache_ids},
+    )
+
+
+def get_describe_data_repository_associations_mocked_request(dra_ids, lifecycle):
+    return MockedBoto3Request(
+        method="describe_data_repository_associations",
+        response={"Associations": [{"AssociationId": dra_id, "Lifecycle": lifecycle} for dra_id in dra_ids]},
+        expected_params={"AssociationIds": dra_ids},
+    )
+
+
+def test_describe_data_repository_associations(boto3_stubber):
+    dra_id = "dra-012345678"
+    additional_dra_id = "dra-876543210"
+    # The first mocked request and the third are about the same fsx. However, the lifecycle of the fsx changes
+    # from CREATING to AVAILABLE. The second mocked request is about another fsx
+    mocked_requests = [
+        get_describe_data_repository_associations_mocked_request([dra_id], "CREATING"),
+        get_describe_data_repository_associations_mocked_request([additional_dra_id], "CREATING"),
+        get_describe_data_repository_associations_mocked_request([dra_id], "AVAILABLE"),
+    ]
+    boto3_stubber("fsx", mocked_requests)
+    assert_that(AWSApi.instance().fsx.describe_data_repository_associations([dra_id])[0]["Lifecycle"]).is_equal_to(
+        "CREATING"
+    )
+
+    # Second boto3 call with more volumes. The volume already cached should not be included in the boto3 call.
+    response = AWSApi.instance().fsx.describe_data_repository_associations([dra_id, additional_dra_id])
+    assert_that(response).is_length(2)
+
+    # Third boto3 call. The result should be from cache even if the lifecycle of the SVM is different
+    assert_that(AWSApi.instance().fsx.describe_data_repository_associations([dra_id])[0]["Lifecycle"]).is_equal_to(
+        "CREATING"
+    )
+
+    # Fourth boto3 call after resetting the AWSApi instance. The latest fsx lifecycle should be retrieved from boto3
+    AWSApi.reset()
+    assert_that(AWSApi.instance().fsx.describe_data_repository_associations([dra_id])[0]["Lifecycle"]).is_equal_to(
+        "AVAILABLE"
     )
 
 

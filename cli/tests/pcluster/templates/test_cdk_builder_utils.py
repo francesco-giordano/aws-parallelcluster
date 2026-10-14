@@ -103,7 +103,7 @@ def test_get_default_volume_tags(stack_name, node_type, raw_dict, expected_resul
 @pytest.mark.usefixtures("get_region")
 class TestCdkLaunchTemplateBuilder:
     @pytest.mark.parametrize(
-        "root_volume_parameters, image_os, expected_response",
+        "root_volume_parameters, root_volume_device_name, expected_response",
         [
             pytest.param(
                 dict(
@@ -114,7 +114,7 @@ class TestCdkLaunchTemplateBuilder:
                     throughput=30,
                     delete_on_termination=False,
                 ),
-                "centos7",
+                "/dev/sda1",
                 [
                     ec2.CfnLaunchTemplate.BlockDeviceMappingProperty(
                         device_name="/dev/xvdba", virtual_name="ephemeral0"
@@ -210,7 +210,7 @@ class TestCdkLaunchTemplateBuilder:
                     throughput=20,
                     delete_on_termination=True,
                 ),
-                "alinux2",
+                "/dev/xvda",
                 [
                     ec2.CfnLaunchTemplate.BlockDeviceMappingProperty(
                         device_name="/dev/xvdba", virtual_name="ephemeral0"
@@ -300,18 +300,18 @@ class TestCdkLaunchTemplateBuilder:
             ),
         ],
     )
-    def test_get_block_device_mappings(self, root_volume_parameters, image_os, expected_response):
+    def test_get_block_device_mappings(self, root_volume_parameters, root_volume_device_name, expected_response):
         root_volume = RootVolume(**root_volume_parameters)
-        assert_that(CdkLaunchTemplateBuilder().get_block_device_mappings(root_volume, image_os)).is_equal_to(
-            expected_response
-        )
+        assert_that(
+            CdkLaunchTemplateBuilder().get_block_device_mappings(root_volume, root_volume_device_name)
+        ).is_equal_to(expected_response)
 
     @pytest.mark.parametrize(
         "queue, compute_resource, expected_response",
         [
             pytest.param(
                 BaseQueue(name="queue1", capacity_type="spot"),
-                SlurmComputeResource(name="compute1", instance_type="t2.medium", spot_price=10.0),
+                SlurmComputeResource(name="compute1", instance_type="t3.medium", spot_price=10.0),
                 ec2.CfnLaunchTemplate.InstanceMarketOptionsProperty(
                     market_type="spot",
                     spot_options=ec2.CfnLaunchTemplate.SpotOptionsProperty(
@@ -322,7 +322,7 @@ class TestCdkLaunchTemplateBuilder:
             ),
             pytest.param(
                 BaseQueue(name="queue2", capacity_type="spot"),
-                SlurmComputeResource(name="compute2", instance_type="t2.medium"),
+                SlurmComputeResource(name="compute2", instance_type="t3.medium"),
                 ec2.CfnLaunchTemplate.InstanceMarketOptionsProperty(
                     market_type="spot",
                     spot_options=ec2.CfnLaunchTemplate.SpotOptionsProperty(
@@ -333,9 +333,15 @@ class TestCdkLaunchTemplateBuilder:
             ),
             pytest.param(
                 BaseQueue(name="queue2", capacity_type="ondemand"),
-                SlurmComputeResource(name="compute2", instance_type="t2.medium", spot_price="10.0"),
+                SlurmComputeResource(name="compute2", instance_type="t3.medium", spot_price="10.0"),
                 None,
                 id="test without spot capacity",
+            ),
+            pytest.param(
+                BaseQueue(name="queue2", capacity_type="capacity_block"),
+                SlurmComputeResource(name="compute2", instance_type="t3.medium"),
+                ec2.CfnLaunchTemplate.InstanceMarketOptionsProperty(market_type="capacity-block"),
+                id="test with capacity block",
             ),
         ],
     )
@@ -358,7 +364,7 @@ class TestCdkLaunchTemplateBuilder:
                 ),
                 SlurmComputeResource(
                     name="compute1",
-                    instance_type="t2.medium",
+                    instance_type="t3.medium",
                     capacity_reservation_target=CapacityReservationTarget(
                         capacity_reservation_resource_group_arn="comp_res_cr_rg_arn",
                     ),
@@ -382,7 +388,7 @@ class TestCdkLaunchTemplateBuilder:
                 ),
                 SlurmComputeResource(
                     name="compute1",
-                    instance_type="t2.medium",
+                    instance_type="t3.medium",
                 ),
                 ec2.CfnLaunchTemplate.CapacityReservationSpecificationProperty(
                     capacity_reservation_target=ec2.CfnLaunchTemplate.CapacityReservationTargetProperty(
@@ -400,7 +406,7 @@ class TestCdkLaunchTemplateBuilder:
                 ),
                 SlurmComputeResource(
                     name="compute1",
-                    instance_type="t2.medium",
+                    instance_type="t3.medium",
                 ),
                 None,
                 id="test with no capacity reservation",

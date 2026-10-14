@@ -1,10 +1,54 @@
 Region: us-east-1
 Image:
-  Os: centos7
+  Os: alinux2023
   CustomAmi: ami-12345678
-
+LoginNodes:
+  Pools:
+  - Name: test
+    InstanceType: t3.micro
+    Count: 1
+    Image:
+      CustomAmi: ami-12345678
+    Networking:
+      SubnetIds:
+        - subnet-12345678
+      SecurityGroups:
+        {% for i in range(10) %}
+        - sg-3456789{{ i }}
+        {% endfor %}
+      Proxy:
+        HttpProxyAddress: https://proxy-address:port
+    Ssh:
+      AllowedIps: 1.2.3.4/32
+    Dcv:
+      Enabled: true
+      Port: 8443
+      AllowedIps: 0.0.0.0/0
+    CustomActions:
+      OnNodeStart:
+        Script: https://test.tgz
+        Args:
+          # Number of args doesn't impact number of resources, just the size of the template
+          {% for i in range(number_of_script_args) %}
+          - arg{{ i }}
+          {% endfor %}
+      OnNodeConfigured:
+        Script: https://test.tgz
+        Args:
+          {% for i in range(number_of_script_args) %}
+          - arg{{ i }}
+          {% endfor %}
+      OnNodeUpdated:
+        Script: https://test.tgz
+        Args:
+          {% for i in range(number_of_script_args) %}
+          - arg{{ i }}
+          {% endfor %}
+    Iam:
+      AdditionalIamPolicies:
+        - Policy: arn:aws:iam::aws:policy/AdministratorAccess
 HeadNode:
-  InstanceType: t2.micro
+  InstanceType: t3.micro
   Networking:
     SubnetId: subnet-12345678
     ElasticIp: true
@@ -20,13 +64,16 @@ HeadNode:
     AllowedIps: 1.2.3.4/32
   LocalStorage:
     RootVolume:
-      Size: 40
+      Size: 45
       Encrypted: true
       VolumeType: gp2
       Iops: 100
       DeleteOnTermination: true
     EphemeralVolume:
       MountDir: /test
+  SharedStorageEfsSettings:
+    Encrypted: false
+  SharedStorageType: Efs  # Ebs
   Dcv:
     Enabled: true
     Port: 8443
@@ -54,6 +101,7 @@ HeadNode:
 
 Scheduling:
   Scheduler: slurm
+  ScalingStrategy: all-or-nothing
   SlurmSettings:
     ScaledownIdletime: 10
     QueueUpdateStrategy: TERMINATE
@@ -78,10 +126,13 @@ Scheduling:
         {% for j in range(max_number_of_ondemand_crs) %}
         - Name: compute-resource-ondemand-{{ i }}{{ j }}
           InstanceType: c5.xlarge
+          LaunchTemplateOverrides:
+            LaunchTemplateId: lt-01234567890abcdef
+            Version: 1
           Tags:
             {% for i in range(number_of_tags) %}
-            - Key: computetag{{ i }}
-              Value: computetag{{ i }}
+            - Key: extremely_long_computetag_key{{ i }}
+              Value: extremely_long_computetag_value{{ i }}
             {% endfor %}
         {% endfor %}
       CustomActions:
@@ -149,14 +200,17 @@ Scheduling:
           Efa:
             Enabled: true
             GdrSupport: false
+          LaunchTemplateOverrides:
+            LaunchTemplateId: lt-01234567890abcdef
+            Version: 1
           Networking:
             PlacementGroup:
               Enabled: true
               Id: String
           Tags:
             {% for i in range(number_of_tags) %}
-            - Key: computetag{{ i }}
-              Value: computetag{{ i }}
+            - Key: extremely_long_computetag_key{{ i }}
+              Value: extremely_long_computetag_value{{ i }}
             {% endfor %}
         {% endfor %}
       Iam:
@@ -264,6 +318,8 @@ Monitoring:
   Dashboards:
     CloudWatch:
       Enabled: true
+  Alarms:
+    Enabled: true
 AdditionalPackages:
   IntelSoftware:
     IntelHpcPlatform: false
@@ -294,7 +350,6 @@ DevSettings:
     ChefCookbook: https://tests/aws-parallelcluster-cookbook-3.0.tgz
     ExtraChefAttributes: |
       {"cluster": {"scheduler_slots": "cores", "slurm_node_reg_mem_percent": 75, "realmemory_to_ec2memory_ratio": 0.95}}
-  AwsBatchCliPackage: s3://test/aws-parallelcluster-batch-3.0.tgz
   NodePackage: s3://test/aws-parallelcluster-node-3.0.tgz
   AmiSearchFilters:
     Tags:

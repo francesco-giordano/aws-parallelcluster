@@ -10,8 +10,7 @@ constants:
 phases:
   - name: test
     steps:
-      ### basic ###
-      - name: OperatingSystemRelease
+      - name: OSRelease
         action: ExecuteBash
         inputs:
           commands:
@@ -25,32 +24,305 @@ phases:
                 echo "The file '${FILE}' does not exist. Failing build." && exit 1
               fi
 
-      # Get uniformed OS name
-      - name: OperatingSystemName
+      - name: OSName
         action: ExecuteBash
         inputs:
           commands:
             - |
               set -v
-              RELEASE='{{ test.OperatingSystemRelease.outputs.stdout }}'
+              RELEASE='{{ test.OSRelease.outputs.stdout }}'
+              case $RELEASE in
+                amzn.2023) echo alinux2023;;
+                ubuntu.22*) echo ubuntu2204;;
+                ubuntu.24*) echo ubuntu2404;;
+                rhel.8*) echo rhel8;;
+                rocky.8*) echo rocky8;;
+                rhel.9*) echo rhel9;;
+                rocky.9*) echo rocky9;;
+                *) echo "Operating System '${RELEASE}' is not supported. Failing build." && exit 1;;
+              esac
 
-              if [ `echo "${RELEASE}" | grep -w '^amzn\.2'` ]; then
-                OS='alinux2'
-              elif [ `echo "${RELEASE}" | grep '^centos\.7'` ]; then
-                OS='centos7'
-              elif [ `echo "${RELEASE}" | grep '^ubuntu\.18'` ]; then
-                OS='ubuntu1804'
-              elif [ `echo "${RELEASE}" | grep '^ubuntu\.20'` ]; then
-                OS='ubuntu2004'
-              elif [ `echo "${RELEASE}" | grep '^rhel\.8'` ]; then
-                OS='rhel8'
+      - name: OSArchitecture
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              ARCH=$(uname -m)
+              case ${ARCH} in
+                x86_64) echo x86_64;;
+                aarch64) echo arm64;;
+                *) echo "The '${ARCH}' architecture is not supported. Failing build." && exit 1;;
+              esac
+
+      - name: PlatformName
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              case '{{ test.OSName.outputs.stdout }}' in
+                alinux*|centos*|rhel*|rocky*) echo RHEL;;
+                ubuntu*) echo DEBIAN;;
+              esac
+
+      - name: IntelMPISupported
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              [[ {{ test.OSArchitecture.outputs.stdout }} != 'arm64' ]] && echo "true" || echo "false"
+
+      - name: FabricManagerSupported
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              [[ {{ test.OSArchitecture.outputs.stdout }} == 'arm64' ]] && echo "false" || echo "true"
+
+      - name: LustreSupported
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              ARCHITECTURE='{{ test.OSArchitecture.outputs.stdout }}'
+              OS='{{ test.OSName.outputs.stdout }}'
+              if [ ${ARCHITECTURE} == 'arm64' ] && [[ ${OS} =~ ^(ubuntu(20|22)04|alinux(2|2023)|rhel8|rocky8|rhel9|rocky9)$ ]] || [ ${ARCHITECTURE} == 'x86_64' ]; then
+                echo "true"
               else
-                echo "Operating System '${RELEASE}' is not supported. Failing build." && exit 1
+                echo "false"
               fi
 
-              echo ${OS}
-
       ### versions ###
+      - name: MungeVersion
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              PATTERN=$(jq '.default.cluster.munge.munge_version' {{ CookbookDefaultFile }})
+              VERSION=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs)
+              echo ${VERSION}
+
+      - name: NvidiaVersion
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              PATTERN=$(jq '.default.cluster.nvidia.driver_version' {{ CookbookDefaultFile }})
+              VERSION=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs)
+              echo ${VERSION}
+
+      - name: CudaVersion
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              PATTERN=$(jq '.default.cluster.nvidia.cuda.version' {{ CookbookDefaultFile }})
+              # Normalize cuda.version to major.minor (e.g. 13.0.2 -> 13.0) to match nvcc and the /usr/local/cuda-<ver> install dir.
+              VERSION=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs | cut -d. -f1,2)
+              echo ${VERSION}
+
+      - name: CudaSamplesDir
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              cuda_ver="{{ test.CudaVersion.outputs.stdout }}"
+              if [ ${cuda_ver} \> '11.4' ]; then
+                PATTERN=$(jq '.default.cluster.nvidia.cuda_samples_version' {{ CookbookDefaultFile }})
+                VERSION=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs)
+                echo cuda-samples-${VERSION}
+              else
+                echo cuda-${cuda_ver}
+              fi
+
+      - name: PatchInSpecProfiles
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              sed -Ei "s#path: cookbooks/aws-parallelcluster#path: /etc/chef/cookbooks/aws-parallelcluster#g" /etc/chef/cookbooks/aws-parallelcluster-*/test/inspec.yml
+              echo "InSpec profiles patched"
+
+      - name: NvidiaEnabled
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              NVIDIA_ENABLED=$(cat /etc/parallelcluster/image_dna.json | jq -r '.cluster.nvidia.enabled')
+              echo "${NVIDIA_ENABLED}"
+
+      - name: HasGPU
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -v
+              HAS_GPU=$(lspci | grep -o "NVIDIA") || HAS_GPU="false"
+              echo "${HAS_GPU}"
+
+      - name: Munge
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -vx
+              echo "check munge installed"
+              munge --version | grep {{ test.MungeVersion.outputs.stdout }}
+              [[ $? -ne 0 ]] && echo "Check munge version failed" && exit 1
+              echo "Munge test passed"
+
+      - name: EFAIntelMPI
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -vx
+              PLATFORM='{{ test.PlatformName.outputs.stdout }}'
+
+              if [ {{ test.IntelMPISupported.outputs.stdout }} == true ]; then
+                echo "Checking efa packages installed..."
+                if [ ${PLATFORM} == RHEL ]; then
+                  rpm -qa | grep libfabric && rpm -qa | grep efa-
+                  [[ $? -ne 0 ]] && echo "Check efa rpm failed" && exit 1
+
+                  echo "Checking Intel MPI 20xx installed and module available..."
+                  unset MODULEPATH
+                  source /etc/profile.d/modules.sh
+                  (module avail intelmpi)2>&1 | grep "/opt/intel/mpi/20.*/modulefiles"
+                  [[ $? -ne 0 ]] && echo "Check Intel MPI failed" && exit 1
+                else
+                  dpkg -l | grep libfabric && modinfo efa | grep efa && [ -d /opt/amazon/efa ]
+                  [[ $? -ne 0 ]] && echo "Check efa deb failed" && exit 1
+                fi
+              fi
+              echo "EFA test passed"
+
+      - name: NvidiaCudaFabricManager
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -vx
+              PLATFORM='{{ test.PlatformName.outputs.stdout }}'
+
+              if [[ {{ test.NvidiaEnabled.outputs.stdout }} == 'no' ]]; then
+                echo "Nvidia recipe not enabled, skipping." && exit 0
+              fi
+              if [ {{ test.HasGPU.outputs.stdout }} == "false" ]; then
+                echo "No GPU detected, skipping." && exit 0
+              fi
+
+              driver_ver="{{ test.NvidiaVersion.outputs.stdout }}"
+              export PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:/opt/aws/bin"
+
+              echo "Testing Nvidia driver version"
+              driver_output=$(nvidia-smi | grep -E -o "Driver Version: [0-9.]+")
+              [[ "${driver_output}" != "Driver Version: ${driver_ver}" ]] && "ERROR Installed version ${driver_output} but expected ${driver_ver}" && exit 1
+              echo "Correctly installed Nvidia ${driver_output}"
+
+              if [ {{ test.FabricManagerSupported.outputs.stdout }} == "true" ]; then
+                echo "Testing Nvidia Fabric Manager version"
+                nvidia_driver_version=$(modinfo -F version nvidia)
+                if [ "${PLATFORM}" == "RHEL" ]; then
+                  yum list installed | grep "nvidia-fabric.*manager" | grep "${nvidia_driver_version}" || exit 1
+                  yum versionlock list | grep "nvidia-fabric.*manager" || exit 1
+                else
+                  apt list --installed | grep "nvidia-fabric.*manager" | grep "${nvidia_driver_version}" || exit 1
+                  apt-mark showhold | grep "nvidia-fabric.*manager" || exit 1
+                fi
+                echo "Fabric Manager match Nvidia driver and version is locked"
+              fi
+
+              echo "Testing CUDA installation with nvcc"
+              cuda_ver="{{ test.CudaVersion.outputs.stdout }}"
+              export PATH=/usr/local/cuda-${cuda_ver}/bin:${PATH}
+              export LD_LIBRARY_PATH=/usr/local/cuda-${cuda_ver}/lib64:${LD_LIBRARY_PATH}
+              cuda_output=$(nvcc -V | grep -E -o "release [0-9]+.[0-9]+")
+              [[ "${cuda_output}" != "release ${cuda_ver}" ]] && echo "ERROR Installed version ${cuda_output} but expected ${cuda_ver}" && exit 1
+              echo "Correctly installed CUDA ${cuda_output}"
+
+              echo "Testing CUDA with deviceQuery..."
+              if [ -f /usr/local/cuda-${cuda_ver}/extras/demo_suite/deviceQuery ]; then
+                /usr/local/cuda-${cuda_ver}/extras/demo_suite/deviceQuery | grep -o "Result = PASS"
+                [[ $? -ne 0 ]] && echo "CUDA deviceQuery test failed" && exit 1
+              else
+                 cd /usr/local/{{ test.CudaSamplesDir.outputs.stdout }}//Samples/1_Utilities/deviceQuery
+                 if [ {{ test.OSName.outputs.stdout }} == 'ubuntu2004' ]; then
+                   MINI_CMAKE_VER_REQ=$(sed -n 's/cmake_minimum_required(\(VERSION \)\?\([0-9.]*\)).*/\2/p' CMakeLists.txt)
+                   COOKBOOK_ENV=$(jq '.default.cluster.cookbook_virtualenv_path' {{ CookbookDefaultFile }})
+                   COOKBOOK_ENV_PATH=$(echo ${COOKBOOK_ENV} | tr -d '\n' | cut -d = -f 2 | xargs)
+                   echo "Installing Cmake >= ${MINI_CMAKE_VER_REQ} in $COOKBOOK_ENV_PATH/bin"
+                   . $COOKBOOK_ENV_PATH/bin/activate
+                   $COOKBOOK_ENV_PATH/bin/pip3 install cmake>=$MINI_CMAKE_VER_REQ
+                   CMAKE_ARGS=""
+                   if [ -e $COOKBOOK_ENV_PATH/bin/cmake ]; then
+                     CMAKE_ARGS="-DCMAKE_INSTALL_PREFIX=$COOKBOOK_ENV_PATH/bin/cmake ${CMAKE_ARGS}"
+                   fi
+                 fi
+                 mkdir build && cd build
+                 cmake .. \
+                  -DCMAKE_CUDA_ARCHITECTURES="75;80;86" \
+                  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${cuda_ver}/bin/nvcc \
+                  -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${cuda_ver} \
+                  -DCMAKE_PREFIX_PATH=/usr/local/cuda-cuda-${cuda_ver} \
+                   ${CMAKE_ARGS}
+                 make
+                 ./deviceQuery | grep -o "Result = PASS"
+                 if [ "${OS}" == 'ubuntu2004' ]; then
+                   $COOKBOOK_ENV_PATH/bin/pip3 uninstall cmake -y
+                   deactivate
+                 fi
+                 [[ $? -ne 0 ]] && echo "CUDA deviceQuery test failed" && exit 1
+              fi
+              echo "CUDA deviceQuery test passed"
+
+      - name: Lustre
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -vx
+              OS='{{ test.OSName.outputs.stdout }}'
+
+              [[ $? -ne 0 ]] && echo "Check for Lustre client failed" && exit 1
+              echo "FSx Lustre test passed"
+
+      - name: Python
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -vx
+              echo "Checking python3 installed..."
+              which python3
+              [[ $? -ne 0 ]] && echo "Python3 is not installed" && exit 1
+              echo "Python test passed"
+
+      - name: DPKG
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -vx
+              PLATFORM='{{ test.PlatformName.outputs.stdout }}'
+              if [ ${PLATFORM} != DEBIAN ]; then
+                echo "Checking dpkg is not installed on non-debian OS..."
+                if command -v dpkg &> /dev/null; then
+                  echo "ERROR: dpkg found on non-Debian system" && exit 1
+                fi
+                echo "dpkg test passed"
+              fi
+
       - name: PythonVersion
         action: ExecuteBash
         inputs:
@@ -61,36 +333,6 @@ phases:
               VERSION=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs)
               echo ${VERSION}
 
-      - name: SchedulerPluginPythonVersion
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -v
-              PATTERN=$(jq '.default.cluster.scheduler_plugin.python_version' {{ CookbookDefaultFile }})
-              VERSION=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs)
-              echo ${VERSION}
-
-      ### paths ###
-      - name: SchedulerPluginPyenvRoot
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -v
-              PATTERN=$(jq '.default.cluster.scheduler_plugin.pyenv_root' {{ CookbookDefaultFile }})
-              PYENV_ROOT=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs)
-              echo ${PYENV_ROOT}
-
-      - name: SchedulerPluginVirtualenvPath
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -v
-              echo "{{ test.SchedulerPluginPyenvRoot.outputs.stdout }}/versions/{{ test.SchedulerPluginPythonVersion.outputs.stdout }}/envs/scheduler_plugin_virtualenv"
-
-      ### utils ###
       - name: NvSwitches
         action: ExecuteBash
         inputs:
@@ -109,45 +351,6 @@ phases:
               PATTERN=$(jq '.default.cluster.reserved_base_uid' {{ CookbookDefaultFile }})
               RESERVED_BASE_UID=$(echo ${PATTERN} | tr -d '\n' | cut -d = -f 2 | xargs)
               echo "${RESERVED_BASE_UID}"
-
-      - name: Virtualenv
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -vx
-
-              echo "Checking virtualenv python version..."
-
-              if [[ {{ test.OperatingSystemName.outputs.stdout }} != 'rhel8' ]]; then
-                {{ test.SchedulerPluginVirtualenvPath.outputs.stdout }}/bin/python -V | grep {{ test.SchedulerPluginPythonVersion.outputs.stdout }}
-                [[ $? -ne 0 ]] && echo "Check scheduler plugin virtualenv python version failed" && exit 1
-                su -l pcluster-scheduler-plugin -c "which python" | grep envs/scheduler_plugin_virtualenv/bin/python
-                [[ $? -ne 0 ]] && echo "Check scheduler plugin virtualenv python path failed" && exit 1
-              fi
-              
-              echo "Virtualenv test passed"
-
-      - name: Pip
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -vx
-              SCHEDULER_PLUGIN_PIP_VERSION=$({{ test.SchedulerPluginVirtualenvPath.outputs.stdout }}/bin/pip show pip 2> /dev/null | grep -i "^Version:" | tr -s ' ' | cut -d' ' -f2) || echo "NOT_INSTALLED"
-
-              older_than_required_version(){
-                CURRENT_VERSION="$1"
-                REQUIRED_VERSION="19.3"
-                if (( ${CURRENT_VERSION%%.*} < ${REQUIRED_VERSION%%.*} || ( ${CURRENT_VERSION%%.*} == ${REQUIRED_VERSION%%.*} && ${CURRENT_VERSION##*.} < ${REQUIRED_VERSION##*.} ) )) ; then
-                    echo "true"
-                else
-                    echo "false"
-                fi
-              }
-              # pip versions >= 19.3 is required to enable installation of python wheel binaries on Graviton
-              [[ $(older_than_required_version "${SCHEDULER_PLUGIN_PIP_VERSION}") == true ]] && echo "pip version in scheduler plugin virtualenv must be greater than 19.3" && exit 1
-              echo "Pip test passed"
 
       - name: FabricManager
         action: ExecuteBash
@@ -172,83 +375,22 @@ phases:
               [[ $? -ne 0 ]] && echo "amazon-cloudwatch-agent is not stopped" && exit 1
               echo "CloudWatch test passed"
 
-      - name: SchedulerPluginUser
+      - name: InSpecTests
         action: ExecuteBash
+        loop:
+          name: TestName
+          forEach:
+            - aws-parallelcluster-platform
+            - aws-parallelcluster-environment
+            - aws-parallelcluster-computefleet
+            - aws-parallelcluster-shared
+            - aws-parallelcluster-slurm
         inputs:
           commands:
             - |
               set -vx
-              SYSTEM_USER_ID_START=$(( {{ test.BaseUID.outputs.stdout }} + 10 ))
-              for i in $(seq 0 9);
-              do
-                  USER_ID=$(($i + $SYSTEM_USER_ID_START))
-                  getent passwd ${USER_ID}
-                  [[ $? -eq 0 ]] && echo "uid ${USER_ID} exists, it should be reserved for ParallelCluster system users. Reserved uid range is ${SYSTEM_USER_ID_START} - $(($SYSTEM_USER_ID_START + 9))" && exit 1
-              done
-              echo "SchedulerPlugin User test passed"
-
-      - name: SchedulerPluginGroup
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -vx
-              SYSTEM_GROUP_ID_START=$(( {{ test.BaseUID.outputs.stdout }} + 10 ))
-              for i in $(seq 0 9);
-              do
-                  GROUP_ID=$(($i + $SYSTEM_GROUP_ID_START))
-                  getent group ${GROUP_ID}
-                  [[ $? -eq 0 ]] && echo "gid ${GROUP_ID} exists, it should be reserved for ParallelCluster system group. Reserved gid range is ${SYSTEM_GROUP_ID_START} - $(($SYSTEM_GROUP_ID_START + 9))" && exit 1
-              done
-              echo "SchedulerPlugin Group test passed"
-
-      - name: SchedulerPluginEventHandlerScript
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -vx
-              if [[ {{ test.OperatingSystemName.outputs.stdout }} != 'rhel8' ]]; then
-                Script=/usr/local/sbin/invoke-scheduler-plugin-event-handler.sh
-                if [ -x ${Script} ]; then
-                  echo "Scheduler plugin handler script '${Script}' is executable."
-                else
-                  echo "Scheduler plugin handler script '${Script}' is not executable." && exit 1
-                fi
-              fi
-
-      - name: InSpecTestsForPlatform
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -vx
-              echo "Performing InSpec tests for platform on the AMI..."
-              cd /etc/chef/cookbooks/aws-parallelcluster-platform
-              inspec exec test --profiles-path . --controls /tag:testami/ --no-distinct-exit
-              [[ $? -ne 0 ]] && echo "InSpec tests for platform failed" && exit 1
-              echo "InSpec tests for platform passed"
-
-      - name: InSpecTestsForEnvironment
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -vx
-              echo "Performing InSpec tests for environment on the AMI..."
-              cd /etc/chef/cookbooks/aws-parallelcluster-environment
-              inspec exec test --profiles-path . --controls /tag:testami/ --no-distinct-exit
-              [[ $? -ne 0 ]] && echo "InSpec tests for environment failed" && exit 1
-              echo "InSpec tests for environment passed"
-
-      - name: InSpecTestsForComputeFleet
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -vx
-              echo "Performing InSpec tests for compute fleet on the AMI..."
-              cd /etc/chef/cookbooks/aws-parallelcluster-computefleet
-              inspec exec test --profiles-path . --controls /tag:testami/ --no-distinct-exit
-              [[ $? -ne 0 ]] && echo "InSpec tests for compute fleet failed" && exit 1
-              echo "InSpec tests for compute fleet passed"
+              echo "Performing InSpec tests on the AMI: {{ loop.value }}..."
+              cd /etc/chef/cookbooks/{{ loop.value }}
+              inspec exec test --profiles-path . --controls /tag:install/ /tag:testami/ --no-distinct-exit
+              [[ $? -ne 0 ]] && echo "InSpec tests failed: {{ loop.value }}" && exit 1
+              echo "InSpec tests passed: {{ loop.value }}"

@@ -13,21 +13,30 @@ import logging
 
 import boto3
 import pytest
-import utils
-from assertpy import assert_that
+from assertpy import assert_that, soft_assertions
 from cfn_stacks_factory import CfnStack
-from constants import OSU_BENCHMARK_VERSION
+from constants import OSU_BENCHMARK_VERSION, UNSUPPORTED_OSES_FOR_DCV
 from fabric import Connection
 from remote_command_executor import RemoteCommandExecutor
 from troposphere import Template
 from troposphere.ec2 import EIP
-from utils import generate_stack_name, get_compute_nodes_instance_ids, get_username_for_os, render_jinja_template
+from utils import (
+    check_pcluster_list_cluster_log_streams,
+    generate_stack_name,
+    get_compute_nodes_instance_ids,
+    get_compute_nodes_subnet_ids,
+    get_username_for_os,
+    is_dcv_supported,
+    render_jinja_template,
+)
 
 from tests.common.assertions import (
     assert_lambda_vpc_settings_are_correct,
+    assert_msg_in_log,
     assert_no_errors_in_logs,
     assert_no_msg_in_logs,
     wait_for_num_instances_in_cluster,
+    wait_for_num_instances_in_queue,
 )
 from tests.common.osu_common import compile_osu
 from tests.common.schedulers_common import SlurmCommands
@@ -35,7 +44,6 @@ from tests.common.storage.constants import StorageType
 from tests.common.utils import get_default_vpc_security_group
 from tests.storage.storage_common import (
     assert_fsx_lustre_correctly_mounted,
-    get_efs_ids,
     get_fsx_ids,
     test_efs_correctly_mounted,
     verify_directory_correctly_shared,
@@ -106,8 +114,7 @@ def _test_shared_storage_in_private_subnet(
 ):
     """Test FSx can be mounted in private subnet."""
     if storage_type == StorageType.STORAGE_EFS:
-        fs_id = get_efs_ids(cluster, region)[0]
-        test_efs_correctly_mounted(remote_command_executor, mount_dir, region, fs_id)
+        test_efs_correctly_mounted(remote_command_executor, mount_dir)
     elif storage_type == StorageType.STORAGE_FSX:
         fs_id = get_fsx_ids(cluster, region)[0]
         assert_fsx_lustre_correctly_mounted(remote_command_executor, mount_dir, region, fs_id)
@@ -136,6 +143,7 @@ def test_cluster_in_no_internet_subnet(
     script failure, then run osu latency and checks that no failures occur.
     """
     bucket_name = s3_bucket_factory()
+    dcv_supported = is_dcv_supported(region) and os not in UNSUPPORTED_OSES_FOR_DCV
     _upload_pre_install_script(bucket_name, test_datadir)
 
     vpc_default_security_group_id = get_default_vpc_security_group(
@@ -147,6 +155,7 @@ def test_cluster_in_no_internet_subnet(
         vpc_default_security_group_id=vpc_default_security_group_id,
         bucket_name=bucket_name,
         architecture=architecture,
+        dcv_supported=dcv_supported,
     )
     cluster = clusters_factory(cluster_config)
 
@@ -163,8 +172,8 @@ def test_cluster_in_no_internet_subnet(
     _check_hostname(remote_command_executor)
     _run_prolog_epilog_jobs(remote_command_executor, slurm_commands)
     _run_mpi_jobs(mpi_variants, remote_command_executor, test_datadir, slurm_commands, cluster, region)
-    utils.check_pcluster_list_cluster_log_streams(cluster, os)
-    assert_no_errors_in_logs(remote_command_executor, scheduler)
+    check_pcluster_list_cluster_log_streams(cluster, os)
+    assert_no_errors_in_logs(remote_command_executor, scheduler, skip_ice=True)
     logging.info("Checking compute node is scaled down after scaledown idle time")
     wait_for_num_instances_in_cluster(cluster.cfn_name, region, 1)
 
@@ -232,3 +241,32 @@ def _run_mpi_jobs(mpi_variants, remote_command_executor, test_datadir, slurm_com
         slurm_commands.assert_job_succeeded(job_id)
     logging.info("Checking cluster has two nodes after running MPI jobs")  # 1 static node + 1 dynamic node
     assert_that(len(get_compute_nodes_instance_ids(cluster.cfn_name, region))).is_equal_to(2)
+
+
+@pytest.mark.usefixtures("instance")
+def test_cluster_with_subnet_prioritization(
+    region, os, pcluster_config_reader, clusters_factory, vpc_stack, scheduler_commands_factory
+):
+    # Create cluster with subnet prioritization
+    init_config_file = pcluster_config_reader(config_file="pcluster.config.yaml")
+    cluster = clusters_factory(init_config_file)
+
+    remote_command_executor = RemoteCommandExecutor(cluster)
+    scheduler_commands = scheduler_commands_factory(remote_command_executor)
+    public_subnets = vpc_stack.get_all_public_subnets()
+    queues = ["queue1"]
+    logging.info(f"Public subnets: {public_subnets}")
+    # Check that all instances are launched in the subnet with the highest priority
+    for queue in queues:
+        scheduler_commands.submit_command("sleep 60", nodes=5, partition=queue)
+        wait_for_num_instances_in_queue(cluster.cfn_name, cluster.region, desired=5, queue=queue)
+
+        subnet_ids = get_compute_nodes_subnet_ids(cluster.cfn_name, region, node_type="Compute", queue_name=queue)
+        with soft_assertions():
+            for subnet_id in subnet_ids:
+                assert_that(subnet_id).is_equal_to(public_subnets[0])
+
+    # Check that the CreateFleet request contains priorities for each subnet
+    slurm_resume_log = "/var/log/parallelcluster/slurm_resume.log"
+    assert_msg_in_log(remote_command_executor, slurm_resume_log, f"'SubnetId': '{public_subnets[0]}', 'Priority': 0.0")
+    assert_msg_in_log(remote_command_executor, slurm_resume_log, f"'SubnetId': '{public_subnets[1]}', 'Priority': 1.0")

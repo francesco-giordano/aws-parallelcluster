@@ -13,13 +13,16 @@ from unittest.mock import PropertyMock, call
 from assertpy import assert_that
 
 from pcluster.aws.aws_resources import ImageInfo
+from pcluster.config.common import CapacityType
 from pcluster.schemas.cluster_schema import ClusterSchema
 from pcluster.utils import load_yaml_dict
 from pcluster.validators import (
     cluster_validators,
     database_validators,
+    dev_settings_validators,
     ebs_validators,
     ec2_validators,
+    feature_validators,
     fsx_validators,
     iam_validators,
     instances_validators,
@@ -27,6 +30,7 @@ from pcluster.validators import (
     monitoring_validators,
     networking_validators,
     s3_validators,
+    secret_validators,
     slurm_settings_validator,
     tags_validators,
 )
@@ -64,6 +68,7 @@ def _mock_all_validators(mocker, additional_modules=None):
     modules = [
         cluster_validators,
         database_validators,
+        dev_settings_validators,
         ebs_validators,
         ec2_validators,
         fsx_validators,
@@ -75,6 +80,8 @@ def _mock_all_validators(mocker, additional_modules=None):
         s3_validators,
         slurm_settings_validator,
         tags_validators,
+        secret_validators,
+        feature_validators,
     ]
     if additional_modules:
         modules += additional_modules
@@ -146,7 +153,10 @@ def test_slurm_all_validators_are_called(test_datadir, mocker):
     )
 
     mock_aws_api(mocker)
-
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_and_reservation_type_from_capacity_reservation",
+        return_value=("p6e-gb200.36xlarge", "capacity-block"),
+    )
     # Need to load two configuration files to execute all validators because there are mutually exclusive parameters.
     _load_and_validate(test_datadir / "slurm_1.yaml")
     _load_and_validate(test_datadir / "slurm_2.yaml")
@@ -155,6 +165,9 @@ def test_slurm_all_validators_are_called(test_datadir, mocker):
     for m in mockers:
         if m["name"] in ["TagKeyValidator", "ClusterNameValidator", "InstanceProfileValidator", "RoleValidator"]:
             # ToDo: Reserved tag keys to be aligned between cluster and image builder
+            continue
+        if m["name"] in ["CliAttributeOverridesValidator"]:
+            # Image-builder-only validator (DevSettings/CliAttributeOverrides); not run on cluster config.
             continue
         print(f"Checking validator of class \"{m['name']}\" is called")
         m["mocker"].assert_called()
@@ -168,11 +181,15 @@ def test_slurm_validators_are_called_with_correct_argument(test_datadir, mocker)
     """Verify that validators are called with proper argument during validation."""
     # To avoid failure of the test as soon as a new validator is added.
     _mock_all_validators(mocker)
-
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_and_reservation_type_from_capacity_reservation",
+        return_value=("p6e-gb200.36xlarge", "capacity-block"),
+    )
     validators_path = "pcluster.validators"
 
     cluster_validators = validators_path + ".cluster_validators"
-    scheduler_os_validator = mocker.patch(cluster_validators + ".SchedulerOsValidator._validate", return_value=[])
+    feature_validators = validators_path + ".feature_validators"
+    feature_region_validator = mocker.patch(feature_validators + ".FeatureRegionValidator._validate", return_value=[])
     compute_resource_size_validator = mocker.patch(
         cluster_validators + ".ComputeResourceSizeValidator._validate", return_value=[]
     )
@@ -190,6 +207,9 @@ def test_slurm_validators_are_called_with_correct_argument(test_datadir, mocker)
     )
     number_of_storage_validator = mocker.patch(
         cluster_validators + ".NumberOfStorageValidator._validate", return_value=[]
+    )
+    shared_storage_efs_settings_validator = mocker.patch(
+        cluster_validators + ".SharedStorageEfsSettingsValidator._validate", return_value=[]
     )
     deletion_policy_validator = mocker.patch(cluster_validators + ".DeletionPolicyValidator._validate", return_value=[])
     root_volume_encryption_consistency_validator = mocker.patch(
@@ -209,6 +229,7 @@ def test_slurm_validators_are_called_with_correct_argument(test_datadir, mocker)
     )
 
     networking_validators = validators_path + ".networking_validators"
+
     security_groups_validator = mocker.patch(
         networking_validators + ".SecurityGroupsValidator._validate", return_value=[]
     )
@@ -265,6 +286,10 @@ def test_slurm_validators_are_called_with_correct_argument(test_datadir, mocker)
     compute_resource_tags_validator = mocker.patch(
         tags_validators + ".ComputeResourceTagsValidator._validate", return_value=[]
     )
+    dev_settings_validators = validators_path + ".dev_settings_validators"
+    extra_chef_attributes_validator = mocker.patch(
+        dev_settings_validators + ".ExtraChefAttributesValidator._validate", return_value=[]
+    )
     mocker.patch(
         "pcluster.config.cluster_config.HeadNode.architecture", new_callable=PropertyMock(return_value="x86_64")
     )
@@ -276,84 +301,87 @@ def test_slurm_validators_are_called_with_correct_argument(test_datadir, mocker)
         "pcluster.aws.ec2.Ec2Client.describe_image",
         return_value=ImageInfo({"BlockDeviceMappings": [{"Ebs": {"VolumeSize": 35}}]}),
     )
+    mocker.patch("pcluster.aws.ec2.Ec2Client.describe_capacity_reservations", return_value=[])
+    capacity_reservation_validator = mocker.patch(
+        ec2_validators + ".CapacityReservationValidator._validate", return_value=[]
+    )
+    capacity_type_validator = mocker.patch(ec2_validators + ".CapacityTypeValidator._validate", return_value=[])
 
     mock_aws_api(mocker)
 
     _load_and_validate(test_datadir / "slurm.yaml")
 
     # Assert validators are called
-    scheduler_os_validator.assert_has_calls([call(os="alinux2", scheduler="slurm")])
     compute_resource_size_validator.assert_has_calls(
         [
             # Defaults of min_count=0, max_count=10
-            call(min_count=0, max_count=5),
-            call(min_count=0, max_count=10),
-            call(min_count=0, max_count=10),
-            call(min_count=0, max_count=10),
+            call(min_count=0, max_count=10, capacity_type=CapacityType.SPOT),
+            call(min_count=0, max_count=10, capacity_type=CapacityType.SPOT),
+            call(min_count=0, max_count=5, capacity_type=CapacityType.ONDEMAND),
+            call(min_count=0, max_count=10, capacity_type=CapacityType.ONDEMAND),
+            call(min_count=0, max_count=10, capacity_type=CapacityType.ONDEMAND),
+            call(min_count=5, max_count=5, capacity_type=CapacityType.CAPACITY_BLOCK),
+            call(min_count=3, max_count=3, capacity_type=CapacityType.CAPACITY_BLOCK),
         ],
         any_order=True,
     )
     max_count_validator.assert_has_calls(
         [
-            call(resources_length=2, max_length=50, resource_name="SlurmQueues"),
-            call(resources_length=5, max_length=50, resource_name="ComputeResources per Cluster"),
+            call(resources_length=3, max_length=50, resource_name="SlurmQueues"),
+            call(resources_length=7, max_length=50, resource_name="ComputeResources per Cluster"),
             call(resources_length=3, max_length=50, resource_name="ComputeResources per Queue"),
+            call(resources_length=2, max_length=50, resource_name="ComputeResources per Queue"),
             call(resources_length=2, max_length=50, resource_name="ComputeResources per Queue"),
         ],
         any_order=True,
     )
-    key_pair_validator.assert_has_calls([call(key_name="ec2-key-name")])
+    key_pair_validator.assert_has_calls([call(key_name="ec2-key-name", os="alinux2023")])
     instance_type_validator.assert_has_calls([call(instance_type="c5d.xlarge")])
     instance_type_base_ami_compatible_validator.assert_has_calls(
         [
             call(instance_type="c5d.xlarge", image="ami-12345678"),
-            call(instance_type="t2.large", image="ami-12345678"),
+            call(instance_type="t3.large", image="ami-12345678"),
             call(instance_type="c4.2xlarge", image="ami-12345678"),
             call(instance_type="c5.4xlarge", image="ami-12345678"),
             call(instance_type="c5d.xlarge", image="ami-12345678"),
-            call(instance_type="t2.large", image="ami-12345678"),
+            call(instance_type="t3.large", image="ami-12345678"),
+            call(instance_type="t3.xlarge", image="ami-12345678"),
         ],
         any_order=True,
     )
-    subnets_validator.assert_has_calls([call(subnet_ids=["subnet-23456789", "subnet-12345678"])])
+    subnets_validator.assert_has_calls([call(subnet_ids=["subnet-12345678", "subnet-23456789", "subnet-12345678"])])
     single_instance_type_subnet_validator.assert_has_calls(
         [
-            call(
-                queue_name="queue1",
-                subnet_ids=["subnet-23456789"],
-            ),
-            call(
-                queue_name="queue2",
-                subnet_ids=["subnet-23456789"],
-            ),
+            call(queue_name="queue1", subnet_ids=["subnet-23456789"]),
+            call(queue_name="queue2", subnet_ids=["subnet-23456789"]),
         ]
     )
     security_groups_validator.assert_has_calls(
         [call(security_group_ids=None), call(security_group_ids=None)], any_order=True
     )
-    architecture_os_validator.assert_has_calls(
-        [call(os="alinux2", architecture="x86_64", custom_ami="ami-12345678", ami_search_filters=None)]
-    )
+    architecture_os_validator.assert_has_calls([call(os="alinux2023", architecture="x86_64")])
     _assert_instance_architecture(
         expected_instance_architecture_validator_input=[
-            {"instance_types": ["t2.large"], "architecture": "x86_64"},
+            {"instance_types": ["t3.large"], "architecture": "x86_64"},
             {"instance_types": ["c4.2xlarge"], "architecture": "x86_64"},
             {"instance_types": ["c5.4xlarge"], "architecture": "x86_64"},
             {"instance_types": ["c5d.xlarge"], "architecture": "x86_64"},
-            {"instance_types": ["t2.large"], "architecture": "x86_64"},
+            {"instance_types": ["t3.large"], "architecture": "x86_64"},
+            {"instance_types": ["t3.xlarge"], "architecture": "x86_64"},
+            {"instance_types": ["t3.xlarge"], "architecture": "x86_64"},
         ],
         validator=instance_architecture_compatibility_validator,
     )
 
     root_volume_encryption_consistency_validator.assert_has_calls(
-        [call(encryption_settings=[("queue1", True), ("queue2", True)])]
+        [call(encryption_settings=[("queue1", True), ("queue2", True), ("queue3", True)])]
     )
     ebs_volume_type_size_validator.assert_has_calls([call(volume_type="gp3", volume_size=35)])
     kms_key_validator.assert_has_calls([call(kms_key_id="1234abcd-12ab-34cd-56ef-1234567890ab")])
     kms_key_id_encrypted_validator.assert_has_calls(
         [call(kms_key_id="1234abcd-12ab-34cd-56ef-1234567890ab", encrypted=True)]
     )
-    fsx_architecture_os_validator.assert_has_calls([call(architecture="x86_64", os="alinux2")])
+    fsx_architecture_os_validator.assert_has_calls([call(architecture="x86_64", os="alinux2023")])
     # Scratch mount directories are retrieved from a set. So the order of them is not guaranteed.
     # The first item in call_args is regular args, the second item is keyword args.
     shared_storage_name_mount_dir_tuple_list = duplicate_mount_dir_validator.call_args[1][
@@ -380,8 +408,61 @@ def test_slurm_validators_are_called_with_correct_argument(test_datadir, mocker)
         ],
         any_order=True,
     )
+    shared_storage_efs_settings_validator.assert_has_calls(
+        [call(shared_storage_type="Ebs", shared_storage_efs_settings=None)],
+        any_order=True,
+    )
+    # capacity reservation validators
+    capacity_reservation_validator.assert_has_calls(
+        [
+            call(
+                capacity_reservation_id="cr-34567",
+                instance_types=["t3.large"],
+                os="alinux2023",
+                is_flexible=True,
+                subnet="subnet-23456789",
+                capacity_type=CapacityType.ONDEMAND,
+            ),
+            call(
+                capacity_reservation_id="cr-12345",
+                instance_types=["t3.xlarge"],
+                os="alinux2023",
+                is_flexible=True,
+                subnet="subnet-23456789",
+                capacity_type=CapacityType.CAPACITY_BLOCK,
+            ),
+            call(
+                capacity_reservation_id="cr-23456",
+                instance_types=["t3.xlarge"],
+                os="alinux2023",
+                is_flexible=False,
+                subnet="subnet-23456789",
+                capacity_type=CapacityType.CAPACITY_BLOCK,
+            ),
+        ]
+    )
+    capacity_type_validator.assert_has_calls(
+        [
+            call(capacity_type=CapacityType.SPOT, instance_type="t3.large", capacity_reservation_id=None),
+            call(capacity_type=CapacityType.SPOT, instance_type="c4.2xlarge", capacity_reservation_id=None),
+            call(capacity_type=CapacityType.ONDEMAND, instance_type="c5.4xlarge", capacity_reservation_id=None),
+            call(capacity_type=CapacityType.ONDEMAND, instance_type="c5d.xlarge", capacity_reservation_id=None),
+            call(capacity_type=CapacityType.ONDEMAND, instance_type="t3.large", capacity_reservation_id="cr-34567"),
+            call(
+                capacity_type=CapacityType.CAPACITY_BLOCK, instance_type="t3.xlarge", capacity_reservation_id="cr-12345"
+            ),
+            call(
+                capacity_type=CapacityType.CAPACITY_BLOCK, instance_type="t3.xlarge", capacity_reservation_id="cr-23456"
+            ),
+        ],
+        any_order=True,
+    )
+
+    extra_chef_attributes_validator.assert_has_calls([call(extra_chef_attributes='{"attr1": {"attr2": "value"}}')])
+
     # No assertion on the argument for minor validators
     name_validator.assert_called()
+    feature_region_validator.assert_called()
     fsx_s3_validator.assert_called()
     fsx_backup_options_validator.assert_called()
     fsx_storage_type_options_validator.assert_called()

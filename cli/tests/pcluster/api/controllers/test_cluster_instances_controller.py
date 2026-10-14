@@ -14,7 +14,7 @@ from pcluster.utils import to_iso_timestr, to_utc_datetime
 
 
 def cfn_describe_instances_mock_response(
-    instance_type="t2.micro", queue_name=None, node_type="HeadNode", cluster_name="clustername"
+    instance_type="t3.micro", queue_name=None, node_type="HeadNode", cluster_name="clustername"
 ):
     instance_data = {
         "InstanceId": "i-0a9342a0000000000",
@@ -42,7 +42,7 @@ def describe_cluster_instances_mock_response(instances):
         node_type = instance.get("node_type") or "HeadNode"
         response = {
             "instanceId": "i-0a9342a0000000000",
-            "instanceType": "t2.micro",
+            "instanceType": "t3.micro",
             "launchTime": to_iso_timestr(to_utc_datetime("2021-04-30T00:00:00+00:00")),
             "nodeType": node_type,
             "privateIpAddress": "10.0.0.79",
@@ -124,10 +124,11 @@ class TestDescribeClusterInstances:
         [
             ("clustername", None, None),
             ("clustername", NodeType.HEADNODE, None),
+            ("clustername", NodeType.LOGINNODE, None),
             ("clustername", NodeType.COMPUTENODE, None),
             ("clustername", None, "queuename"),
         ],
-        ids=["all instances", "head only", "compute only", "queuename only"],
+        ids=["all instances", "head only", "login only", "compute only", "queuename only"],
     )
     def test_filters(self, mocker, client, cluster_name, node_type, queue_name):
         describe_instances_mock = mocker.patch(
@@ -147,6 +148,8 @@ class TestDescribeClusterInstances:
             if node_type:
                 if node_type == NodeType.HEADNODE:
                     expected_value = "HeadNode"
+                elif node_type == NodeType.LOGINNODE:
+                    expected_value = "LoginNode"
                 else:
                     expected_value = "Compute"
             else:
@@ -159,7 +162,7 @@ class TestDescribeClusterInstances:
         [
             (
                 {"node_type": "wrong_node_type"},
-                {"message": "Bad Request: 'wrong_node_type' is not one of ['HeadNode', 'ComputeNode']"},
+                {"message": "Bad Request: 'wrong_node_type' is not one of ['HeadNode', 'ComputeNode', 'LoginNode']"},
             ),
             (
                 {"region": "eu-west-"},
@@ -225,14 +228,6 @@ class TestDeleteClusterInstances:
     @pytest.mark.parametrize(
         "stack_param, force, expected_response",
         [
-            (
-                {"scheduler": "awsbatch"},
-                False,
-                {
-                    "message": "Bad Request: the delete cluster instances operation does not support "
-                    "AWS Batch clusters."
-                },
-            ),
             (
                 {"version": "2.11.0"},
                 True,

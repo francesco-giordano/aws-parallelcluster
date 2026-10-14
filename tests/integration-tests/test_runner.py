@@ -27,7 +27,13 @@ from conftest_networking import unmarshal_az_override
 from framework.tests_configuration.config_renderer import dump_rendered_config_file, read_config_file
 from framework.tests_configuration.config_utils import get_all_regions
 from framework.tests_configuration.config_validator import assert_valid_config
-from reports_generator import generate_cw_report, generate_json_report, generate_junitxml_merged_report
+from reports_generator import (
+    generate_cw_report,
+    generate_json_report,
+    generate_junitxml_merged_report,
+    generate_launch_time_report,
+    generate_performance_report,
+)
 from retrying import retry
 from utils import InstanceTypesData
 
@@ -50,6 +56,7 @@ TEST_DEFAULTS = {
     "instances": [],
     "dry_run": False,
     "reports": [],
+    "generate_historical_report": False,
     "cw_region": "us-east-1",
     "cw_namespace": "ParallelCluster/IntegrationTests",
     "cw_timestamp_day_start": False,
@@ -57,12 +64,16 @@ TEST_DEFAULTS = {
     "output_dir": "tests_outputs",
     "custom_node_url": None,
     "custom_cookbook_url": None,
+    "extra_chef_attributes": None,
     "createami_custom_cookbook_url": None,
     "cookbook_git_ref": None,
     "node_git_ref": None,
     "ami_owner": None,
+    "available_amis_oss_x86": [],
+    "available_amis_oss_arm": [],
     "createami_custom_node_url": None,
     "custom_awsbatchcli_url": None,
+    "pcluster_installer_path": None,
     "custom_ami": None,
     "pre_install": None,
     "post_install": None,
@@ -70,12 +81,14 @@ TEST_DEFAULTS = {
     "api_uri": None,
     "cluster": None,
     "policies_uri": None,
+    "api_stack": None,
     "api_definition_s3_uri": None,
     "api_infrastructure_s3_uri": None,
     "no_delete": False,
     "benchmarks": False,
     "benchmarks_target_capacity": 200,
     "benchmarks_max_time": 30,
+    "scaling_test_config": None,
     "stackname_suffix": "",
     "delete_logs_on_success": False,
     "tests_root_dir": "./tests",
@@ -85,10 +98,23 @@ TEST_DEFAULTS = {
     "directory_stack_name": None,
     "ldaps_nlb_stack_name": None,
     "slurm_database_stack_name": None,
+    "slurm_dbd_stack_name": None,
+    "munge_key_secret_arn": None,
     "external_shared_storage_stack_name": None,
+    "bucket_name": None,
+    "custom_security_groups_stack_name": None,
     "cluster_custom_resource_service_token": None,
     "resource_bucket": None,
     "lambda_layer_source": None,
+    "force_run_instances": False,
+    "force_elastic_ip": False,
+    "retain_ad_stack": False,
+    "global_build_number": 0,
+    "proxy_stack": None,
+    "patch_ami_stack": None,
+    "build_image_roles_stack": None,
+    "capacity_reservation_id": None,
+    "skip_ddb_metadata": False,
 }
 
 
@@ -135,6 +161,11 @@ def _init_argparser():
         "--tests-root-dir",
         help="Root dir where integration tests are defined",
         default=TEST_DEFAULTS.get("tests_root_dir"),
+    )
+    parser.add_argument(
+        "--global-build-number",
+        help="The build number passed from the testing pipelines",
+        default=TEST_DEFAULTS.get("global_build_number"),
     )
 
     dimensions_group = parser.add_argument_group("Test dimensions")
@@ -200,6 +231,12 @@ def _init_argparser():
         default=TEST_DEFAULTS.get("reports"),
     )
     reports_group.add_argument(
+        "--generate-historical-report",
+        help="Generate historical report for launch time and performance",
+        action="store_true",
+        default=TEST_DEFAULTS.get("generate_historical_report"),
+    )
+    reports_group.add_argument(
         "--cw-region", help="Region where to publish CloudWatch metrics", default=TEST_DEFAULTS.get("cw_region")
     )
     reports_group.add_argument(
@@ -231,6 +268,12 @@ def _init_argparser():
         type=_is_url,
     )
     custom_group.add_argument(
+        "--extra-chef-attributes",
+        help="Base64-encoded ExtraChefAttributes JSON to inject into "
+        "DevSettings.Cookbook.ExtraChefAttributes of test clusters.",
+        default=TEST_DEFAULTS.get("extra_chef_attributes"),
+    )
+    custom_group.add_argument(
         "--createami-custom-cookbook-url",
         help="URL to a custom cookbook package for the createami command.",
         default=TEST_DEFAULTS.get("createami_custom_cookbook_url"),
@@ -247,6 +290,11 @@ def _init_argparser():
         help="URL to a custom awsbatch cli package.",
         default=TEST_DEFAULTS.get("custom_awsbatchcli_url"),
         type=_is_url,
+    )
+    custom_group.add_argument(
+        "--pcluster-installer-path",
+        help="Path to ParallelCluster installer.",
+        default=TEST_DEFAULTS.get("pcluster_installer_path"),
     )
     custom_group.add_argument(
         "--pre-install", help="URL to a pre install script", default=TEST_DEFAULTS.get("pre_install")
@@ -286,6 +334,20 @@ def _init_argparser():
         help="Override the owner value when fetching AMIs to use with cluster. By default pcluster uses amazon.",
         default=TEST_DEFAULTS.get("ami_owner"),
     )
+    ami_group.add_argument(
+        "--available-amis-oss-x86",
+        help="(optional) set to available x86 AMIs OSes in the account. "
+        "If not specified, all supported OSes will be used.",
+        default=TEST_DEFAULTS.get("available_amis_oss_x86"),
+        nargs="*",
+    )
+    ami_group.add_argument(
+        "--available-amis-oss-arm",
+        help="(optional) set to available ARM AMIs OSes in the account. "
+        "If not specified, all supported OSes will be used.",
+        default=TEST_DEFAULTS.get("available_amis_oss_arm"),
+        nargs="*",
+    )
 
     banchmarks_group = parser.add_argument_group("Benchmarks")
     banchmarks_group.add_argument(
@@ -307,13 +369,19 @@ def _init_argparser():
         type=int,
     )
 
+    scaling_group = parser.add_argument_group("Scaling stress test options")
+    scaling_group.add_argument(
+        "--scaling-test-config",
+        help="config file with scaling test parameters",
+        default=TEST_DEFAULTS.get("scaling_test_config"),
+    )
+
     custom_resource_group = parser.add_argument_group("CloudFormation / Custom Resource options")
     custom_resource_group.add_argument(
         "--cluster-custom-resource-service-token",
         help="ServiceToken (ARN) Cluster CloudFormation custom resource provider",
         default=TEST_DEFAULTS.get("cluster_custom_resource_service_token"),
     )
-
     custom_resource_group.add_argument(
         "--resource-bucket",
         help="Name of bucket to use to to retrieve standard hosted resources like CloudFormation templates.",
@@ -359,6 +427,12 @@ def _init_argparser():
         default=TEST_DEFAULTS.get("no_delete"),
     )
     debug_group.add_argument(
+        "--retain-on-failure",
+        type=int,
+        help="Retain cluster, VPC, IAM, and S3 bucket stacks for up to N failing tests (0=disabled, max 5).",
+        default=TEST_DEFAULTS.get("retain_on_failure"),
+    )
+    debug_group.add_argument(
         "--delete-logs-on-success",
         help="delete CloudWatch logs when a test succeeds",
         action="store_true",
@@ -386,20 +460,86 @@ def _init_argparser():
         default=TEST_DEFAULTS.get("directory_stack_name"),
     )
     debug_group.add_argument(
-        "--ldaps-nlb-stack-name",
-        help="Name of CFN stack providing NLB to enable use of LDAPS with a Simple AD directory when testing AD "
-        "integration feature.",
-        default=TEST_DEFAULTS.get("ldaps_nlb_stack_name"),
-    )
-    debug_group.add_argument(
         "--slurm-database-stack-name",
         help="Name of CFN stack providing database stack to be used for testing Slurm accounting feature.",
         default=TEST_DEFAULTS.get("slurm_database_stack_name"),
     )
     debug_group.add_argument(
+        "--slurm-dbd-stack-name",
+        help="Name of CFN stack providing external Slurm dbd stack to be used for testing Slurm accounting feature.",
+        default=TEST_DEFAULTS.get("slurm_dbd_stack_name"),
+    )
+    debug_group.add_argument(
+        "--munge-key-secret-arn",
+        help="ARN of the secret containing the munge key to be used for testing Slurm accounting feature.",
+        default=TEST_DEFAULTS.get("munge_key_secret_arn"),
+    )
+    debug_group.add_argument(
         "--external-shared-storage-stack-name",
         help="Name of existing external shared storage stack.",
         default=TEST_DEFAULTS.get("external_shared_storage_stack_name"),
+    )
+    debug_group.add_argument(
+        "--bucket-name",
+        help="Name of existing bucket.",
+        default=TEST_DEFAULTS.get("bucket_name"),
+    )
+    debug_group.add_argument(
+        "--custom-security-groups-stack-name",
+        help="Name of existing custom security groups stack.",
+        default=TEST_DEFAULTS.get("custom_security_groups_stack_name"),
+    )
+
+    debug_group.add_argument(
+        "--force-run-instances",
+        help="Force the usage of EC2 run-instances boto3 API instead of create-fleet for compute fleet scaling up."
+        "Note: If there are multiple instances in the list, only the first will be used.",
+        default=TEST_DEFAULTS.get("force_run_instances"),
+        action="store_true",
+    )
+    debug_group.add_argument(
+        "--force-elastic-ip",
+        help="Force the usage of Elastic IP for Multi network interface EC2 instances",
+        default=TEST_DEFAULTS.get("force_elastic_ip"),
+        action="store_true",
+    )
+    debug_group.add_argument(
+        "--retain-ad-stack",
+        action="store_true",
+        help="Retain AD stack and corresponding VPC stack.",
+        default=TEST_DEFAULTS.get("retain_ad_stack"),
+    )
+    debug_group.add_argument(
+        "--proxy-stack",
+        help="Name of CFN stack providing a Proxy environment.",
+        default=TEST_DEFAULTS.get("proxy_stack"),
+    )
+    debug_group.add_argument(
+        "--patch-ami-stack",
+        help="Name of an existing CFN stack that builds the patched AMI. "
+        "When provided, the patching tests reuse this stack instead of creating and deleting a new one.",
+        default=TEST_DEFAULTS.get("patch_ami_stack"),
+    )
+    debug_group.add_argument(
+        "--build-image-roles-stack",
+        help="Name of CFN stack providing build image permissions.",
+        default=TEST_DEFAULTS.get("build_image_roles_stack"),
+    )
+    debug_group.add_argument(
+        "--api-stack",
+        help="Name of CFN stack providing the ParallelCluster API infrastructure.",
+        default=TEST_DEFAULTS.get("api_stack"),
+    )
+    debug_group.add_argument(
+        "--capacity-reservation-id",
+        help="Use an existing capacity reservation.",
+        default=TEST_DEFAULTS.get("capacity_reservation_id"),
+    )
+    debug_group.add_argument(
+        "--skip-ddb-metadata",
+        action="store_true",
+        help="Skip the setup and push of DDB metadata.",
+        default=TEST_DEFAULTS.get("skip_ddb_metadata"),
     )
 
     return parser
@@ -432,13 +572,17 @@ def _is_url(value):
         raise argparse.ArgumentTypeError("'{0}' is not a valid url".format(value))
 
 
-def _test_config_file(value):
-    _is_file(value)
+def _test_config_file(args, config_args=None):
+    config_file_path = args.tests_config
+    _is_file(config_file_path)
     try:
-        config = read_config_file(value)
+        if config_args:
+            config = read_config_file(config_file_path, args=args, **config_args)
+        else:
+            config = read_config_file(config_file_path, args=args)
         return config
     except Exception:
-        raise argparse.ArgumentTypeError("'{0}' is not a valid test config".format(value))
+        raise argparse.ArgumentTypeError("'{0}' is not a valid test config".format(config_file_path))
 
 
 def _join_with_not(args):
@@ -465,6 +609,7 @@ def _get_pytest_args(args, regions, log_file, out_dir):  # noqa: C901
 
     pytest_args.append("--tests-log-file={0}/{1}".format(args.output_dir, log_file))
     pytest_args.append("--output-dir={0}/{1}".format(args.output_dir, out_dir))
+    pytest_args.append("--timeout=21600")
     pytest_args.append(f"--key-name={args.key_name}")
     pytest_args.append(f"--key-path={args.key_path}")
     pytest_args.extend(["--stackname-suffix", args.stackname_suffix])
@@ -523,12 +668,21 @@ def _get_pytest_args(args, regions, log_file, out_dir):  # noqa: C901
 
     if "html" in args.reports:
         pytest_args.append("--html={0}/{1}/results.html".format(args.output_dir, out_dir))
+        pytest_args.append("--self-contained-html")
+        pytest_args.append("--capture=tee-sys")
+
+    if args.scaling_test_config:
+        pytest_args.extend(["--scaling-test-config", args.scaling_test_config])
+
+    if args.global_build_number:
+        pytest_args.extend(["--global-build-number", args.global_build_number])
 
     _set_custom_packages_args(args, pytest_args)
     _set_ami_args(args, pytest_args)
     _set_custom_stack_args(args, pytest_args)
     _set_api_args(args, pytest_args)
     _set_custom_resource_args(args, pytest_args)
+    _set_validate_instance_type_args(args, pytest_args)
 
     return pytest_args
 
@@ -540,14 +694,17 @@ def _set_custom_packages_args(args, pytest_args):  # noqa: C901
     if args.custom_cookbook_url:
         pytest_args.extend(["--custom-chef-cookbook", args.custom_cookbook_url])
 
+    if args.extra_chef_attributes:
+        pytest_args.extend(["--extra-chef-attributes", args.extra_chef_attributes])
+
     if args.createami_custom_cookbook_url:
         pytest_args.extend(["--createami-custom-chef-cookbook", args.createami_custom_cookbook_url])
 
     if args.createami_custom_node_url:
         pytest_args.extend(["--createami-custom-node-package", args.createami_custom_node_url])
 
-    if args.custom_awsbatchcli_url:
-        pytest_args.extend(["--custom-awsbatchcli-package", args.custom_awsbatchcli_url])
+    if args.pcluster_installer_path:
+        pytest_args.extend(["--pcluster-installer-path", args.pcluster_installer_path])
 
     if args.pre_install:
         pytest_args.extend(["--pre-install", args.pre_install])
@@ -572,8 +729,14 @@ def _set_ami_args(args, pytest_args):
     if args.ami_owner:
         pytest_args.extend(["--ami-owner", args.ami_owner])
 
+    if args.available_amis_oss_x86:
+        pytest_args.extend(["--available-amis-oss-x86", " ".join(args.available_amis_oss_x86)])
 
-def _set_custom_stack_args(args, pytest_args):
+    if args.available_amis_oss_arm:
+        pytest_args.extend(["--available-amis-oss-arm", " ".join(args.available_amis_oss_arm)])
+
+
+def _set_custom_stack_args(args, pytest_args):  # noqa: C901
     if args.vpc_stack:
         pytest_args.extend(["--vpc-stack", args.vpc_stack])
 
@@ -583,20 +746,58 @@ def _set_custom_stack_args(args, pytest_args):
     if args.no_delete:
         pytest_args.append("--no-delete")
 
+    if args.retain_on_failure:
+        pytest_args.extend(["--retain-on-failure", str(args.retain_on_failure)])
+
+    if args.force_run_instances:
+        pytest_args.append("--force-run-instances")
+
     if args.iam_user_role_stack_name:
         pytest_args.extend(["--iam-user-role-stack-name", args.iam_user_role_stack_name])
 
     if args.directory_stack_name:
         pytest_args.extend(["--directory-stack-name", args.directory_stack_name])
 
-    if args.ldaps_nlb_stack_name:
-        pytest_args.extend(["--ldaps-nlb-stack-name", args.ldaps_nlb_stack_name])
-
     if args.slurm_database_stack_name:
         pytest_args.extend(["--slurm-database-stack-name", args.slurm_database_stack_name])
 
+    if args.slurm_dbd_stack_name:
+        pytest_args.extend(["--slurm-dbd-stack-name", args.slurm_dbd_stack_name])
+
+    if args.munge_key_secret_arn:
+        pytest_args.extend(["--munge-key-secret-arn", args.munge_key_secret_arn])
+
     if args.external_shared_storage_stack_name:
         pytest_args.extend(["--external-shared-storage-stack-name", args.external_shared_storage_stack_name])
+
+    if args.bucket_name:
+        pytest_args.extend(["--bucket-name", args.bucket_name])
+
+    if args.retain_ad_stack:
+        pytest_args.append("--retain-ad-stack")
+
+    if args.proxy_stack:
+        pytest_args.extend(["--proxy-stack", args.proxy_stack])
+
+    if args.patch_ami_stack:
+        pytest_args.extend(["--patch-ami-stack", args.patch_ami_stack])
+
+    if args.build_image_roles_stack:
+        pytest_args.extend(["--build-image-roles-stack", args.build_image_roles_stack])
+
+    if args.api_stack:
+        pytest_args.extend(["--api-stack", args.api_stack])
+
+    if args.capacity_reservation_id:
+        pytest_args.extend(["--capacity-reservation-id", args.capacity_reservation_id])
+
+    if args.skip_ddb_metadata:
+        pytest_args.append("--skip-ddb-metadata")
+
+
+def _set_validate_instance_type_args(args, pytest_args):
+    if args.force_elastic_ip:
+        pytest_args.append("--force-elastic-ip")
 
 
 def _set_custom_resource_args(args, pytest_args):
@@ -606,6 +807,8 @@ def _set_custom_resource_args(args, pytest_args):
         pytest_args.extend(["--resource-bucket", args.resource_bucket])
     if args.lambda_layer_source:
         pytest_args.extend(["--lambda-layer-source", args.lambda_layer_source])
+    if args.custom_security_groups_stack_name:
+        pytest_args.extend(["--custom-security-groups-stack-name", args.custom_security_groups_stack_name])
 
 
 def _set_api_args(args, pytest_args):
@@ -668,16 +871,16 @@ def _make_logging_dirs(base_dir):
 
 def _run_parallel(args):
     jobs = []
-    if args.regions:
-        enabled_regions = args.regions
-    else:
-        enabled_regions = get_all_regions(args.tests_config)
+    enabled_regions = get_all_regions(args.tests_config)
 
     # unmarshal az and collect unique regions
     unique_regions = set()
     for az in enabled_regions:
         unmarshalled_region = unmarshal_az_override(az)
         unique_regions.add(unmarshalled_region)
+
+    if args.regions:
+        unique_regions = unique_regions & set(args.regions)
 
     for region in unique_regions:
         p = multiprocessing.Process(target=_run_test_in_region, args=(region, args, OUT_DIR, LOGS_DIR))
@@ -688,16 +891,18 @@ def _run_parallel(args):
         job.join()
 
 
-def _check_args(args):
-    # If --cluster is set only one os, scheduler, instance type and region can be provided
-    if args.cluster:
-        if len(args.oss) > 1 or len(args.schedulers) > 1 or len(args.instances) > 1 or len(args.regions) > 1:
-            logger.error(
-                "when cluster option is specified, you can have a single value for oss, regions, instances "
-                "and schedulers and you need to make sure they match the cluster specific ones"
-            )
-            exit(1)
+def _get_config_arguments(args):
+    test_config_args = {}
+    if args.instances:
+        test_config_args["INSTANCES"] = args.instances[0]
+    if args.regions:
+        test_config_args["REGIONS"] = args.regions[0]
+    if args.oss:
+        test_config_args["OSS"] = args.oss[0]
+    return test_config_args
 
+
+def _check_args(args):
     if not args.tests_config:
         assert_that(args.regions).described_as("--regions cannot be empty").is_not_empty()
         assert_that(args.instances).described_as("--instances cannot be empty").is_not_empty()
@@ -705,11 +910,20 @@ def _check_args(args):
         assert_that(args.schedulers).described_as("--schedulers cannot be empty").is_not_empty()
     else:
         try:
-            args.tests_config = _test_config_file(args.tests_config)
+            test_config_args = _get_config_arguments(args)
+            args.tests_config = _test_config_file(args, test_config_args)
             assert_valid_config(args.tests_config, args.tests_root_dir)
             logger.info("Found valid config file:\n%s", dump_rendered_config_file(args.tests_config))
         except Exception:
             raise argparse.ArgumentTypeError("'{0}' is not a valid test config".format(args.tests_config))
+
+
+def unset_proxy():
+    """Unset proxies"""
+    os.environ.pop("HTTP_PROXY", None)
+    os.environ.pop("HTTPS_PROXY", None)
+    os.environ.pop("http_proxy", None)
+    os.environ.pop("https_proxy", None)
 
 
 def _run_sequential(args):
@@ -738,6 +952,9 @@ def main():
     _check_args(args)
     logger.info("Parsed test_runner parameters {0}".format(args))
 
+    # Unset any proxies used to avoid network issues with tests, such as DCV
+    unset_proxy()
+
     _make_logging_dirs(args.output_dir)
 
     if args.sequential:
@@ -754,6 +971,12 @@ def main():
     if "json" in args.reports:
         logger.info("Generating tests report")
         generate_json_report(reports_output_dir)
+    if args.generate_historical_report:
+        today_number = (datetime.date.today() - datetime.date(2020, 1, 1)).days
+        if today_number % 5 == 0:
+            # Launch time report is generated once every 5 days
+            generate_launch_time_report(reports_output_dir)
+        generate_performance_report(reports_output_dir)
 
     if "cw" in args.reports:
         logger.info("Publishing CloudWatch metrics")

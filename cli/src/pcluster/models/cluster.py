@@ -12,7 +12,6 @@
 # This module contains all the classes representing the Resources objects.
 # These objects are obtained from the configuration file through a conversion based on the Schema classes.
 #
-import hashlib
 import json
 import logging
 import os
@@ -21,18 +20,14 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from enum import Enum
+from importlib.resources import files  # nosemgrep: python.lang.compatibility.python37.python37-compatibility-importlib2
 from typing import List, Optional, Set, Tuple
-from urllib.request import urlopen
 
-import pkg_resources
-from jinja2 import BaseLoader
-from jinja2.sandbox import SandboxedEnvironment
 from marshmallow import ValidationError
 
-from pcluster.api.models import Metadata
 from pcluster.aws.aws_api import AWSApi
 from pcluster.aws.common import AWSClientError, BadRequestError, LimitExceededError, StackNotFoundError, get_region
-from pcluster.config.cluster_config import BaseClusterConfig, SchedulerPluginScheduling, Tag
+from pcluster.config.cluster_config import BaseClusterConfig, Tag
 from pcluster.config.common import ValidatorSuppressor
 from pcluster.config.config_patch import ConfigPatch
 from pcluster.constants import (
@@ -60,17 +55,19 @@ from pcluster.models.common import (
     create_logs_archive,
     export_stack_events,
     parse_config,
+    sanitize_path_component,
     upload_archive,
 )
 from pcluster.models.compute_fleet_status_manager import ComputeFleetStatus, ComputeFleetStatusManager
-from pcluster.models.s3_bucket import S3Bucket, S3BucketFactory, S3FileFormat, create_s3_presigned_url, parse_bucket_url
+from pcluster.models.login_nodes_status import LoginNodesStatus
+from pcluster.models.s3_bucket import S3Bucket, S3BucketFactory, S3FileFormat, create_s3_presigned_url
 from pcluster.schemas.cluster_schema import ClusterSchema
+from pcluster.schemas.common_schema import validate_json_format
 from pcluster.templates.cdk_builder import CDKTemplateBuilder
 from pcluster.templates.import_cdk import start as start_cdk_import
 from pcluster.utils import (
     datetime_to_epoch,
     generate_random_name_with_prefix,
-    get_attr,
     get_installed_version,
     grouper,
     yaml_load,
@@ -89,6 +86,7 @@ class NodeType(Enum):
 
     HEAD_NODE = "HeadNode"
     COMPUTE = "Compute"
+    LOGIN_NODE = "LoginNode"
 
     def __str__(self):
         return str(self.value)
@@ -176,6 +174,7 @@ class Cluster:
         self.__official_ami = None
         self.__has_running_capacity = None
         self.__running_capacity = None
+        self.__has_running_login_nodes = None
 
     @property
     def stack(self):
@@ -203,7 +202,7 @@ class Cluster:
     @property
     def compute_fleet_status_manager(self) -> ComputeFleetStatusManager:
         """Return compute fleet status manager."""
-        return ComputeFleetStatusManager.get_manager(self.name, self.stack.version, self.stack.scheduler)
+        return ComputeFleetStatusManager.get_manager(self.name, self.stack.version)
 
     def _get_artifact_dir(self):
         """Get artifact directory in S3 bucket by stack output."""
@@ -286,16 +285,19 @@ class Cluster:
         return status
 
     @property
+    def login_nodes_status(self):
+        """Status of the login nodes."""
+        login_nodes_status = LoginNodesStatus(self.stack_name)
+        if self.config.login_nodes:
+            login_node_pool_names = [pool.name for pool in self.config.login_nodes.pools]
+            login_nodes_status.retrieve_data(login_node_pool_names)
+        return login_nodes_status
+
+    @property
     def compute_fleet_status_with_last_updated_time(self) -> Tuple[ComputeFleetStatus, str]:
         """Status of the cluster compute fleet and the last compute fleet status updated time."""
         if self.stack.is_working_status or self.stack.status == "UPDATE_IN_PROGRESS":
-            if self.stack.scheduler == "awsbatch":
-                status = ComputeFleetStatus(
-                    AWSApi.instance().batch.get_compute_environment_state(self.stack.batch_compute_environment)
-                )
-                last_updated_time = None
-            else:
-                status, last_updated_time = self.compute_fleet_status_manager.get_status_with_last_updated_time()
+            status, last_updated_time = self.compute_fleet_status_manager.get_status_with_last_updated_time()
             return status, last_updated_time
         else:
             LOGGER.info(
@@ -361,11 +363,12 @@ class Cluster:
                 validator_suppressors, validation_failure_level
             )
 
-            LOGGER.info("Generating artifact dir and uploading config...")
+            LOGGER.info("Generating artifact dir, uploading config and instance types data...")
             self._add_tags()
             self._generate_artifact_dir()
             artifact_dir_generated = True
             self._upload_config()
+            self._upload_instance_types_data()
             LOGGER.info("Generation and upload completed successfully")
 
             # Create template if not provided by the user
@@ -453,7 +456,7 @@ class Cluster:
             validation_failures = [ValidationResult(data, FailureLevel.ERROR, validator_type="ConfigSchemaValidator")]
             raise ConfigValidationError("Invalid cluster configuration.", validation_failures=validation_failures)
 
-    def validate_create_request(self, validator_suppressors, validation_failure_level, dry_run=False):
+    def validate_create_request(self, validator_suppressors, validation_failure_level):
         """Validate a create cluster request."""
         self._validate_no_existing_stack()
         self.config, ignored_validation_failures = self._validate_and_parse_config(
@@ -461,8 +464,6 @@ class Cluster:
             validation_failure_level=validation_failure_level,
             context=ValidatorContext(),
         )
-        if dry_run and isinstance(self.config.scheduling, SchedulerPluginScheduling):
-            self._render_and_upload_scheduler_plugin_template(dry_run=dry_run)
         return ignored_validation_failures
 
     def _validate_no_existing_stack(self):
@@ -501,11 +502,11 @@ class Cluster:
 
     @staticmethod
     def _load_additional_instance_type_data(cluster_config_dict):
-        if "DevSettings" in cluster_config_dict:
-            instance_types_data = cluster_config_dict["DevSettings"].get("InstanceTypesData")
-            if instance_types_data:
-                # Set additional instance types data in AWSApi. Schema load will use the information.
-                AWSApi.instance().ec2.additional_instance_types_data = json.loads(instance_types_data)
+        instance_types_data = (cluster_config_dict.get("DevSettings") or {}).get("InstanceTypesData")
+        if instance_types_data:
+            if not validate_json_format(instance_types_data):
+                raise ValidationError(message="DevSettings/InstanceTypesData is not a valid JSON.")
+            AWSApi.instance().ec2.additional_instance_types_data = json.loads(instance_types_data)
 
     def _upload_config(self):
         """Upload source config and save config version."""
@@ -532,6 +533,24 @@ class Cluster:
         except Exception as e:
             raise _cluster_error_mapper(
                 e, f"Unable to upload cluster config to the S3 bucket {self.bucket.name} due to exception: {e}"
+            )
+
+    def _upload_instance_types_data(self):
+        """Upload instance types data and version id."""
+        self._check_bucket_existence()
+        try:
+            # Upload instance types data
+            result = self.bucket.upload_config(
+                self.config.get_instance_types_data(),
+                PCLUSTER_S3_ARTIFACTS_DICT.get("instance_types_data_name"),
+                format=S3FileFormat.JSON,
+            )
+
+            self.config.instance_types_data_version = result.get("VersionId")
+
+        except Exception as e:
+            raise _cluster_error_mapper(
+                e, f"Unable to upload instance types data to the S3 bucket {self.bucket.name} due to exception: {e}"
             )
 
     def _upload_change_set(self, changes=None):
@@ -563,7 +582,7 @@ class Cluster:
         LOGGER.info("Uploading cluster artifacts to S3...")
         self._check_bucket_existence()
         try:
-            resources = pkg_resources.resource_filename(__name__, "../resources/custom_resources")
+            resources = str(files(__package__).parent / "resources" / "custom_resources")
             self.bucket.upload_resources(
                 resource_dir=resources, custom_artifacts_name=PCLUSTER_S3_ARTIFACTS_DICT.get("custom_artifacts_name")
             )
@@ -577,15 +596,6 @@ class Cluster:
             if self.template_body:
                 self.bucket.upload_cfn_template(self.template_body, PCLUSTER_S3_ARTIFACTS_DICT.get("template_name"))
 
-            # upload instance types data
-            self.bucket.upload_config(
-                self.config.get_instance_types_data(),
-                PCLUSTER_S3_ARTIFACTS_DICT.get("instance_types_data_name"),
-                format=S3FileFormat.JSON,
-            )
-
-            if isinstance(self.config.scheduling, SchedulerPluginScheduling):
-                self._render_and_upload_scheduler_plugin_template()
             LOGGER.info("Cluster artifacts uploaded correctly.")
         except BadRequestClusterActionError:
             raise
@@ -593,69 +603,6 @@ class Cluster:
             message = f"Unable to upload cluster resources to the S3 bucket {self.bucket.name} due to exception: {e}"
             LOGGER.error(message)
             raise _cluster_error_mapper(e, message)
-
-    def _render_and_upload_scheduler_plugin_template(self, dry_run=False):
-        scheduler_plugin_template = get_attr(
-            self.config, "scheduling.settings.scheduler_definition.cluster_infrastructure.cloud_formation.template"
-        )
-        if not scheduler_plugin_template:
-            return
-
-        try:
-            LOGGER.info("Downloading scheduler plugin CloudFormation template from %s", scheduler_plugin_template)
-            if scheduler_plugin_template.startswith("s3"):
-                bucket_parsing_result = parse_bucket_url(scheduler_plugin_template)
-                result = AWSApi.instance().s3.get_object(
-                    bucket_name=bucket_parsing_result["bucket_name"],
-                    key=bucket_parsing_result["object_key"],
-                    expected_bucket_owner=get_attr(
-                        self.config,
-                        "scheduling.settings.scheduler_definition.cluster_infrastructure.cloud_formation."
-                        "s3_bucket_owner",
-                    ),
-                )
-                file_content = result["Body"].read().decode("utf-8")
-            else:
-                # A nosec comment is appended to the following line in order to disable the B310 check.
-                # The urlopen argument is properly validated
-                # [B310:blacklist] Audit url open for permitted schemes.
-                with urlopen(scheduler_plugin_template) as f:  # nosec B310 nosemgrep
-                    file_content = f.read().decode("utf-8")
-        except Exception as e:
-            raise BadRequestClusterActionError(
-                f"Error while downloading scheduler plugin artifacts from '{scheduler_plugin_template}': {str(e)}"
-            ) from e
-
-        # checksum
-        self.validate_scheduler_plugin_template_checksum(file_content, scheduler_plugin_template)
-
-        # jinja rendering
-        try:
-            LOGGER.info("Rendering the following scheduler plugin CloudFormation template:\n%s", file_content)
-            environment = SandboxedEnvironment(loader=BaseLoader)
-            environment.filters["hash"] = (
-                # A nosec comment is appended to the following line in order to disable the B324 checks.
-                # The sha1 is used just as a hashing function.
-                # [B324:hashlib] Use of weak MD4, MD5, or SHA1 hash for security. Consider usedforsecurity=False
-                # [B303:blacklist] Use of insecure MD2, MD4, MD5, or SHA1 hash function
-                lambda value: hashlib.sha1(value.encode())  # nosec nosemgrep
-                .hexdigest()[0:16]
-                .capitalize()
-            )
-            template = environment.from_string(file_content)
-            rendered_template = template.render(
-                cluster_configuration=ClusterSchema(cluster_name=self.name).dump(deepcopy(self.config)),
-                cluster_name=self.name,
-                instance_types_info=self.config.get_instance_types_data(),
-            )
-        except Exception as e:
-            raise BadRequestClusterActionError(
-                f"Error while rendering scheduler plugin template '{scheduler_plugin_template}': {str(e)}"
-            ) from e
-        if not dry_run:
-            self.bucket.upload_cfn_template(
-                rendered_template, PCLUSTER_S3_ARTIFACTS_DICT["scheduler_plugin_template_name"], S3FileFormat.TEXT
-            )
 
     def delete(self, keep_logs: bool = True):
         """Delete cluster preserving log groups."""
@@ -761,6 +708,15 @@ class Cluster:
         else:
             raise ClusterActionError("Unable to retrieve head node information.")
 
+    @property
+    def login_node_instances(self) -> List[ClusterInstance]:
+        """Get login node instances."""
+        instances, _ = self.describe_instances(node_type=NodeType.LOGIN_NODE)
+        if instances:
+            return instances
+        else:
+            raise ClusterActionError("Unable to retrieve login node information.")
+
     def _get_instance_filters(self, node_type: NodeType, queue_name: str = None):
         filters = [
             {"Name": f"tag:{PCLUSTER_CLUSTER_NAME_TAG}", "Values": [self.stack_name]},
@@ -786,23 +742,28 @@ class Cluster:
     def has_running_capacity(self, updated_value: bool = False) -> bool:
         """Return True if the cluster has running capacity. Note: the value will be cached."""
         if self.__has_running_capacity is None or updated_value:
-            if self.stack.scheduler == "awsbatch":
-                self.__has_running_capacity = self.get_running_capacity() > 0
-            else:
-                self.__has_running_capacity = (
-                    self.compute_fleet_status_manager.get_status() != ComputeFleetStatus.STOPPED
-                )
+            self.__has_running_capacity = self.compute_fleet_status_manager.get_status() != ComputeFleetStatus.STOPPED
         return self.__has_running_capacity
+
+    def has_running_login_nodes(self, updated_value: bool = False, pool_name: str = None) -> bool:
+        """
+        Return True if the cluster has running login nodes, or a specific pool if a pool name is provided.
+
+        Note: the value will be cached.
+        """
+        healthy_nodes = self.login_nodes_status.get_healthy_nodes(pool_name=pool_name)
+        unhealthy_nodes = self.login_nodes_status.get_unhealthy_nodes(pool_name=pool_name)
+
+        if self.__has_running_login_nodes is None or updated_value:
+            self.__has_running_login_nodes = (
+                healthy_nodes is not None and unhealthy_nodes is not None and healthy_nodes + unhealthy_nodes != 0
+            )
+        return self.__has_running_login_nodes
 
     def get_running_capacity(self, updated_value: bool = False):
         """Return the number of instances or desired capacity. Note: the value will be cached."""
         if self.__running_capacity is None or updated_value:
-            if self.stack.scheduler == "slurm":
-                self.__running_capacity = len(self.compute_instances)
-            elif self.stack.scheduler == "awsbatch":
-                self.__running_capacity = AWSApi.instance().batch.get_compute_environment_capacity(
-                    ce_name=self.stack.batch_compute_environment
-                )
+            self.__running_capacity = len(self.compute_instances)
         return self.__running_capacity
 
     def start(self):
@@ -813,11 +774,7 @@ class Cluster:
                 raise BadRequestClusterActionError(
                     f"Cannot start/enable compute fleet while stack is in {stack_status} status."
                 )
-            scheduler = self.config.scheduling.scheduler
-            if scheduler == "awsbatch":
-                self.enable_awsbatch_compute_environment()
-            else:  # traditional scheduler
-                self.start_compute_fleet()
+            self.start_compute_fleet()
         except ComputeFleetStatusManager.ConditionalStatusUpdateFailed:
             raise BadRequestClusterActionError(
                 "Failed when starting compute fleet due to a concurrent update of the status. "
@@ -832,21 +789,6 @@ class Cluster:
             ComputeFleetStatus.START_REQUESTED, ComputeFleetStatus.STARTING, ComputeFleetStatus.RUNNING
         )
 
-    def enable_awsbatch_compute_environment(self):
-        """Enable AWS Batch compute environment."""
-        LOGGER.info("Enabling AWS Batch compute environment : %s", self.name)
-        try:
-            compute_resource = self.config.scheduling.queues[0].compute_resources[0]
-
-            AWSApi.instance().batch.enable_compute_environment(
-                ce_name=self.stack.batch_compute_environment,
-                min_vcpus=compute_resource.min_vcpus,
-                max_vcpus=compute_resource.max_vcpus,
-                desired_vcpus=compute_resource.desired_vcpus,
-            )
-        except Exception as e:
-            raise _cluster_error_mapper(e, f"Unable to enable Batch compute environment. {str(e)}")
-
     def stop(self):
         """Stop compute fleet of the cluster."""
         try:
@@ -855,11 +797,7 @@ class Cluster:
                 raise BadRequestClusterActionError(
                     f"Cannot stop/disable compute fleet while stack is in {stack_status} status."
                 )
-            scheduler = self.config.scheduling.scheduler
-            if scheduler == "awsbatch":
-                self.disable_awsbatch_compute_environment()
-            else:  # traditional scheduler
-                self.stop_compute_fleet()
+            self.stop_compute_fleet()
         except ComputeFleetStatusManager.ConditionalStatusUpdateFailed:
             raise BadRequestClusterActionError(
                 "Failed when stopping compute fleet due to a concurrent update of the status. "
@@ -874,21 +812,12 @@ class Cluster:
             ComputeFleetStatus.STOP_REQUESTED, ComputeFleetStatus.STOPPING, ComputeFleetStatus.STOPPED
         )
 
-    def disable_awsbatch_compute_environment(self):
-        """Disable AWS Batch compute environment."""
-        LOGGER.info("Disabling AWS Batch compute environment : %s", self.name)
-        try:
-            AWSApi.instance().batch.disable_compute_environment(ce_name=self.stack.batch_compute_environment)
-        except Exception as e:
-            raise _cluster_error_mapper(e, f"Unable to disable Batch compute environment. {str(e)}")
-
     def validate_update_request(
         self,
         target_source_config: str,
         validator_suppressors: Set[ValidatorSuppressor] = None,
         validation_failure_level: FailureLevel = FailureLevel.ERROR,
         force: bool = False,
-        dry_run: bool = False,
     ):
         """Validate a cluster update request."""
         self._validate_cluster_exists()
@@ -900,11 +829,6 @@ class Cluster:
             context=ValidatorContext(head_node_instance_id=self.head_node_instance.id, during_update=True),
         )
         changes = self._validate_patch(force, target_config)
-
-        self._validate_scheduling_update(changes, target_config)
-
-        if dry_run and isinstance(self.config.scheduling, SchedulerPluginScheduling):
-            self._render_and_upload_scheduler_plugin_template(dry_run=dry_run)
 
         return target_config, changes, ignored_validation_failures
 
@@ -953,6 +877,7 @@ class Cluster:
 
             self._add_tags()
             self._upload_config()
+            self._upload_instance_types_data()
             self._upload_change_set(changes)
 
             # Create template if not provided by the user
@@ -1015,11 +940,6 @@ class Cluster:
     def _get_cfn_tags(self):
         """Return tag list in the format expected by CFN."""
         cluster_tags = [{"Key": tag.key, "Value": tag.value} for tag in self.config.tags]
-        if self.config.scheduling.scheduler == "plugin":
-            scheduler_plugin_tags = get_attr(self.config, "scheduling.settings.scheduler_definition.tags")
-            if scheduler_plugin_tags:
-                custom_scheduler_plugin_tags = [{"Key": tag.key, "Value": tag.value} for tag in scheduler_plugin_tags]
-                cluster_tags += custom_scheduler_plugin_tags
         return cluster_tags
 
     def export_logs(
@@ -1051,8 +971,9 @@ class Cluster:
 
         try:
             with tempfile.TemporaryDirectory() as output_tempdir:
-                # Create root folder for the archive
-                archive_name = f"{self.name}-logs-{datetime.now().strftime('%Y%m%d%H%M')}"
+                # Create root folder for the archive. Sanitize the identifier: it may be an ARN (deleted
+                # clusters can only be referenced by ARN), whose '/' and ':' would break local paths.
+                archive_name = f"{sanitize_path_component(self.name)}-logs-{datetime.now().strftime('%Y%m%d%H%M')}"
                 root_archive_dir = os.path.join(output_tempdir, archive_name)
                 os.makedirs(root_archive_dir, exist_ok=True)
 
@@ -1078,8 +999,11 @@ class Cluster:
                         {self.name},
                     )
 
-                # Get stack events and write them into a file
-                stack_events_file = os.path.join(root_archive_dir, self._stack_events_stream_name)
+                # Get stack events and write them into a file (sanitize: the stream name embeds the
+                # stack identifier, which may be an ARN containing path separators).
+                stack_events_file = os.path.join(
+                    root_archive_dir, sanitize_path_component(self._stack_events_stream_name)
+                )
                 export_stack_events(self.stack_name, stack_events_file)
 
                 archive_path = create_logs_archive(root_archive_dir, output_file)
@@ -1218,85 +1142,3 @@ class Cluster:
     def _stack_events_stream_name(self):
         """Return the name of the stack events log stream."""
         return STACK_EVENTS_LOG_STREAM_NAME_FORMAT.format(self.stack_name)
-
-    def _validate_scheduling_update(self, changes, target_config):
-        """Update of Scheduling is not supported when SupportsClusterUpdate of the scheduler plugin is set to false."""
-        # target_config.source_config.get("Scheduling") != self.config.source_config.get("Scheduling") doesn't mean
-        # there's changes in the config, if queue list in the scheduling dict has different order, target_config dict
-        # and original config dict may be different.
-        if (
-            self.config.scheduling.scheduler == "plugin"
-            and get_attr(self.config, "scheduling.settings.scheduler_definition.requirements.supports_cluster_update")
-            is False
-            and target_config.source_config.get("Scheduling") != self.config.source_config.get("Scheduling")
-        ):
-            scheduling_changes = []
-            # Example format of changes:
-            # changes = [
-            #     ["param_path", "parameter", "old value", "new value", "check", "reason", "action_needed"],
-            #     [
-            #         ["HeadNode", "Iam"],
-            #         "AdditionalIamPolicies",
-            #         None,
-            #         {"Policy": "arn:aws:iam::aws:policy/FakePolicy"},
-            #         "SUCCEEDED",
-            #         "-",
-            #         None,
-            #     ],
-            #     [
-            #         ["HeadNode", "Iam"],
-            #         "AdditionalIamPolicies",
-            #         {"Policy": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"},
-            #         None,
-            #         "SUCCEEDED",
-            #         "-",
-            #         None,
-            #     ],
-            #     [
-            #         ["Scheduling", "SchedulerQueues[queue1]", "ComputeResources[compute-resource1]"],
-            #         "InstanceType",
-            #         "c5.2xlarge",
-            #         "c5.xlarge",
-            #         "SUCCEEDED",
-            #         "-",
-            #         None,
-            #     ],
-            # ]
-
-            # The first element of changes is:
-            # ["param_path", "parameter", "old value", "new value", "check", "reason", "action_needed"]
-            for change in changes[1:]:
-                if change[0][0] == "Scheduling":  # check if the param_path of the change start from Scheduling
-                    scheduling_changes.append(change)
-            if len(scheduling_changes) >= 1:
-                raise ClusterUpdateError(
-                    "Update failure: The scheduler plugin used for this cluster does not support updating the "
-                    "scheduling configuration.",
-                    [changes[0]] + scheduling_changes,
-                )
-
-    def validate_scheduler_plugin_template_checksum(self, file_content, scheduler_plugin_template):
-        """Validate scheduler plugin template checksum match the expected checksum."""
-        checksum = get_attr(
-            self.config, "scheduling.settings.scheduler_definition.cluster_infrastructure.cloud_formation.checksum"
-        )
-        if checksum:
-            actual_checksum = hashlib.sha256(file_content.encode()).hexdigest()
-            if actual_checksum != checksum:
-                raise BadRequestClusterActionError(
-                    f"Error when validating scheduler plugin template '{scheduler_plugin_template}': "
-                    f"checksum: {actual_checksum} does not match expected one: {checksum}"
-                )
-
-    def get_plugin_metadata(self):
-        """Get the metadata name and version used for the response of DescribeCluster when the scheduler is plugin."""
-        try:
-            full_metadata = get_attr(self.config, "scheduling.settings.scheduler_definition.metadata")
-            return (
-                Metadata(name=full_metadata.get("Name"), version=full_metadata.get("Version"))
-                if full_metadata
-                else None
-            )
-        except ClusterActionError:
-            LOGGER.warning("Unable to retrieve scheduler metadata from cluster configuration.")
-            return None

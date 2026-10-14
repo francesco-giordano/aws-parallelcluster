@@ -8,7 +8,7 @@
 # or in the "LICENSE.txt" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
 # OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 # limitations under the License.
-from pcluster.config.common import BaseTag, Cookbook, DeploymentSettings, Imds, LambdaFunctionsVpcConfig
+from pcluster.config.common import BaseTag, Cookbook, Imds, LambdaFunctionsVpcConfig
 from pcluster.config.imagebuilder_config import (
     AdditionalIamPolicy,
     Build,
@@ -17,7 +17,11 @@ from pcluster.config.imagebuilder_config import (
     Iam,
     Image,
     ImageBuilderConfig,
+    ImagebuilderDeploymentSettings,
     ImagebuilderDevSettings,
+    Installation,
+    LustreClient,
+    NvidiaSoftware,
     UpdateOsPackages,
     Volume,
 )
@@ -28,7 +32,7 @@ CLASS_DICT = {
     "build": Build,
     "dev_settings": ImagebuilderDevSettings,
     "lambda_functions_vpc_config": LambdaFunctionsVpcConfig,
-    "deployment_settings": DeploymentSettings,
+    "deployment_settings": ImagebuilderDeploymentSettings,
     "root_volume": Volume,
     "tags": BaseTag,
     "components": Component,
@@ -38,6 +42,9 @@ CLASS_DICT = {
     "additional_iam_policies": AdditionalIamPolicy,
     "update_os_packages": UpdateOsPackages,
     "imds": Imds,
+    "installation": Installation,
+    "lustre_client": LustreClient,
+    "nvidia_software": NvidiaSoftware,
 }
 
 

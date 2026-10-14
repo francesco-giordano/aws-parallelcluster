@@ -8,29 +8,33 @@
 # or in the "LICENSE.txt" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
 # OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions and
 # limitations under the License.
+
+# pylint: disable=too-many-lines
 import abc
-import hashlib
-from hashlib import sha1
+from hashlib import sha1, sha256
+from importlib.resources import files  # nosemgrep: python.lang.compatibility.python37.python37-compatibility-importlib2
 from typing import List, Union
 
-import pkg_resources
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as awslambda
 from aws_cdk import aws_logs as logs
+from aws_cdk import core
 from aws_cdk.aws_iam import ManagedPolicy, PermissionsBoundary
 from aws_cdk.core import Arn, ArnFormat, CfnDeletionPolicy, CfnTag, Construct, Fn, Stack
 
+from pcluster.aws.aws_api import AWSApi
 from pcluster.config.cluster_config import (
     BaseClusterConfig,
     BaseComputeResource,
     BaseQueue,
     HeadNode,
-    SharedStorageType,
+    LoginNodesPool,
     SlurmClusterConfig,
     SlurmComputeResource,
     SlurmQueue,
 )
+from pcluster.config.common import SharedStorageType
 from pcluster.constants import (
     COOKBOOK_PACKAGES_VERSIONS,
     CW_LOGS_RETENTION_DAYS_DEFAULT,
@@ -39,19 +43,28 @@ from pcluster.constants import (
     PCLUSTER_CLUSTER_NAME_TAG,
     PCLUSTER_DYNAMODB_PREFIX,
     PCLUSTER_NODE_TYPE_TAG,
+    PCLUSTER_TMP_DIR,
+    ULTRASERVER_INSTANCE_PREFIX_LIST,
 )
 from pcluster.launch_template_utils import _LaunchTemplateBuilder
 from pcluster.models.s3_bucket import S3Bucket, parse_bucket_url
 from pcluster.utils import (
-    get_attr,
     get_installed_version,
+    get_needed_ultraserver_capacity_block_statuses,
     get_resource_name_from_resource_arn,
-    get_url_scheme,
     policy_name_to_arn,
     split_resource_prefix,
 )
 
 PCLUSTER_LAMBDA_PREFIX = "pcluster-"
+
+
+def _get_resource_combination_name(*resource_names, partial_length=7, hash_length=16):
+    combined_name = "".join(resource_names)
+    hash_value = sha256(combined_name.encode()).hexdigest()[:hash_length]
+    prefix = "-".join(name[:partial_length] for name in resource_names)
+
+    return f"{prefix}-{hash_value}"
 
 
 def create_hash_suffix(string_to_hash: str):
@@ -68,13 +81,13 @@ def create_hash_suffix(string_to_hash: str):
 
 def get_user_data_content(user_data_path: str):
     """Retrieve user data content."""
-    user_data_file_path = pkg_resources.resource_filename(__name__, user_data_path)
+    user_data_file_path = str(files(__package__) / user_data_path)
     with open(user_data_file_path, "r", encoding="utf-8") as user_data_file:
         user_data_content = user_data_file.read()
     return user_data_content
 
 
-def get_common_user_data_env(node: Union[HeadNode, SlurmQueue], config: BaseClusterConfig) -> dict:
+def get_common_user_data_env(node: Union[HeadNode, SlurmQueue, LoginNodesPool], config: BaseClusterConfig) -> dict:
     """Return a dict containing the common env variables to be replaced in user data."""
     return {
         "YumProxy": node.networking.proxy.http_proxy_address if node.networking.proxy else "_none_",
@@ -85,7 +98,7 @@ def get_common_user_data_env(node: Union[HeadNode, SlurmQueue], config: BaseClus
         "ParallelClusterVersion": COOKBOOK_PACKAGES_VERSIONS["parallelcluster"],
         "CookbookVersion": COOKBOOK_PACKAGES_VERSIONS["cookbook"],
         "ChefVersion": COOKBOOK_PACKAGES_VERSIONS["chef"],
-        "BerkshelfVersion": COOKBOOK_PACKAGES_VERSIONS["berkshelf"],
+        "PclusterTmpDir": PCLUSTER_TMP_DIR,
     }
 
 
@@ -156,7 +169,7 @@ def get_custom_tags(config: Union[BaseClusterConfig, SlurmQueue, SlurmComputeRes
 def get_default_instance_tags(
     stack_name: str,
     config: BaseClusterConfig,
-    node: Union[HeadNode, BaseComputeResource],
+    node: Union[HeadNode, LoginNodesPool, BaseComputeResource],
     node_type: str,
     shared_storage_infos: dict,
     raw_dict: bool = False,
@@ -221,6 +234,8 @@ def get_cloud_watch_logs_policy_statement(resource: str) -> iam.PolicyStatement:
 
 def get_cloud_watch_logs_retention_days(config: BaseClusterConfig) -> int:
     """Return value to use for CloudWatch logs retention days."""
+    if config.monitoring.logs.cloud_watch.retention_in_days == 0:
+        return None
     return (
         config.monitoring.logs.cloud_watch.retention_in_days
         if config.is_cw_logging_enabled
@@ -259,6 +274,36 @@ def get_queue_security_groups_full(managed_compute_security_group: ec2.CfnSecuri
     return queue_security_groups
 
 
+def get_login_nodes_security_groups_full(
+    managed_login_security_group: ec2.CfnSecurityGroup,
+    pool: LoginNodesPool,
+):
+    """Return security groups to be used for the login nodes and network load balancer, default plus additional ones."""
+    login_nodes_security_groups = []
+
+    # Default security groups, created by us or provided by the user
+    if pool.networking.security_groups:
+        login_nodes_security_groups.extend(pool.networking.security_groups)
+    else:
+        login_nodes_security_groups.append(managed_login_security_group.ref)
+
+    # Additional security groups
+    if pool.networking.additional_security_groups:
+        login_nodes_security_groups.extend(pool.networking.additional_security_groups)
+
+    return login_nodes_security_groups
+
+
+def get_source_ingress_rule(setting):
+    """Return security group ingress property depending on whether the input setting is a prefix list or CIDR ip."""
+    if setting.startswith("pl"):
+        return ec2.CfnSecurityGroup.IngressProperty(
+            ip_protocol="tcp", from_port=22, to_port=22, source_prefix_list_id=setting
+        )
+    else:
+        return ec2.CfnSecurityGroup.IngressProperty(ip_protocol="tcp", from_port=22, to_port=22, cidr_ip=setting)
+
+
 def add_cluster_iam_resource_prefix(stack_name, config, name: str, iam_type: str):
     """Return a path and Name prefix from the Resource prefix config option."""
     full_resource_path = None
@@ -268,7 +313,7 @@ def add_cluster_iam_resource_prefix(stack_name, config, name: str, iam_type: str
         if iam_name_prefix:
             # Creating a Globally Unique Hash using Region, Type, Name and stack name
             resource_hash = (
-                hashlib.sha256((name + stack_name + iam_type + config.region).encode("utf-8")).hexdigest()[:12].upper()
+                sha256((name + stack_name + iam_type + config.region).encode("utf-8")).hexdigest()[:12].upper()
             )
             full_resource_name = iam_name_prefix + name + "-" + resource_hash
         if iam_path:
@@ -311,10 +356,6 @@ def apply_permissions_boundary(boundary, scope):
         PermissionsBoundary.of(scope).apply(boundary)
 
 
-def scheduler_is_slurm(config: BaseClusterConfig):
-    return config.scheduling.scheduler == "slurm"
-
-
 def generate_launch_template_version_cfn_parameter_hash(queue, compute_resource):
     """
     Generate 16 characters hash for compute fleet launch template version cfn parameter.
@@ -326,7 +367,60 @@ def generate_launch_template_version_cfn_parameter_hash(queue, compute_resource)
     # A nosec comment is appended to the following line in order to disable the B324 check.
     # The sha1 is used just as a hashing function.
     # [B324:hashlib] Use of weak MD4, MD5, or SHA1 hash for security. Consider usedforsecurity=False
-    return hashlib.sha1((queue + compute_resource).encode()).hexdigest()[0:16].capitalize()  # nosec nosemgrep
+    return sha1((queue + compute_resource).encode()).hexdigest()[0:16].capitalize()  # nosec nosemgrep
+
+
+def process_ultraserver_capacity_block_sizes(cluster_ultraserver_capacity_block_dict):
+    """
+    Process ultraserver capacity block sizes and return sizes dictionary.
+
+    Note: Validation is now handled by UltraserverCapacityBlockSizeValidator.
+    This function only processes and returns the sizes for template generation.
+
+    Returns:
+        Dictionary mapping ultraserver instance prefixes to comma-separated size strings
+    """
+    cluster_ultraserver_capacity_block_sizes_dict = {}
+
+    for ultraserver_instance_prefix in ULTRASERVER_INSTANCE_PREFIX_LIST:
+        cluster_ultraserver_capacity_block_sizes_dict[ultraserver_instance_prefix] = []
+
+        capacity_reservation_ids = cluster_ultraserver_capacity_block_dict.get(ultraserver_instance_prefix)
+        if capacity_reservation_ids:
+            statuses = AWSApi.instance().ec2.describe_capacity_block_status()
+            needed_capacity_block_statuses = get_needed_ultraserver_capacity_block_statuses(
+                statuses, capacity_reservation_ids
+            )
+
+            for status in needed_capacity_block_statuses:
+                size = status.get("TotalCapacity")
+                if size is not None:
+                    cluster_ultraserver_capacity_block_sizes_dict.get(ultraserver_instance_prefix).append(size)
+
+        unique_sizes = sorted(set(cluster_ultraserver_capacity_block_sizes_dict.get(ultraserver_instance_prefix)))
+
+        cluster_ultraserver_capacity_block_sizes_dict[ultraserver_instance_prefix] = ", ".join(
+            str(unique_size) for unique_size in unique_sizes
+        )
+
+    return cluster_ultraserver_capacity_block_sizes_dict
+
+
+def has_ultraserver_instance(cr_target):
+    """Check if the compute resource uses ultraserver instances with capacity blocks."""
+    _has_ultraserver_instance = False
+    if cr_target and cr_target.capacity_reservation_id:
+        (
+            instance_type,
+            reservation_type,
+        ) = AWSApi.instance().ec2.get_instance_type_and_reservation_type_from_capacity_reservation(
+            cr_target.capacity_reservation_id
+        )
+        instance_prefix = instance_type.split(".")[0]
+        if reservation_type == "capacity-block" and instance_prefix in ULTRASERVER_INSTANCE_PREFIX_LIST:
+            _has_ultraserver_instance = True
+
+    return _has_ultraserver_instance
 
 
 class NodeIamResourcesBase(Construct):
@@ -337,7 +431,7 @@ class NodeIamResourcesBase(Construct):
         scope: Construct,
         id: str,
         config: BaseClusterConfig,
-        node: Union[HeadNode, BaseQueue],
+        node: Union[HeadNode, BaseQueue, LoginNodesPool],
         shared_storage_infos: dict,
         name: str,
     ):
@@ -347,7 +441,12 @@ class NodeIamResourcesBase(Construct):
 
         self._add_role_and_policies(node, shared_storage_infos, name)
 
-    def _add_role_and_policies(self, node: Union[HeadNode, BaseQueue], shared_storage_infos: dict, name: str):
+    def _add_role_and_policies(
+        self,
+        node: Union[HeadNode, BaseQueue, LoginNodesPool],
+        shared_storage_infos: dict,
+        name: str,
+    ):
         """Create role and policies for the given node/queue."""
         suffix = create_hash_suffix(name)
         if node.instance_profile:
@@ -369,7 +468,7 @@ class NodeIamResourcesBase(Construct):
                 self._add_custom_cookbook_policies_to_role(self.instance_role.ref, f"CustomCookbookPolicies{suffix}")
 
             # S3 Access Policies
-            if self._condition_create_s3_access_policies(node):
+            if isinstance(node, (BaseQueue, HeadNode)) and self._condition_create_s3_access_policies(node):
                 self._add_s3_access_policies_to_role(node, self.instance_role.ref, f"S3AccessPolicies{suffix}")
 
             # Head node Instance Profile
@@ -387,7 +486,7 @@ class NodeIamResourcesBase(Construct):
             instance_profile_name=instance_profile_name,
         ).ref
 
-    def _add_node_role(self, node: Union[HeadNode, BaseQueue], name: str):
+    def _add_node_role(self, node: Union[HeadNode, BaseQueue, LoginNodesPool], name: str):
         role_path, role_name = add_cluster_iam_resource_prefix(
             self._config.cluster_name, self._config, name, iam_type="AWS::IAM::Role"
         )
@@ -408,21 +507,20 @@ class NodeIamResourcesBase(Construct):
             self._config.cluster_name, self._config, "parallelcluster", iam_type="AWS::IAM::Policy"
         )
         common_policies = []
-        if self._config.scheduling.scheduler != "awsbatch":
-            efs_with_iam_authorization_arns = self._get_efs_with_iam_authorization_arns(shared_storage_infos)
-            if efs_with_iam_authorization_arns:
-                common_policies.append(
-                    iam.PolicyStatement(
-                        sid="Efs",
-                        actions=[
-                            "elasticfilesystem:ClientMount",
-                            "elasticfilesystem:ClientRootAccess",
-                            "elasticfilesystem:ClientWrite",
-                        ],
-                        effect=iam.Effect.ALLOW,
-                        resources=efs_with_iam_authorization_arns,
-                    ),
-                )
+        efs_with_iam_authorization_arns = self._get_efs_with_iam_authorization_arns(shared_storage_infos)
+        if efs_with_iam_authorization_arns:
+            common_policies.append(
+                iam.PolicyStatement(
+                    sid="Efs",
+                    actions=[
+                        "elasticfilesystem:ClientMount",
+                        "elasticfilesystem:ClientRootAccess",
+                        "elasticfilesystem:ClientWrite",
+                    ],
+                    effect=iam.Effect.ALLOW,
+                    resources=efs_with_iam_authorization_arns,
+                ),
+            )
         iam.CfnPolicy(
             Stack.of(self),
             name,
@@ -449,7 +547,7 @@ class NodeIamResourcesBase(Construct):
         except AttributeError:
             return False
 
-    def _condition_create_s3_access_policies(self, node: Union[HeadNode, BaseQueue]):
+    def _condition_create_s3_access_policies(self, node: Union[HeadNode, BaseQueue, LoginNodesPool]):
         return node.iam and node.iam.s3_access
 
     def _add_custom_cookbook_policies_to_role(self, role_ref: str, name: str):
@@ -481,7 +579,9 @@ class NodeIamResourcesBase(Construct):
             roles=[role_ref],
         )
 
-    def _add_s3_access_policies_to_role(self, node: Union[HeadNode, BaseQueue], role_ref: str, name: str):
+    def _add_s3_access_policies_to_role(
+        self, node: Union[HeadNode, BaseQueue, LoginNodesPool], role_ref: str, name: str
+    ):
         """Attach S3 policies to given role."""
         read_only_s3_resources = []
         read_write_s3_resources = []
@@ -544,7 +644,7 @@ class HeadNodeIamResources(NodeIamResourcesBase):
         scope: Construct,
         id: str,
         config: BaseClusterConfig,
-        node: Union[HeadNode, BaseQueue],
+        node: Union[HeadNode, BaseQueue, LoginNodesPool],
         shared_storage_infos: dict,
         name: str,
         cluster_bucket: S3Bucket,
@@ -557,6 +657,7 @@ class HeadNodeIamResources(NodeIamResourcesBase):
             iam.PolicyStatement(
                 sid="Ec2",
                 actions=[
+                    "ec2:DescribeLaunchTemplateVersions",
                     "ec2:DescribeInstanceAttribute",
                     "ec2:DescribeInstances",
                     "ec2:DescribeInstanceStatus",
@@ -619,10 +720,7 @@ class HeadNodeIamResources(NodeIamResourcesBase):
                     "cloudformation:SignalResource",
                 ],
                 effect=iam.Effect.ALLOW,
-                resources=[
-                    self._format_arn(service="cloudformation", resource=f"stack/{Stack.of(self).stack_name}/*"),
-                    self._format_arn(service="cloudformation", resource=f"stack/{Stack.of(self).stack_name}-*/*"),
-                ],
+                resources=[core.Aws.STACK_ID],
             ),
             iam.PolicyStatement(
                 sid="DcvLicense",
@@ -641,120 +739,123 @@ class HeadNodeIamResources(NodeIamResourcesBase):
             ),
         ]
 
-        if self._config.scheduling.scheduler != "awsbatch":
+        if self._config.scheduling.settings and self._config.scheduling.settings.munge_key_secret_arn:
             policy.extend(
                 [
                     iam.PolicyStatement(
-                        sid="EC2Terminate",
-                        actions=["ec2:TerminateInstances"],
+                        sid="SecretsManager",
+                        actions=["secretsmanager:GetSecretValue"],
                         effect=iam.Effect.ALLOW,
-                        resources=["*"],
-                        conditions={
-                            "StringEquals": {f"ec2:ResourceTag/{PCLUSTER_CLUSTER_NAME_TAG}": Stack.of(self).stack_name}
-                        },
-                    ),
-                    iam.PolicyStatement(
-                        sid="EC2RunInstancesCreateFleet",
-                        actions=["ec2:RunInstances", "ec2:CreateFleet"],
-                        effect=iam.Effect.ALLOW,
-                        resources=[
-                            self._format_arn(service="ec2", resource=f"subnet/{subnet_id}")
-                            for subnet_id in self._config.compute_subnet_ids
-                        ]
-                        + [
-                            self._format_arn(service="ec2", resource="fleet/*"),
-                            self._format_arn(service="ec2", resource="network-interface/*"),
-                            self._format_arn(service="ec2", resource="instance/*"),
-                            self._format_arn(service="ec2", resource="volume/*"),
-                            self._format_arn(service="ec2", resource=f"key-pair/{self._config.head_node.ssh.key_name}"),
-                            self._format_arn(service="ec2", resource="security-group/*"),
-                            self._format_arn(service="ec2", resource="launch-template/*"),
-                            self._format_arn(service="ec2", resource="placement-group/*"),
-                        ]
-                        + [
-                            self._format_arn(service="ec2", resource=f"image/{queue_ami}", account="")
-                            for _, queue_ami in self._config.image_dict.items()
-                        ],
-                    ),
-                    iam.PolicyStatement(
-                        sid="EC2DescribeCapacityReservations",
-                        actions=["ec2:DescribeCapacityReservations"],
-                        effect=iam.Effect.ALLOW,
-                        resources=["*"],
-                    ),
-                    iam.PolicyStatement(
-                        sid="PassRole",
-                        actions=["iam:PassRole"],
-                        effect=iam.Effect.ALLOW,
-                        resources=self._generate_head_node_pass_role_resources(),
-                    ),
-                    iam.PolicyStatement(
-                        sid="DynamoDBTable",
-                        actions=["dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:GetItem"],
-                        effect=iam.Effect.ALLOW,
-                        resources=[
-                            self._format_arn(
-                                service="dynamodb",
-                                resource=f"table/{PCLUSTER_DYNAMODB_PREFIX}{Stack.of(self).stack_name}",
-                            )
-                        ],
+                        resources=[self._config.scheduling.settings.munge_key_secret_arn],
                     ),
                 ]
             )
 
-            self._add_compute_console_output_policy_statement(policy)
-
-            capacity_reservation_ids = self._config.capacity_reservation_ids
-
-            if capacity_reservation_ids:
-                policy.append(
-                    iam.PolicyStatement(
-                        sid="AllowRunningReservedCapacity",
-                        actions=["ec2:RunInstances"],
-                        effect=iam.Effect.ALLOW,
-                        resources=self._config.capacity_reservation_arns,
-                    )
-                )
-            capacity_reservation_resource_group_arns = self._config.capacity_reservation_resource_group_arns
-            if capacity_reservation_resource_group_arns:
+            if self._config.login_nodes:
                 policy.extend(
                     [
                         iam.PolicyStatement(
-                            sid="AllowManagingReservedCapacity",
-                            actions=["ec2:RunInstances", "ec2:CreateFleet", "resource-groups:ListGroupResources"],
+                            sid="TargetGroupDescribe",
+                            actions=[
+                                "elasticloadbalancing:DescribeTargetGroups",
+                                "elasticloadbalancing:DescribeTargetHealth",
+                            ],
                             effect=iam.Effect.ALLOW,
-                            resources=capacity_reservation_resource_group_arns,
-                        )
+                            resources=["*"],
+                        ),
                     ]
                 )
 
-        if self._config.scheduling.scheduler == "plugin":
-            cluster_shared_artifacts = get_attr(
-                self._config, "scheduling.settings.scheduler_definition.plugin_resources.cluster_shared_artifacts"
-            )
-            if cluster_shared_artifacts:
-                for artifacts in cluster_shared_artifacts:
-                    if get_url_scheme(artifacts.source) == "s3":
-                        bucket_info = parse_bucket_url(artifacts.source)
-                        bucket_name = bucket_info.get("bucket_name")
-                        object_key = bucket_info.get("object_key")
-                        policy.extend(
-                            [
-                                iam.PolicyStatement(
-                                    actions=["s3:GetObject"],
-                                    effect=iam.Effect.ALLOW,
-                                    resources=[
-                                        self._format_arn(
-                                            region="",
-                                            service="s3",
-                                            account="",
-                                            resource=bucket_name,
-                                            resource_name=object_key,
-                                        )
-                                    ],
-                                ),
-                            ]
+        policy.extend(
+            [
+                iam.PolicyStatement(
+                    sid="EC2Terminate",
+                    actions=["ec2:TerminateInstances"],
+                    effect=iam.Effect.ALLOW,
+                    resources=["*"],
+                    conditions={
+                        "StringEquals": {f"ec2:ResourceTag/{PCLUSTER_CLUSTER_NAME_TAG}": Stack.of(self).stack_name}
+                    },
+                ),
+                iam.PolicyStatement(
+                    sid="EC2RunInstancesCreateFleet",
+                    actions=["ec2:RunInstances", "ec2:CreateFleet"],
+                    effect=iam.Effect.ALLOW,
+                    resources=[
+                        self._format_arn(service="ec2", resource=f"subnet/{subnet_id}")
+                        for subnet_id in self._config.compute_subnet_ids
+                    ]
+                    + [
+                        self._format_arn(service="ec2", resource="fleet/*"),
+                        self._format_arn(service="ec2", resource="network-interface/*"),
+                        self._format_arn(service="ec2", resource="instance/*"),
+                        self._format_arn(service="ec2", resource="volume/*"),
+                        self._format_arn(service="ec2", resource=f"key-pair/{self._config.head_node.ssh.key_name}"),
+                        self._format_arn(service="ec2", resource="security-group/*"),
+                        self._format_arn(service="ec2", resource="launch-template/*"),
+                        self._format_arn(service="ec2", resource="placement-group/*"),
+                    ]
+                    + [
+                        self._format_arn(service="ec2", resource=f"image/{queue_ami}", account="")
+                        for _, queue_ami in self._config.image_dict.items()
+                    ],
+                ),
+                iam.PolicyStatement(
+                    sid="EC2DescribeCapacityReservations",
+                    actions=["ec2:DescribeCapacityReservations"],
+                    effect=iam.Effect.ALLOW,
+                    resources=["*"],
+                ),
+                iam.PolicyStatement(
+                    sid="PassRole",
+                    actions=["iam:PassRole"],
+                    effect=iam.Effect.ALLOW,
+                    resources=self._generate_head_node_pass_role_resources(),
+                ),
+                iam.PolicyStatement(
+                    sid="DynamoDBTable",
+                    actions=[
+                        "dynamodb:UpdateItem",
+                        "dynamodb:PutItem",
+                        "dynamodb:GetItem",
+                        "dynamodb:BatchGetItem",
+                    ],
+                    effect=iam.Effect.ALLOW,
+                    resources=[
+                        self._format_arn(
+                            service="dynamodb",
+                            resource=f"table/{PCLUSTER_DYNAMODB_PREFIX}{Stack.of(self).stack_name}",
                         )
+                    ],
+                ),
+            ]
+        )
+
+        self._add_compute_console_output_policy_statement(policy)
+
+        capacity_reservation_ids = self._config.capacity_reservation_ids
+
+        if capacity_reservation_ids:
+            policy.append(
+                iam.PolicyStatement(
+                    sid="AllowRunningReservedCapacity",
+                    actions=["ec2:RunInstances"],
+                    effect=iam.Effect.ALLOW,
+                    resources=self._config.capacity_reservation_arns,
+                )
+            )
+        capacity_reservation_resource_group_arns = self._config.capacity_reservation_resource_group_arns
+        if capacity_reservation_resource_group_arns:
+            policy.extend(
+                [
+                    iam.PolicyStatement(
+                        sid="AllowManagingReservedCapacity",
+                        actions=["ec2:RunInstances", "ec2:CreateFleet", "resource-groups:ListGroupResources"],
+                        effect=iam.Effect.ALLOW,
+                        resources=capacity_reservation_resource_group_arns,
+                    )
+                ]
+            )
 
         if self._config.directory_service:
             password_secret_arn = Arn.split(
@@ -764,18 +865,18 @@ class HeadNodeIamResources(NodeIamResourcesBase):
                 iam.PolicyStatement(
                     sid="AllowGettingDirectorySecretValue",
                     actions=[
-                        "secretsmanager:GetSecretValue"
-                        if password_secret_arn.service == "secretsmanager"
-                        else "ssm:GetParameter"
-                        if password_secret_arn.service == "ssm"
-                        else None
+                        (
+                            "secretsmanager:GetSecretValue"
+                            if password_secret_arn.service == "secretsmanager"
+                            else "ssm:GetParameter" if password_secret_arn.service == "ssm" else None
+                        )
                     ],
                     effect=iam.Effect.ALLOW,
                     resources=[self._config.directory_service.password_secret_arn],
                 )
             )
 
-        if self._config.scheduling.scheduler == "slurm" and self._config.scheduling.settings.database:
+        if self._config.scheduling.settings.database:
             policy.append(
                 iam.PolicyStatement(
                     sid="AllowGettingSlurmDbSecretValue",
@@ -837,6 +938,102 @@ class HeadNodeIamResources(NodeIamResourcesBase):
         return list(pass_role_resources)
 
 
+class LoginNodesIamResources(NodeIamResourcesBase):
+    """Construct defining IAM resources for a login node."""
+
+    def __init__(
+        self,
+        scope: Construct,
+        id: str,
+        config: BaseClusterConfig,
+        node: Union[HeadNode, BaseQueue, LoginNodesPool],
+        shared_storage_infos: dict,
+        name: str,
+        auto_scaling_group_name: str,
+    ):
+        self._auto_scaling_group_name = auto_scaling_group_name
+        super().__init__(scope, id, config, node, shared_storage_infos, name)
+
+    def _build_policy(self) -> List[iam.PolicyStatement]:
+        return [
+            iam.PolicyStatement(
+                sid="Ec2",
+                actions=["ec2:DescribeInstanceAttribute"],
+                effect=iam.Effect.ALLOW,
+                resources=["*"],
+            ),
+            iam.PolicyStatement(
+                sid="S3GetObj",
+                actions=["s3:GetObject"],
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self._format_arn(
+                        service="s3",
+                        resource="{0}-aws-parallelcluster/*".format(Stack.of(self).region),
+                        region="",
+                        account="",
+                    )
+                ],
+            ),
+            iam.PolicyStatement(
+                sid="Autoscaling",
+                actions=[
+                    "autoscaling:CompleteLifecycleAction",
+                ],
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self._format_arn(
+                        service="autoscaling",
+                        resource=f"autoScalingGroup:*:autoScalingGroupName/{self._auto_scaling_group_name}",
+                    )
+                ],
+            ),
+            iam.PolicyStatement(
+                sid="CloudFormation",
+                actions=[
+                    "cloudformation:DescribeStackResource",
+                    "cloudformation:DescribeStacks",
+                ],
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self._format_arn(
+                        service="cloudformation",
+                        resource=f"stack/{Stack.of(self).stack_name}/*",
+                        region=Stack.of(self).region,
+                        account=Stack.of(self).account,
+                    ),
+                    core.Aws.STACK_ID,
+                ],
+            ),
+            iam.PolicyStatement(
+                sid="DynamoDBTable",
+                actions=["dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:GetItem"],
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self._format_arn(
+                        service="dynamodb",
+                        resource=f"table/{PCLUSTER_DYNAMODB_PREFIX}{Stack.of(self).stack_name}",
+                    )
+                ],
+            ),
+            iam.PolicyStatement(
+                sid="DcvLicense",
+                actions=[
+                    "s3:GetObject",
+                ],
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self._format_arn(
+                        service="s3",
+                        resource="dcv-license.{0}/*".format(Stack.of(self).region),
+                        region="",
+                        account="",
+                    )
+                ],
+            ),
+        ]
+
+
 class ComputeNodeIamResources(NodeIamResourcesBase):
     """Construct defining IAM resources for a compute node."""
 
@@ -845,7 +1042,7 @@ class ComputeNodeIamResources(NodeIamResourcesBase):
         scope: Construct,
         id: str,
         config: BaseClusterConfig,
-        node: Union[HeadNode, BaseQueue],
+        node: Union[HeadNode, BaseQueue, LoginNodesPool],
         shared_storage_infos: dict,
         name: str,
     ):
@@ -871,6 +1068,25 @@ class ComputeNodeIamResources(NodeIamResourcesBase):
                         resource="{0}-aws-parallelcluster/*".format(Stack.of(self).region),
                         region="",
                         account="",
+                    )
+                ],
+            ),
+            iam.PolicyStatement(
+                sid="CloudFormation",
+                actions=[
+                    "cloudformation:DescribeStackResource",
+                ],
+                effect=iam.Effect.ALLOW,
+                resources=[core.Aws.STACK_ID],
+            ),
+            iam.PolicyStatement(
+                sid="DynamoDBTable",
+                actions=["dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:GetItem"],
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self._format_arn(
+                        service="dynamodb",
+                        resource=f"table/{PCLUSTER_DYNAMODB_PREFIX}{Stack.of(self).stack_name}",
                     )
                 ],
             ),
@@ -919,14 +1135,16 @@ class PclusterLambdaConstruct(Construct):
             handler=f"{handler_func}.handler",
             memory_size=128,
             role=execution_role,
-            runtime="python3.9",
+            runtime="python3.14",
             timeout=timeout,
-            vpc_config=awslambda.CfnFunction.VpcConfigProperty(
-                security_group_ids=config.lambda_functions_vpc_config.security_group_ids,
-                subnet_ids=config.lambda_functions_vpc_config.subnet_ids,
-            )
-            if config.lambda_functions_vpc_config
-            else None,
+            vpc_config=(
+                awslambda.CfnFunction.VpcConfigProperty(
+                    security_group_ids=config.lambda_functions_vpc_config.security_group_ids,
+                    subnet_ids=config.lambda_functions_vpc_config.subnet_ids,
+                )
+                if config.lambda_functions_vpc_config
+                else None
+            ),
         )
 
     def _stack_unique_id(self):
@@ -955,7 +1173,7 @@ class CdkLaunchTemplateBuilder(_LaunchTemplateBuilder):
     def _block_device_mapping_for_virt(self, device_name, virtual_name):
         return ec2.CfnLaunchTemplate.BlockDeviceMappingProperty(device_name=device_name, virtual_name=virtual_name)
 
-    def _instance_market_option(self, market_type, spot_instance_type, instance_interruption_behavior, max_price):
+    def _spot_instance_market_option(self, market_type, spot_instance_type, instance_interruption_behavior, max_price):
         return ec2.CfnLaunchTemplate.InstanceMarketOptionsProperty(
             market_type=market_type,
             spot_options=ec2.CfnLaunchTemplate.SpotOptionsProperty(
@@ -964,6 +1182,9 @@ class CdkLaunchTemplateBuilder(_LaunchTemplateBuilder):
                 max_price=max_price,
             ),
         )
+
+    def _capacity_block_instance_market_option(self, market_type):
+        return ec2.CfnLaunchTemplate.InstanceMarketOptionsProperty(market_type=market_type)
 
     def _capacity_reservation(self, cr_target):
         return ec2.CfnLaunchTemplate.CapacityReservationSpecificationProperty(

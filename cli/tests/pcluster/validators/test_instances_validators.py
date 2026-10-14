@@ -20,7 +20,7 @@ from pcluster.validators.instances_validators import (
     InstancesAllocationStrategyValidator,
     InstancesCPUValidator,
     InstancesEFAValidator,
-    InstancesMemorySchedulingValidator,
+    InstancesMemorySchedulingWarningValidator,
     InstancesNetworkingValidator,
 )
 from tests.pcluster.validators.utils import assert_failure_messages
@@ -33,8 +33,8 @@ from tests.pcluster.validators.utils import assert_failure_messages
         (
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo(
-                    {"InstanceType": "t2.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}
+                "t4g.micro": InstanceTypeInfo(
+                    {"InstanceType": "t4g.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}
                 ),
                 "t3.micro": InstanceTypeInfo(
                     {"InstanceType": "t3.micro", "VCpuInfo": {"DefaultVCpus": 5, "DefaultCores": 2}}
@@ -42,13 +42,13 @@ from tests.pcluster.validators.utils import assert_failure_messages
             },
             False,
             "Instance types listed under Compute Resource TestComputeResource must have the same number of vCPUs "
-            "({'t2.micro': 4, 't3.micro': 5}).",
+            "({'t4g.micro': 4, 't3.micro': 5}).",
         ),
         (
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo(
-                    {"InstanceType": "t2.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}
+                "t4g.micro": InstanceTypeInfo(
+                    {"InstanceType": "t4g.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}
                 ),
                 "t3.micro": InstanceTypeInfo(
                     {"InstanceType": "t3.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}
@@ -61,8 +61,8 @@ from tests.pcluster.validators.utils import assert_failure_messages
         (
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo(
-                    {"InstanceType": "t2.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 1}}
+                "t4g.micro": InstanceTypeInfo(
+                    {"InstanceType": "t4g.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 1}}
                 ),
                 "t3.micro": InstanceTypeInfo(
                     {"InstanceType": "t3.micro", "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}
@@ -70,12 +70,12 @@ from tests.pcluster.validators.utils import assert_failure_messages
             },
             True,
             "Instance types listed under Compute Resource TestComputeResource must have the same number of CPU "
-            "cores when Simultaneous Multithreading is disabled ({'t2.micro': 1, 't3.micro': 2}).",
+            "cores when Simultaneous Multithreading is disabled ({'t4g.micro': 1, 't3.micro': 2}).",
         ),
         (
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 1}}),
+                "t4g.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 1}}),
                 "t3.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}),
             },
             False,
@@ -337,20 +337,30 @@ def test_instances_accelerators_validator(compute_resource_name, instance_types_
         (
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
-                "t3.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
-                "c5n.18xlarge": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": True}}),
+                "t4g.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "c5n.18xlarge": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": True, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
             },
             True,
             False,
-            "Instance type(s) (t2.micro,t3.micro) do not support EFA and cannot be launched when EFA is enabled in "
+            "Instance type(s) (t3.micro,t4g.micro) do not support EFA and cannot be launched when EFA is enabled in "
             "Compute Resource: TestComputeResource.",
         ),
         (
             "TestComputeResource",
             {
-                "c5n.9xlarge": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": True}}),
-                "c5n.18xlarge": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": True}}),
+                "c5n.9xlarge": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": True, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "c5n.18xlarge": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": True, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
             },
             True,
             False,
@@ -360,9 +370,15 @@ def test_instances_accelerators_validator(compute_resource_name, instance_types_
         (
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
-                "t3.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
-                "c5n.18xlarge": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": True}}),
+                "t4g.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "c5n.18xlarge": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": True, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
             },
             False,
             False,
@@ -377,9 +393,15 @@ def test_instances_accelerators_validator(compute_resource_name, instance_types_
         (
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
-                "t3.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
-                "c5n.18xlarge": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": True}}),
+                "t4g.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "c5n.18xlarge": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": True, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
             },
             False,
             True,
@@ -389,12 +411,16 @@ def test_instances_accelerators_validator(compute_resource_name, instance_types_
         (
             "TestComputeResource",
             {
-                "t3.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"EfaSupported": False}}),
+                "t3.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
+                "t4g.micro": InstanceTypeInfo(
+                    {"NetworkInfo": {"EfaSupported": False, "NetworkCards": [{"NetworkCardIndex": 0}]}}
+                ),
             },
             True,
             False,
-            "Instance type(s) (t2.micro,t3.micro) do not support EFA and cannot be launched when EFA is enabled in "
+            "Instance type(s) (t3.micro,t4g.micro) do not support EFA and cannot be launched when EFA is enabled in "
             "Compute Resource: TestComputeResource.",
         ),
     ],
@@ -420,8 +446,30 @@ def test_instances_efa_validator(
             "TestQueue10",
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"MaximumNetworkCards": 4}}),
-                "t3.micro": InstanceTypeInfo({"NetworkInfo": {"MaximumNetworkCards": 2}}),
+                "t4g.micro": InstanceTypeInfo(
+                    {
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 4,
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 1, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 2, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 3, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                            ],
+                        }
+                    }
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 2,
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 1, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                            ],
+                        }
+                    }
+                ),
             },
             False,
             "Compute Resource TestComputeResource has instance types with varying numbers of network cards (Min: 2, "
@@ -431,8 +479,32 @@ def test_instances_efa_validator(
             "TestQueue10",
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"MaximumNetworkCards": 4}}),
-                "t3.micro": InstanceTypeInfo({"NetworkInfo": {"MaximumNetworkCards": 4}}),
+                "t4g.micro": InstanceTypeInfo(
+                    {
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 4,
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 1, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 2, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 3, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                            ],
+                        }
+                    }
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 4,
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 1, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 2, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 3, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                            ],
+                        }
+                    }
+                ),
             },
             False,
             "",
@@ -443,8 +515,32 @@ def test_instances_efa_validator(
             "TestQueue11",
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"MaximumNetworkCards": 4}}),
-                "t3.micro": InstanceTypeInfo({"NetworkInfo": {"MaximumNetworkCards": 4}}),
+                "t4g.micro": InstanceTypeInfo(
+                    {
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 4,
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 1, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 2, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 3, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                            ],
+                        }
+                    }
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 4,
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 1, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 2, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 3, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                            ],
+                        }
+                    }
+                ),
             },
             True,
             "Enabling placement groups for queue: TestQueue11 may result in Insufficient Capacity Errors due to the "
@@ -455,10 +551,129 @@ def test_instances_efa_validator(
             "TestQueue11",
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"NetworkInfo": {"MaximumNetworkCards": 4}}),
+                "t4g.micro": InstanceTypeInfo(
+                    {
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 4,
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 1, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 2, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                                {"NetworkCardIndex": 3, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 4},
+                            ],
+                        }
+                    }
+                ),
             },
             True,
             "",
+        ),
+        # Mismatched MaximumEfaInterfaces across instance types
+        (
+            "TestQueue12",
+            "TestComputeResource",
+            {
+                "p5.48xlarge": InstanceTypeInfo(
+                    {
+                        "InstanceType": "p5.48xlarge",
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 32,
+                            "EfaInfo": {"MaximumEfaInterfaces": 32},
+                            "NetworkCards": [
+                                {"NetworkCardIndex": i, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 2}
+                                for i in range(32)
+                            ],
+                        },
+                    }
+                ),
+                "p4d.24xlarge": InstanceTypeInfo(
+                    {
+                        "InstanceType": "p4d.24xlarge",
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 4,
+                            "EfaInfo": {"MaximumEfaInterfaces": 4},
+                            "NetworkCards": [
+                                {"NetworkCardIndex": i, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 15}
+                                for i in range(4)
+                            ],
+                        },
+                    }
+                ),
+            },
+            False,
+            "Compute Resource TestComputeResource has instance types with varying numbers of maximum EFA "
+            "interfaces (Min: 4, Max: 32). EFA network configuration will be based on "
+            "the instance type with the fewest EFA interfaces (4).",
+        ),
+        # Same MaximumEfaInterfaces — no warning
+        (
+            "TestQueue13",
+            "TestComputeResource",
+            {
+                "c5n.18xlarge": InstanceTypeInfo(
+                    {
+                        "InstanceType": "c5n.18xlarge",
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 1,
+                            "EfaInfo": {"MaximumEfaInterfaces": 1},
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 15},
+                            ],
+                        },
+                    }
+                ),
+                "c6i.32xlarge": InstanceTypeInfo(
+                    {
+                        "InstanceType": "c6i.32xlarge",
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 1,
+                            "EfaInfo": {"MaximumEfaInterfaces": 1},
+                            "NetworkCards": [
+                                {"NetworkCardIndex": 0, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 15},
+                            ],
+                        },
+                    }
+                ),
+            },
+            False,
+            "",
+        ),
+        # Mixed NCI-0 EFA support: InstanceA has MaxEfa==MaxCards, InstanceB has MaxEfa<MaxCards
+        (
+            "TestQueue14",
+            "TestComputeResource",
+            {
+                "instanceA": InstanceTypeInfo(
+                    {
+                        "InstanceType": "instanceA",
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 5,
+                            "EfaInfo": {"MaximumEfaInterfaces": 5},
+                            "NetworkCards": [
+                                {"NetworkCardIndex": i, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 2}
+                                for i in range(5)
+                            ],
+                        },
+                    }
+                ),
+                "instanceB": InstanceTypeInfo(
+                    {
+                        "InstanceType": "instanceB",
+                        "NetworkInfo": {
+                            "MaximumNetworkCards": 6,
+                            "EfaInfo": {"MaximumEfaInterfaces": 5},
+                            "NetworkCards": [
+                                {"NetworkCardIndex": i, "NetworkPerformance": "High", "MaximumNetworkInterfaces": 2}
+                                for i in range(6)
+                            ],
+                        },
+                    }
+                ),
+            },
+            False,
+            "Compute Resource TestComputeResource mixes instance types where NCI-0 supports EFA "
+            "(instanceA) with instance types where it does not (instanceB). "
+            "This may result in a suboptimal EFA network configuration for some instance types.",
         ),
     ],
 )
@@ -476,52 +691,170 @@ def test_instances_networking_validator(
 
 
 @pytest.mark.parametrize(
-    "compute_resource_name, capacity_type, allocation_strategy, expected_message",
+    "capacity_type, allocation_strategy, expected_message",
     [
         # OnDemand Capacity type only supports "lowest-price" allocation strategy
-        # Spot Capacity type supports both "lowest-price" and "capacity-optimized" allocation strategy
         (
-            "TestComputeResource",
             CapacityType.ONDEMAND,
             AllocationStrategy.CAPACITY_OPTIMIZED,
             "Compute Resource TestComputeResource is using an OnDemand CapacityType but the Allocation Strategy "
-            "specified is capacity-optimized. OnDemand CapacityType can only use 'lowest-price' allocation strategy.",
+            "specified is capacity-optimized. "
+            "OnDemand CapacityType can only use 'lowest-price' or 'prioritized' allocation strategy.",
         ),
-        ("TestComputeResource", CapacityType.ONDEMAND, AllocationStrategy.LOWEST_PRICE, ""),
+        (
+            CapacityType.ONDEMAND,
+            AllocationStrategy.PRICE_CAPACITY_OPTIMIZED,
+            "Compute Resource TestComputeResource is using an OnDemand CapacityType but the Allocation Strategy "
+            "specified is price-capacity-optimized. "
+            "OnDemand CapacityType can only use 'lowest-price' or 'prioritized' allocation strategy.",
+        ),
+        (
+            CapacityType.ONDEMAND,
+            AllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED,
+            "Compute Resource TestComputeResource is using an OnDemand CapacityType but the Allocation "
+            "Strategy specified is capacity-optimized-prioritized. "
+            "OnDemand CapacityType can only use 'lowest-price' or 'prioritized' allocation strategy.",
+        ),
+        (CapacityType.ONDEMAND, AllocationStrategy.PRIORITIZED, ""),
+        (CapacityType.ONDEMAND, AllocationStrategy.LOWEST_PRICE, ""),
+        (CapacityType.ONDEMAND, None, ""),
+        # Spot Capacity type supports both "lowest-price" and "capacity-optimized" allocation strategy
+        (CapacityType.SPOT, AllocationStrategy.LOWEST_PRICE, ""),
+        (CapacityType.SPOT, AllocationStrategy.CAPACITY_OPTIMIZED, ""),
+        (CapacityType.SPOT, AllocationStrategy.PRICE_CAPACITY_OPTIMIZED, ""),
+        (CapacityType.SPOT, AllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED, ""),
+        (CapacityType.SPOT, None, ""),
+        (
+            CapacityType.SPOT,
+            AllocationStrategy.PRIORITIZED,
+            "Compute Resource TestComputeResource is using a SPOT CapacityType but the "
+            "Allocation Strategy specified is prioritized. SPOT CapacityType can only use "
+            "'lowest-price', "
+            "'capacity-optimized', "
+            "'price-capacity-optimized' "
+            "or 'capacity-optimized-prioritized' allocation strategy.",
+        ),
+        # Capacity Block type supports does not support any allocation strategy
+        (
+            CapacityType.CAPACITY_BLOCK,
+            AllocationStrategy.CAPACITY_OPTIMIZED,
+            "Compute Resource TestComputeResource is using a CAPACITY_BLOCK CapacityType but the Allocation "
+            "Strategy specified is capacity-optimized. When using CAPACITY_BLOCK CapacityType, "
+            "allocation strategy should not be set.",
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            AllocationStrategy.PRICE_CAPACITY_OPTIMIZED,
+            (
+                "Compute Resource TestComputeResource is using a CAPACITY_BLOCK CapacityType but the Allocation "
+                "Strategy specified is price-capacity-optimized. When using CAPACITY_BLOCK CapacityType, "
+                "allocation strategy should not be set."
+            ),
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            AllocationStrategy.LOWEST_PRICE,
+            "Compute Resource TestComputeResource is using a CAPACITY_BLOCK CapacityType but the Allocation Strategy "
+            "specified is lowest-price. When using CAPACITY_BLOCK CapacityType, allocation strategy should not be set.",
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            AllocationStrategy.PRIORITIZED,
+            "Compute Resource TestComputeResource is using a CAPACITY_BLOCK CapacityType but the Allocation Strategy "
+            "specified is prioritized. When using CAPACITY_BLOCK CapacityType, allocation strategy should not be set.",
+        ),
+        (
+            CapacityType.CAPACITY_BLOCK,
+            AllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED,
+            "Compute Resource TestComputeResource is using a CAPACITY_BLOCK CapacityType but the Allocation Strategy "
+            "specified is capacity-optimized-prioritized. When using CAPACITY_BLOCK CapacityType, "
+            "allocation strategy should not be set.",
+        ),
+        (CapacityType.CAPACITY_BLOCK, None, ""),
     ],
 )
-def test_instances_allocation_strategy_validator(
-    compute_resource_name: str, capacity_type: Enum, allocation_strategy: Enum, expected_message: str
-):
+def test_instances_allocation_strategy_validator(capacity_type: Enum, allocation_strategy: Enum, expected_message: str):
     actual_failures = InstancesAllocationStrategyValidator().execute(
-        compute_resource_name, capacity_type, allocation_strategy
+        "TestComputeResource", capacity_type, allocation_strategy
     )
     assert_failure_messages(actual_failures, expected_message)
 
 
+# Memory-based scheduling is allowed for Compute Resource that use multiple instance type under 'Instances'
+# but a warning is triggered to inform customers of possible wasted resources.
 @pytest.mark.parametrize(
     "compute_resource_name, instance_types_info, memory_scheduling_enabled, expected_message",
     [
-        # Memory-based scheduling is supported for Compute Resource that use either 'InstanceType' or have a single
-        # instance type under 'Instances'
-        (
+        pytest.param(
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}),
-                "t3.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}),
+                "t1.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 2048}}
+                ),
+                "t4g.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 4096}}
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 8192}}
+                ),
             },
             True,
-            "Memory-based scheduling is only supported for Compute Resources using either 'InstanceType' or "
-            "'Instances' with one instance type. Compute Resource TestComputeResource has more than one "
-            "instance type specified.",
+            'Enabling Memory-based scheduling when a Compute Resource ("TestComputeResource") has more than one '
+            "instance type specified may lead to unused resources since only the minimum available memory across "
+            "all instance-types can be specified in the Slurm node definition.",
+            id="Memory Diff exceeds both Absolute (4G) and Percentage (0.20) threshold, so a Warning is triggered",
         ),
-        (
+        pytest.param(
             "TestComputeResource",
             {
-                "t2.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}),
+                "t1.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 20024}}
+                ),
+                "t4g.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 22048}}
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 24096}}
+                ),
+            },
+            True,
+            "",
+            id="Memory Diff exceeds only Absolute (4G) but not Percentage (0.2), so NO Warning is triggered",
+        ),
+        pytest.param(
+            "TestComputeResource",
+            {
+                "t1.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 256}}
+                ),
+                "t4g.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 1024}}
+                ),
+                "t3.micro": InstanceTypeInfo(
+                    {"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}, "MemoryInfo": {"SizeInMiB": 2048}}
+                ),
+            },
+            True,
+            "",
+            id="Memory Diff exceeds only Percentage (0.20) but not Absolute (4G), so NO Warning is triggered",
+        ),
+        pytest.param(
+            "TestComputeResource",
+            {
+                "t4g.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}),
+            },
+            True,
+            "",
+            id="Only one instance type is specified so NO Warning is triggered",
+        ),
+        pytest.param(
+            "TestComputeResource",
+            {
+                "t4g.micro": InstanceTypeInfo({"VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2}}),
             },
             False,
             "",
+            id="Memory Based Scheduling is disabled so no Warning is triggered",
         ),
     ],
 )
@@ -531,7 +864,94 @@ def test_instances_memory_scheduling_validator(
     memory_scheduling_enabled: bool,
     expected_message: str,
 ):
-    actual_failures = InstancesMemorySchedulingValidator().execute(
+    actual_failures = InstancesMemorySchedulingWarningValidator().execute(
         compute_resource_name, instance_types_info, memory_scheduling_enabled
+    )
+    assert_failure_messages(actual_failures, expected_message)
+
+
+@pytest.mark.parametrize(
+    "compute_resource_name, launch_template_id, launch_template_version, "
+    "mock_lt_data, mock_exception, expected_message",
+    [
+        # Launch template not found
+        pytest.param(
+            "TestComputeResource",
+            "lt-12345678901234567",
+            1,
+            None,
+            Exception("Launch template not found"),
+            "Launch template 'lt-12345678901234567' version '1' specified in Compute Resource "
+            "'TestComputeResource' could not be found or accessed",
+            id="Launch template not found",
+        ),
+        # Launch template with only allowed properties (NetworkInterfaces)
+        pytest.param(
+            "TestComputeResource",
+            "lt-12345678901234567",
+            1,
+            {"NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": "subnet-123"}]},
+            None,
+            "",
+            id="Only NetworkInterfaces - allowed",
+        ),
+        # Launch template with disallowed property
+        pytest.param(
+            "TestComputeResource",
+            "lt-12345678901234567",
+            1,
+            {"NetworkInterfaces": [{"DeviceIndex": 0}], "MetadataOptions": {"HttpTokens": "required"}},
+            None,
+            "Launch template 'lt-12345678901234567' in Compute Resource 'TestComputeResource' contains "
+            "properties that are not allowed: MetadataOptions. "
+            "Allowed properties are: NetworkInterfaces.",
+            id="MetadataOptions not allowed",
+        ),
+        # Launch template with multiple disallowed properties
+        pytest.param(
+            "TestComputeResource",
+            "lt-12345678901234567",
+            1,
+            {"UserData": "base64data", "ImageId": "ami-12345"},
+            None,
+            "Launch template 'lt-12345678901234567' in Compute Resource 'TestComputeResource' contains "
+            "properties that are not allowed: ImageId, UserData. "
+            "Allowed properties are: NetworkInterfaces.",
+            id="Multiple disallowed properties",
+        ),
+        # No launch template specified (should pass without validation)
+        pytest.param(
+            "TestComputeResource",
+            None,
+            None,
+            None,
+            None,
+            "",
+            id="No launch template specified",
+        ),
+    ],
+)
+def test_launch_template_validator(
+    mocker,
+    compute_resource_name,
+    launch_template_id,
+    launch_template_version,
+    mock_lt_data,
+    mock_exception,
+    expected_message,
+):
+    from pcluster.validators.instances_validators import LaunchTemplateValidator
+
+    if launch_template_id:
+        mock_ec2 = mocker.patch("pcluster.validators.instances_validators.AWSApi")
+        if mock_exception:
+            mock_ec2.instance().ec2.describe_launch_template_version.side_effect = mock_exception
+        else:
+            mock_ec2.instance().ec2.describe_launch_template_version.return_value = mock_lt_data
+
+    actual_failures = LaunchTemplateValidator().execute(
+        compute_resource_name=compute_resource_name,
+        launch_template_id=launch_template_id,
+        launch_template_version=launch_template_version,
     )
     assert_failure_messages(actual_failures, expected_message)

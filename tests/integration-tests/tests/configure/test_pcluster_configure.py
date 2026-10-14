@@ -21,14 +21,17 @@ from assertpy import assert_that
 from cfn_stacks_factory import CfnVpcStack
 from conftest import inject_additional_config_settings
 from conftest_networking import CIDR_FOR_CUSTOM_SUBNETS
-from utils import get_instance_info
+from utils import get_free_tier_instance_types, get_instance_info, or_regex
 
 PROMPTS = {
     "region": lambda region: {"prompt": r"AWS Region ID \[.*\]: ", "response": region},
     "key_pair": lambda key_name: {"prompt": r"EC2 Key Pair Name \[.*\]: ", "response": key_name},
     "scheduler": lambda scheduler: {"prompt": r"Scheduler \[slurm\]: ", "response": scheduler},
-    "os": lambda os: {"prompt": r"Operating System \[alinux2\]: ", "response": os, "skip_for_batch": True},
-    "head_instance_type": lambda instance: {"prompt": r"Head node instance type \[t.\.micro\]: ", "response": instance},
+    "os": lambda os: {"prompt": r"Operating System \[alinux2023\]: ", "response": os, "skip_for_batch": True},
+    "head_instance_type": lambda free_tier_instance_types, instance: {
+        "prompt": rf"Head node instance type \[({or_regex(free_tier_instance_types)})\]: ",
+        "response": instance,
+    },
     "no_of_queues": lambda n: {"prompt": rf"Number of queues \[{n}\]: ", "response": f"{n}", "skip_for_batch": True},
     "queue_name": lambda queue, name: {"prompt": rf"Name of queue {queue} \[queue{queue}\]: ", "response": name},
     "no_of_compute_resources": lambda queue_name, queue, n: {
@@ -36,8 +39,9 @@ PROMPTS = {
         "response": f"{n}",
         "skip_for_batch": True,
     },
-    "compute_instance_type": lambda resource, queue_name, instance: {
-        "prompt": rf"Compute instance type for compute resource {resource} in {queue_name} \[t.\.micro\]: ",
+    "compute_instance_type": lambda free_tier_instance_types, resource, queue_name, instance: {
+        "prompt": rf"Compute instance type for compute resource {resource} in {queue_name} "
+        + rf"\[({or_regex(free_tier_instance_types)})\]: ",
         "response": instance,
         "skip_for_batch": True,
     },
@@ -53,7 +57,17 @@ PROMPTS = {
 
 
 def test_pcluster_configure(
-    request, vpc_stack, key_name, region, os, instance, scheduler, clusters_factory, test_datadir
+    request,
+    vpc_stack,
+    key_name,
+    region,
+    os,
+    instance,
+    scheduler,
+    clusters_factory,
+    test_datadir,
+    architecture,
+    ami_type,
 ):
     """Verify that the config file produced by `pcluster configure` can be used to create a cluster."""
     skip_if_unsupported_test_options_were_used(request)
@@ -61,7 +75,7 @@ def test_pcluster_configure(
 
     _create_and_test_standard_configuration(request, config_path, region, key_name, scheduler, os, instance, vpc_stack)
 
-    inject_additional_config_settings(config_path, request, region)
+    inject_additional_config_settings(config_path, request, region, architecture, ami_type)
     clusters_factory(config_path)
 
 
@@ -91,8 +105,8 @@ def test_pcluster_configure_avoid_bad_subnets(
             PROMPTS["vpc_creation"]("n"),
             PROMPTS["vpc_id"](vpc_stack.cfn_outputs["VpcId"]),
             PROMPTS["subnet_creation"]("n"),
-            prompt_head_node_subnet_id(subnet_id="", no_of_omitted_subnets=3),
-            prompt_compute_node_subnet_id(subnet_id="", head_node_subnet_id="", no_of_omitted_subnets=3),
+            prompt_head_node_subnet_id(subnet_id="", no_of_omitted_subnets=".*"),
+            prompt_compute_node_subnet_id(subnet_id="", head_node_subnet_id="", no_of_omitted_subnets=".*"),
         ]
     )
     stages = orchestrate_pcluster_configure_stages(prompts=bad_subnets_prompts, scheduler=scheduler)
@@ -142,6 +156,7 @@ def test_efa_and_placement_group(
     region,
     os,
     instance,
+    architecture,
     scheduler,
     clusters_factory,
     test_datadir,
@@ -149,6 +164,7 @@ def test_efa_and_placement_group(
     efa_config,
     placement_group_response_type,
     placement_group_stack,
+    ami_type,
 ):
     config_path = test_datadir / "config.yaml"
 
@@ -160,7 +176,12 @@ def test_efa_and_placement_group(
         PROMPTS["no_of_queues"](1),
         PROMPTS["queue_name"](queue=1, name="myqueue"),
         PROMPTS["no_of_compute_resources"](queue_name="myqueue", queue=1, n=1),
-        PROMPTS["compute_instance_type"](resource=1, queue_name="myqueue", instance=instance),
+        PROMPTS["compute_instance_type"](
+            free_tier_instance_types=get_free_tier_instance_types(region),
+            resource=1,
+            queue_name="myqueue",
+            instance=instance,
+        ),
         PROMPTS["enable_efa"](efa_response),
         prompt_max_size(scheduler=scheduler),
     ]
@@ -187,8 +208,9 @@ def test_efa_and_placement_group(
         efa_config=efa_config,
         placement_group_config=placement_group_config["configuration"],
     )
-    inject_additional_config_settings(config_path, request, region)
-    clusters_factory(config_path)
+    inject_additional_config_settings(config_path, request, region, architecture, ami_type)
+    response = clusters_factory(config_path, dryrun=True, raise_on_error=False).creation_response
+    assert_that(response.get("message")).is_equal_to("Request would have succeeded, but DryRun flag is set.")
 
 
 def test_efa_unsupported(request, vpc_stack, key_name, region, os, instance, scheduler, clusters_factory, test_datadir):
@@ -236,7 +258,10 @@ def standard_first_stage_prompts(region, key_name, scheduler, os, instance):
         PROMPTS["key_pair"](key_name),
         PROMPTS["scheduler"](scheduler),
         PROMPTS["os"](os),
-        PROMPTS["head_instance_type"](instance),
+        PROMPTS["head_instance_type"](
+            free_tier_instance_types=get_free_tier_instance_types(region),
+            instance=instance,
+        ),
     ]
 
 
@@ -245,7 +270,12 @@ def standard_queue_prompts(scheduler, instance, region, size=""):
         PROMPTS["no_of_queues"](1),
         PROMPTS["queue_name"](queue=1, name="myqueue"),
         PROMPTS["no_of_compute_resources"](queue_name="myqueue", queue=1, n=1),
-        PROMPTS["compute_instance_type"](resource=1, queue_name="myqueue", instance=instance),
+        PROMPTS["compute_instance_type"](
+            free_tier_instance_types=get_free_tier_instance_types(region),
+            resource=1,
+            queue_name="myqueue",
+            instance=instance,
+        ),
     ]
 
     is_efa_supported = False
@@ -290,7 +320,7 @@ def prompt_compute_node_subnet_id(subnet_id, head_node_subnet_id, no_of_omitted_
 
 
 def prompt_max_size(scheduler, size=""):
-    size_name = "vCPU" if scheduler == "awsbatch" else "instance count"
+    size_name = "instance count"
     return {"prompt": rf"Maximum {size_name} \[10\]: ", "response": f"{size}"}
 
 
@@ -363,13 +393,13 @@ def assert_config_contains_expected_values(
         {"parameter_path": ["Region"], "expected_value": region},
         {"parameter_path": ["HeadNode", "Ssh", "KeyName"], "expected_value": key_name},
         {"parameter_path": ["Scheduling", "Scheduler"], "expected_value": scheduler},
-        {"parameter_path": ["Image", "Os"], "expected_value": os if scheduler != "awsbatch" else "alinux2"},
+        {"parameter_path": ["Image", "Os"], "expected_value": os},
         {"parameter_path": ["HeadNode", "InstanceType"], "expected_value": instance},
         {"parameter_path": ["HeadNode", "Networking", "SubnetId"], "expected_value": head_node_subnet_id},
         {
             "parameter_path": [
                 "Scheduling",
-                "AwsBatchQueues" if scheduler == "awsbatch" else "SlurmQueues",
+                "SlurmQueues",
                 0,
                 "Networking",
                 "SubnetIds",
@@ -379,55 +409,47 @@ def assert_config_contains_expected_values(
         },
     ]
 
-    if scheduler == "slurm":
-        param_validators += [
+    param_validators += [
+        {
+            "parameter_path": [
+                "Scheduling",
+                "SlurmQueues",
+                0,
+                "ComputeResources",
+                0,
+                "Instances",
+                0,
+                "InstanceType",
+            ],
+            "expected_value": instance,
+        },
+        {
+            "parameter_path": ["Scheduling", "SlurmQueues", 0, "ComputeResources", 0, "MinCount"],
+            "expected_value": 0,
+        },
+    ]
+    if efa_config and "enabled" in efa_config:
+        param_validators.append(
             {
-                "parameter_path": [
-                    "Scheduling",
-                    "SlurmQueues",
-                    0,
-                    "ComputeResources",
-                    0,
-                    "Instances",
-                    0,
-                    "InstanceType",
-                ],
-                "expected_value": instance,
-            },
-            {
-                "parameter_path": ["Scheduling", "SlurmQueues", 0, "ComputeResources", 0, "MinCount"],
-                "expected_value": 0,
-            },
-        ]
-        if efa_config and "enabled" in efa_config:
+                "parameter_path": ["Scheduling", "SlurmQueues", 0, "ComputeResources", 0, "Efa", "Enabled"],
+                "expected_value": efa_config["enabled"],
+            }
+        )
+    if placement_group_config:
+        if "enabled" in placement_group_config:
             param_validators.append(
                 {
-                    "parameter_path": ["Scheduling", "SlurmQueues", 0, "ComputeResources", 0, "Efa", "Enabled"],
-                    "expected_value": efa_config["enabled"],
+                    "parameter_path": ["Scheduling", "SlurmQueues", 0, "Networking", "PlacementGroup", "Enabled"],
+                    "expected_value": placement_group_config["enabled"],
                 }
             )
-        if placement_group_config:
-            if "enabled" in placement_group_config:
-                param_validators.append(
-                    {
-                        "parameter_path": ["Scheduling", "SlurmQueues", 0, "Networking", "PlacementGroup", "Enabled"],
-                        "expected_value": placement_group_config["enabled"],
-                    }
-                )
-            if "id" in placement_group_config:
-                param_validators.append(
-                    {
-                        "parameter_path": ["Scheduling", "SlurmQueues", 0, "Networking", "PlacementGroup", "Id"],
-                        "expected_value": placement_group_config["id"],
-                    }
-                )
-    elif scheduler == "awsbatch":
-        param_validators += [
-            {
-                "parameter_path": ["Scheduling", "AwsBatchQueues", 0, "ComputeResources", 0, "MinvCpus"],
-                "expected_value": 0,
-            }
-        ]
+        if "id" in placement_group_config:
+            param_validators.append(
+                {
+                    "parameter_path": ["Scheduling", "SlurmQueues", 0, "Networking", "PlacementGroup", "Id"],
+                    "expected_value": placement_group_config["id"],
+                }
+            )
     for validator in param_validators:
         expected_value = validator.get("expected_value")
         logging.info(validator.get("parameter_path"))
@@ -448,7 +470,7 @@ def _get_value_by_nested_key(d, keys):
 
 def orchestrate_pcluster_configure_stages(prompts, scheduler):
     # When a user selects Batch as the scheduler, pcluster configure does not prompt for OS or compute instance type.
-    return [prompt for prompt in prompts if scheduler != "awsbatch" or not prompt.get("skip_for_batch")]
+    return [prompt for prompt in prompts]
 
 
 @pytest.fixture(scope="class")

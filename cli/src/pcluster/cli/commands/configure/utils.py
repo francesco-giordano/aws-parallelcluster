@@ -19,7 +19,7 @@ from tabulate import tabulate
 
 from pcluster.aws.aws_api import AWSApi
 from pcluster.aws.common import AWSClientError
-from pcluster.constants import SUPPORTED_REGIONS
+from pcluster.utils import retrieve_supported_regions
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ def handle_client_exception(func):
             print(f"Failed with error: {e}")
             if isinstance(e, ClientError) and "credentials" in str(e):
                 print("To set the credentials, run 'aws configure' or set them as environment variables")
+                return None
 
     return wrapper
 
@@ -45,7 +46,7 @@ def get_default_suggestion(parameter, options):
     """
     # For these parameters, steer users towards a default value rather than selecting the first
     # from the available set of options.
-    opinionated_suggestions = {"Scheduler": "slurm", "Operating System": "alinux2"}
+    opinionated_suggestions = {"Scheduler": "slurm", "Operating System": "alinux2023"}
 
     if parameter in opinionated_suggestions:
         default = opinionated_suggestions.get(parameter)
@@ -200,7 +201,9 @@ def get_rows_and_header(items):
 def get_regions():
     ec2 = boto3.client("ec2")
     regions = ec2.describe_regions().get("Regions")
-    regions = [region.get("RegionName") for region in regions if region.get("RegionName") in SUPPORTED_REGIONS]
+    regions = [
+        region.get("RegionName") for region in regions if region.get("RegionName") in retrieve_supported_regions()
+    ]
     regions.sort()
     return regions
 

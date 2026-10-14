@@ -11,8 +11,10 @@
 from enum import Enum
 from typing import Callable, Dict
 
+from pcluster.aws.aws_api import AWSApi
 from pcluster.aws.aws_resources import InstanceTypeInfo
 from pcluster.config import cluster_config
+from pcluster.constants import MIN_MEMORY_ABSOLUTE_DIFFERENCE, MIN_MEMORY_PRECENTAGE_DIFFERENCE
 from pcluster.validators.common import FailureLevel, Validator
 
 
@@ -193,7 +195,7 @@ class InstancesNetworkingValidator(Validator, _FlexibleInstanceTypesValidatorMix
         have a varying number of 'maximum network interface cards', the smallest one is used  in the  launch template.
         """
         unique_maximum_nic_counts = {
-            instance_type_info.max_network_interface_count()
+            instance_type_info.max_network_cards()
             for instance_type_name, instance_type_info in instance_types_info.items()
         }
 
@@ -204,6 +206,40 @@ class InstancesNetworkingValidator(Validator, _FlexibleInstanceTypesValidatorMix
                 f"Compute Resource {compute_resource_name} has instance types with varying numbers of network cards ("
                 f"Min: {lowest_nic_count}, Max: {highest_nic_count}). Compute Resource will be created with "
                 f"{lowest_nic_count} network cards.",
+                FailureLevel.WARNING,
+            )
+
+        unique_max_efa_interfaces = {
+            instance_type_info.max_efa_interfaces()
+            for instance_type_name, instance_type_info in instance_types_info.items()
+        }
+
+        if len(unique_max_efa_interfaces) > 1:
+            lowest_efa = min(unique_max_efa_interfaces)
+            highest_efa = max(unique_max_efa_interfaces)
+            self._add_failure(
+                f"Compute Resource {compute_resource_name} has instance types with varying numbers of maximum EFA "
+                f"interfaces (Min: {lowest_efa}, Max: {highest_efa}). EFA network configuration will be based on "
+                f"the instance type with the fewest EFA interfaces ({lowest_efa}).",
+                FailureLevel.WARNING,
+            )
+
+        # Check that all instance types agree on whether NCI-0 supports EFA
+        nci0_efa_support = {
+            instance_type_info.max_efa_interfaces() == instance_type_info.max_network_cards()
+            for instance_type_info in instance_types_info.values()
+        }
+        if len(nci0_efa_support) > 1:
+            supports = [
+                it for it, info in instance_types_info.items() if info.max_efa_interfaces() == info.max_network_cards()
+            ]
+            does_not = [
+                it for it, info in instance_types_info.items() if info.max_efa_interfaces() != info.max_network_cards()
+            ]
+            self._add_failure(
+                f"Compute Resource {compute_resource_name} mixes instance types where NCI-0 supports EFA "
+                f"({', '.join(supports)}) with instance types where it does not ({', '.join(does_not)}). "
+                f"This may result in a suboptimal EFA network configuration for some instance types.",
                 FailureLevel.WARNING,
             )
 
@@ -220,21 +256,53 @@ class InstancesAllocationStrategyValidator(Validator, _FlexibleInstanceTypesVali
     """Confirm Allocation Strategy matches with the Capacity Type."""
 
     def _validate(self, compute_resource_name: str, capacity_type: Enum, allocation_strategy: Enum, **kwargs):
-        """On-demand Capacity type only supports "lowest-price" allocation strategy."""
+        """On-demand Capacity type only supports "lowest-price" and "prioritized" allocation strategy."""
+        valid_on_demand_allocation_strategy = {
+            cluster_config.AllocationStrategy.LOWEST_PRICE,
+            cluster_config.AllocationStrategy.PRIORITIZED,
+        }
         if (
             capacity_type == cluster_config.CapacityType.ONDEMAND
-            and allocation_strategy != cluster_config.AllocationStrategy.LOWEST_PRICE
+            and allocation_strategy
+            and allocation_strategy not in valid_on_demand_allocation_strategy
+        ):
+            alloc_strategy_msg = allocation_strategy.value if allocation_strategy else "not set"
+            self._add_failure(
+                f"Compute Resource {compute_resource_name} is using an OnDemand CapacityType but "
+                f"the Allocation Strategy specified is {alloc_strategy_msg}. OnDemand CapacityType can only use '"
+                f"{cluster_config.AllocationStrategy.LOWEST_PRICE.value}' or "
+                f"'{cluster_config.AllocationStrategy.PRIORITIZED.value}' allocation strategy.",
+                FailureLevel.ERROR,
+            )
+        if capacity_type == cluster_config.CapacityType.CAPACITY_BLOCK and allocation_strategy:
+            self._add_failure(
+                f"Compute Resource {compute_resource_name} is using a CAPACITY_BLOCK CapacityType but the "
+                f"Allocation Strategy specified is {allocation_strategy.value}. "
+                "When using CAPACITY_BLOCK CapacityType, allocation strategy should not be set.",
+                FailureLevel.ERROR,
+            )
+        if (
+            capacity_type == cluster_config.CapacityType.SPOT
+            and allocation_strategy == cluster_config.AllocationStrategy.PRIORITIZED
         ):
             self._add_failure(
-                f"Compute Resource {compute_resource_name} is using an OnDemand CapacityType but the Allocation "
-                f"Strategy specified is {allocation_strategy.value}. OnDemand CapacityType can only use '"
-                f"{cluster_config.AllocationStrategy.LOWEST_PRICE.value}' allocation strategy.",
+                f"Compute Resource {compute_resource_name} is using a SPOT CapacityType but the "
+                f"Allocation Strategy specified is {allocation_strategy.value}. SPOT CapacityType can only use "
+                f"'{cluster_config.AllocationStrategy.LOWEST_PRICE.value}', "
+                f"'{cluster_config.AllocationStrategy.CAPACITY_OPTIMIZED.value}', "
+                f"'{cluster_config.AllocationStrategy.PRICE_CAPACITY_OPTIMIZED.value}' "
+                f"or '{cluster_config.AllocationStrategy.CAPACITY_OPTIMIZED_PRIORITIZED.value}' allocation strategy.",
                 FailureLevel.ERROR,
             )
 
 
-class InstancesMemorySchedulingValidator(Validator, _FlexibleInstanceTypesValidatorMixin):
-    """Validate support for Memory-based Scheduling when using Flexible Instance Types."""
+class InstancesMemorySchedulingWarningValidator(Validator):
+    """
+    Memory-based Scheduling Warning Validator.
+
+    This validator checks if Memory-based Scheduling is enabled when also using Flexible Instance Types.
+    In this case warns the customer about possible unused resources due to the differences in the instance types.
+    """
 
     def _validate(
         self,
@@ -243,11 +311,67 @@ class InstancesMemorySchedulingValidator(Validator, _FlexibleInstanceTypesValida
         memory_scheduling_enabled: bool,
         **kwargs,
     ):
-        """Memory-based scheduling is NOT supported for Compute Resources with multiple instance types."""
-        if memory_scheduling_enabled and len(instance_types_info.items()) > 1:
+        if (
+            memory_scheduling_enabled
+            and len(instance_types_info.items()) > 1
+            and self.memory_difference_exceeds_thresholds(instance_types_info)
+        ):
             self._add_failure(
-                "Memory-based scheduling is only supported for Compute Resources using either 'InstanceType' or "
-                f"'Instances' with one instance type. Compute Resource {compute_resource_name} has more than "
-                "one instance type specified.",
+                f'Enabling Memory-based scheduling when a Compute Resource ("{compute_resource_name}") has more than'
+                " one instance type specified may lead to unused resources since only the minimum available memory"
+                " across all instance-types can be specified in the Slurm node definition.",
+                FailureLevel.WARNING,
+            )
+
+    def memory_difference_exceeds_thresholds(self, instance_types_info: Dict[str, InstanceTypeInfo]):
+        """Return True only if both thresholds are exceeded."""
+        min_memory, max_memory = self._min_max_memory(instance_types_info)
+        absolute_diff = max_memory - min_memory
+        percent_diff = absolute_diff / min_memory
+
+        return absolute_diff > MIN_MEMORY_ABSOLUTE_DIFFERENCE and percent_diff > MIN_MEMORY_PRECENTAGE_DIFFERENCE
+
+    def _min_max_memory(self, instance_types_info: Dict[str, InstanceTypeInfo]):
+        available_memory = [item.ec2memory_size_in_mib() for _, item in instance_types_info.items()]
+        # EC2 API should return valid values, but since it's really cheap better add a check
+        available_memory = [value for value in available_memory if value is not None]
+        return min(available_memory), max(available_memory)
+
+
+class LaunchTemplateValidator(Validator):
+    """Validate that the specified launch template exists, is accessible, and only contains allowed properties."""
+
+    # Only these properties are allowed in the launch template
+    ALLOWED_PROPERTIES = {"NetworkInterfaces"}
+
+    def _validate(
+        self,
+        compute_resource_name: str,
+        launch_template_id: str,
+        launch_template_version: int,
+        **kwargs,
+    ):
+        """Check if the launch template exists, is valid, and only contains NetworkInterfaces."""
+        if not launch_template_id:
+            return
+
+        version = str(launch_template_version)
+        try:
+            lt_data = AWSApi.instance().ec2.describe_launch_template_version(launch_template_id, version)
+        except Exception as e:
+            self._add_failure(
+                f"Launch template '{launch_template_id}' version '{version}' specified in Compute Resource "
+                f"'{compute_resource_name}' could not be found or accessed: {e}",
+                FailureLevel.ERROR,
+            )
+            return
+
+        # Check for disallowed properties
+        disallowed_properties = set(lt_data.keys()) - self.ALLOWED_PROPERTIES
+        if disallowed_properties:
+            self._add_failure(
+                f"Launch template '{launch_template_id}' in Compute Resource '{compute_resource_name}' contains "
+                f"properties that are not allowed: {', '.join(sorted(disallowed_properties))}. "
+                f"Allowed properties are: {', '.join(sorted(self.ALLOWED_PROPERTIES))}.",
                 FailureLevel.ERROR,
             )

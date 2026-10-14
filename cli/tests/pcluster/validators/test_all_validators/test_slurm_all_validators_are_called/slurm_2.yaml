@@ -1,12 +1,23 @@
 Image:
-  Os: alinux2
+  Os: alinux2023
 HeadNode:
-  InstanceType: t2.micro  # t2.micro
+  InstanceType: t3.micro  # t3.micro
   Networking:
     SubnetId: subnet-12345678  # subnet-xxx
   Ssh:
     KeyName: ec2-key-name
     AllowedIps: 1.2.3.4/32
+  SharedStorageType: Efs
+  SharedStorageEfsSettings:
+    Encrypted: true
+LoginNodes:
+  Pools:
+  - Name: test
+    InstanceType: t3.micro
+    Count: 1
+    Networking:
+      SubnetIds:
+        - subnet-12345678
 Scheduling:
   Scheduler: slurm
   SlurmSettings:
@@ -30,7 +41,7 @@ Scheduling:
         - Name: compute_resource1
           InstanceType: c5.xlarge
         - Name: compute_resource2
-          InstanceType: t2.micro
+          InstanceType: t3.micro
           CapacityReservationTarget:
             CapacityReservationId: cr-54321fcdbd5971234
 SharedStorage:
@@ -46,3 +57,8 @@ SharedStorage:
       FileSystemId: fs-12345678123456789
 Iam:
   ResourcePrefix: /path-prefix/name-prefix
+DeploymentSettings:
+  LambdaFunctionsVpcConfig:
+    SecurityGroupIds: ["sg-028d73ae220157d96"]
+    SubnetIds: ["subnet-8e482ce8"]
+  DisableSudoAccessForDefaultUser: false

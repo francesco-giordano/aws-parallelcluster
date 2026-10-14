@@ -16,7 +16,7 @@ from typing import Any, List, Tuple
 from botocore.exceptions import ClientError
 
 from pcluster import utils
-from pcluster.aws.aws_resources import ImageInfo, InstanceTypeInfo
+from pcluster.aws.aws_resources import CapacityReservationInfo, ImageInfo, InstanceTypeInfo
 from pcluster.aws.common import AWSClientError, AWSExceptionHandler, Boto3Client, Cache, ImageNotFoundError, get_region
 from pcluster.constants import (
     IMAGE_NAME_PART_TO_OS_MAP,
@@ -38,6 +38,7 @@ class Ec2Client(Boto3Client):
         self.security_groups_cache = {}
         self.subnets_cache = {}
         self.capacity_reservations_cache = {}
+        self.capacity_block_status_cache = {}
 
     @AWSExceptionHandler.handle_client_exception
     @Cache.cached
@@ -87,8 +88,8 @@ class Ec2Client(Boto3Client):
         return result
 
     @AWSExceptionHandler.handle_client_exception
-    def describe_capacity_reservations(self, capacity_reservation_ids):
-        """Return a list of Capacity Reservations."""
+    def describe_capacity_reservations(self, capacity_reservation_ids: List[str]) -> List[CapacityReservationInfo]:
+        """Accept a space separated list of ids. Return a list of CapacityReservationInfo."""
         result = []
         missed_capacity_reservations = []
         for capacity_reservation_id in capacity_reservation_ids:
@@ -104,10 +105,10 @@ class Ec2Client(Boto3Client):
                 )
             )
             for capacity_reservation in response:
-                self.capacity_reservations_cache[
-                    capacity_reservation.get("CapacityReservationId")
-                ] = capacity_reservation
-                result.append(capacity_reservation)
+                self.capacity_reservations_cache[capacity_reservation.get("CapacityReservationId")] = (
+                    CapacityReservationInfo(capacity_reservation)
+                )
+                result.append(CapacityReservationInfo(capacity_reservation))
         return result
 
     @AWSExceptionHandler.handle_client_exception
@@ -143,20 +144,31 @@ class Ec2Client(Boto3Client):
 
     @AWSExceptionHandler.handle_client_exception
     @Cache.cached
+    def _describe_images_with_pagination(self, **kwargs):
+        """Use paginator to describe images and handle pagination."""
+        paginator = self._client.get_paginator("describe_images")
+        page_iterator = paginator.paginate(**kwargs)
+        images = []
+        for page in page_iterator:
+            images.extend(page["Images"])
+        return images
+
+    @AWSExceptionHandler.handle_client_exception
+    @Cache.cached
     def describe_image(self, ami_id):
         """Describe image by image id, return an object of ImageInfo."""
-        result = self._client.describe_images(ImageIds=[ami_id])
-        if result.get("Images"):
-            return ImageInfo(result.get("Images")[0])
+        images = self._describe_images_with_pagination(ImageIds=[ami_id])
+        if images:
+            return ImageInfo(images[0])
         raise AWSClientError(function_name="describe_images", message=f"Image {ami_id} not found")
 
     @AWSExceptionHandler.handle_client_exception
     @Cache.cached
     def describe_images(self, ami_ids, filters, owners):
         """Return a list of objects of ImageInfo."""
-        result = self._client.describe_images(ImageIds=ami_ids, Filters=filters, Owners=owners)
-        if result.get("Images"):
-            return [ImageInfo(image) for image in result.get("Images")]
+        images = self._describe_images_with_pagination(ImageIds=ami_ids, Filters=filters, Owners=owners)
+        if images:
+            return [ImageInfo(image) for image in images]
         raise ImageNotFoundError(function_name="describe_images")
 
     def image_exists(self, image_id: str):
@@ -298,10 +310,13 @@ class Ec2Client(Boto3Client):
         """Return the id of the current official image, for the provided os-architecture combination."""
         owner = filters.owner if filters and filters.owner else "amazon"
         tags = filters.tags if filters and filters.tags else []
+        name_prefix = filters.name_prefix if filters and filters.name_prefix else ""
+        name = name_prefix + "{0}*".format(self._get_official_image_name_prefix(os, architecture))
 
-        filters = [{"Name": "name", "Values": ["{0}*".format(self._get_official_image_name_prefix(os, architecture))]}]
+        filters = [{"Name": "name", "Values": [name]}]
         filters.extend([{"Name": f"tag:{tag.key}", "Values": [tag.value]} for tag in tags])
-        images = self._client.describe_images(Owners=[owner], Filters=filters, IncludeDeprecated=True).get("Images")
+        filters.append({"Name": "state", "Values": ["available"]})
+        images = self._describe_images_with_pagination(Owners=[owner], Filters=filters, IncludeDeprecated=True)
         if not images:
             raise AWSClientError(function_name="describe_images", message="Cannot find official ParallelCluster AMI")
         return self._find_valid_official_image(images).get("ImageId")
@@ -313,10 +328,11 @@ class Ec2Client(Boto3Client):
         owners = ["amazon"]
         name = f"{self._get_official_image_name_prefix(os, architecture)}*"
         filters = [{"Name": "name", "Values": [name]}]
+        images = self._describe_images_with_pagination(Owners=owners, Filters=filters, IncludeDeprecated=True)
         return [
             ImageInfo(self._find_valid_official_image(images_os_arch))
             for _, images_os_arch in itertools.groupby(
-                self._client.describe_images(Owners=owners, Filters=filters, IncludeDeprecated=True).get("Images"),
+                images,
                 key=lambda image: f'{self.extract_os_from_official_image_name(image["Name"])}-{image["Architecture"]}',
             )
         ]
@@ -393,11 +409,11 @@ class Ec2Client(Boto3Client):
 
         Example:
         If instance_types is:
-        ["t2.micro", "t2.large"]
+        ["t3.micro", "t3.large"]
         Result can be:
         {
-            "t2.micro": (us-east-1a, us-east-1b),
-            "t2.large": (us-east-1a, us-east-1b)
+            "t3.micro": (us-east-1a, us-east-1b),
+            "t3.large": (us-east-1a, us-east-1b)
         }
         """
         # first looks for info in cache, then using only one API call for all infos that is not inside the cache
@@ -487,3 +503,209 @@ class Ec2Client(Boto3Client):
         except ClientError as e:
             if e.response.get("Error").get("Code") != "DryRunOperation":
                 raise
+
+    @AWSExceptionHandler.handle_client_exception
+    def describe_route_tables(self, filters=None):
+        """
+        Describe EC2 route tables.
+
+        sample output:
+        [
+            {
+                "Associations": [
+                    {
+                        "Main": False,
+                        "RouteTableAssociationId": "rtbassoc-12345678901234567",
+                        "RouteTableId": "rtb-12345678901234567",
+                        "SubnetId": "subnet-12345678901234567",
+                        "AssociationState": {"State": "associated"},
+                    }
+                ],
+                "PropagatingVgws": [],
+                "RouteTableId": "rtb-12345678901234567",
+                "Routes": [
+                    {
+                        "DestinationCidrBlock": "10.0.0.0/16",
+                        "GatewayId": "local",
+                        "Origin": "CreateRouteTable",
+                        "State": "active",
+                    },
+                    {
+                        "DestinationCidrBlock": "0.0.0.0/0",
+                        "GatewayId": "igw-12345678901234567",
+                        "Origin": "CreateRoute",
+                        "State": "active",
+                    },
+                ],
+                "Tags": [
+                    {"Key": "aws:cloudformation:logical-id", "Value": "RouteTablePublic"},
+                    ...
+                ],
+                "VpcId": "vpc-12345678901234567",
+                "OwnerId": "123456789012"
+            }
+        ]
+        :param filters: The filters to apply when describing the route tables.
+        :return: The route tables that match the filters.
+        """
+        kwargs = {"Filters": filters} if filters else {}
+        return list(self._paginate_results(self._client.describe_route_tables, **kwargs))
+
+    @AWSExceptionHandler.handle_client_exception
+    def is_subnet_public(self, subnet_id):
+        """
+        Check if a subnet is public by determining if its route table has an internet gateway (igw).
+
+        :param subnet_id: The ID of the subnet to check.
+        :return: True if the subnet is public (associated with an internet gateway); False otherwise.
+        :raises Exception: If no route tables are found for the subnet or its VPC.
+        """
+        route_tables = self.describe_route_tables(filters=[{"Name": "association.subnet-id", "Values": [subnet_id]}])
+
+        # If the subnet doesn't have a specific route table, this typically happens when
+        # the subnet is using the VPC's main route table. Needs to fetch the VPC-level route table.
+        if not route_tables:
+            # Retrieve the VPC ID for the given subnet ID
+            subnets = self.describe_subnets([subnet_id])
+            if not subnets:
+                raise Exception(f"No subnet found with ID {subnet_id}")
+            vpc_id = subnets[0].get("VpcId")
+
+            route_tables = self.describe_route_tables(
+                filters=[{"Name": "vpc-id", "Values": [vpc_id]}, {"Name": "association.main", "Values": ["true"]}]
+            )
+            if not route_tables:
+                raise Exception("No route tables found. The subnet or VPC configuration may be incorrect.")
+
+        # Check if any route contains an internet gateway (igw)
+        for route in route_tables[0].get("Routes", []):
+            if "GatewayId" in route and route["GatewayId"].startswith("igw-"):
+                return True
+
+        return False
+
+    @AWSExceptionHandler.handle_client_exception
+    def describe_capacity_block_status(  # noqa: C901
+        self, capacity_block_ids: List[str] = None, filters=None, max_results: int = None
+    ):
+        """
+        Describe the availability and health status of capacity blocks, particularly for ultraserver instances.
+
+        This method is primarily used to check the health status of ultraserver capacity blocks
+        (e.g., p6e-gb200) to ensure they are ready for cluster operations. It provides information
+        about interconnect status and available capacity.
+
+        :param capacity_block_ids: List of Capacity Block IDs to query (e.g., ['cr-123456']).
+               If no specific capacity_block_ids are requested, use cache key based on filters and max_results
+        :param filters: Optional boto3-style filters to narrow results (e.g., interconnect-status).
+        :param max_results: Optional page size hint for pagination.
+        :return: Dict with key 'CapacityBlockStatuses' containing a flattened list of capacity block
+                status entries. Each entry includes fields like:
+                - CapacityBlockId: The capacity block identifier
+                - InterconnectStatus: Health status ('ok', 'impaired', 'insufficient-data')
+                - TotalCapacity: Total number of instances in the capacity block
+                - TotalUnavailableCapacity: Number of unavailable instances
+        """
+        statuses = []
+
+        if capacity_block_ids:
+            missed_capacity_blocks = []
+            for capacity_block_id in capacity_block_ids:
+                cached_data = self.capacity_block_status_cache.get(capacity_block_id)
+                if cached_data:
+                    statuses.append(cached_data)
+                else:
+                    missed_capacity_blocks.append(capacity_block_id)
+
+            if missed_capacity_blocks:
+                kwargs = {"CapacityBlockIds": missed_capacity_blocks}
+                if filters:
+                    kwargs["Filters"] = filters
+                if max_results:
+                    kwargs["MaxResults"] = max_results
+
+                paginator = self._client.get_paginator("describe_capacity_block_status")
+                page_iterator = paginator.paginate(**kwargs)
+
+                for page in page_iterator:
+                    for status in page.get("CapacityBlockStatuses", []):
+                        capacity_block_id = status.get("CapacityBlockId")
+                        if capacity_block_id:
+                            self.capacity_block_status_cache[capacity_block_id] = status
+                        statuses.append(status)
+        else:
+            # For requests without specific IDs, don't cache (as results may vary)
+            kwargs = {}
+            if filters:
+                kwargs["Filters"] = filters
+            if max_results:
+                kwargs["MaxResults"] = max_results
+
+            paginator = self._client.get_paginator("describe_capacity_block_status")
+            page_iterator = paginator.paginate(**kwargs)
+
+            for page in page_iterator:
+                statuses.extend(page.get("CapacityBlockStatuses", []))
+
+        return statuses
+
+    @AWSExceptionHandler.handle_client_exception
+    def get_instance_type_and_reservation_type_from_capacity_reservation(
+        self, capacity_reservation_id: str
+    ) -> tuple[str, str]:
+        """
+        Retrieve instance type and reservation type from a capacity reservation ID.
+
+        This method queries AWS EC2 to get detailed information about a capacity reservation,
+        specifically extracting the instance type and reservation type. This information is
+        crucial for determining if special handling is needed (e.g., for ultraserver instances
+        with capacity blocks).
+
+        Args:
+            capacity_reservation_id: The AWS capacity reservation ID to query (e.g., 'cr-123456')
+
+        Returns:
+            tuple: A tuple containing (instance_type, reservation_type) where:
+                   - instance_type: EC2 instance type (e.g., 'p6e-gb200.36xlarge')
+                   - reservation_type: Type of reservation (e.g., 'capacity-block', 'ondemand')
+                   Both values will be None if the reservation cannot be found or accessed.
+
+        Example:
+            ('p6e-gb200.36xlarge', 'capacity-block')
+        """
+        instance_type = None
+        reservation_type = None
+
+        if capacity_reservation_id:
+            capacity_reservations = self.describe_capacity_reservations([capacity_reservation_id])
+            if capacity_reservations:
+                reservation = capacity_reservations[0]
+                instance_type = reservation.instance_type()
+                reservation_type = reservation.reservation_type()
+
+        return instance_type, reservation_type
+
+    @AWSExceptionHandler.handle_client_exception
+    @Cache.cached
+    def describe_launch_template_version(self, launch_template_id: str, version: str):
+        """
+        Describe a launch template version and return its data.
+
+        Args:
+            launch_template_id: The launch template ID (e.g., 'lt-0abc123def456')
+            version: The version number or '$Default'/'$Latest'
+
+        Returns:
+            dict: The LaunchTemplateData from the specified version
+        """
+        response = self._client.describe_launch_template_versions(
+            LaunchTemplateId=launch_template_id,
+            Versions=[version],
+        )
+        versions = response.get("LaunchTemplateVersions", [])
+        if versions:
+            return versions[0].get("LaunchTemplateData", {})
+        raise AWSClientError(
+            function_name="describe_launch_template_versions",
+            message=f"Launch template {launch_template_id} version {version} not found",
+        )

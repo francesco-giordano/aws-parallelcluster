@@ -15,7 +15,7 @@ import pytest
 from assertpy import assert_that, soft_assertions
 
 from pcluster.aws.aws_api import AWSApi
-from pcluster.aws.aws_resources import ImageInfo, InstanceTypeInfo
+from pcluster.aws.aws_resources import CapacityReservationInfo, ImageInfo, InstanceTypeInfo
 from pcluster.aws.common import AWSClientError
 from pcluster.aws.ec2 import Ec2Client
 from pcluster.config.cluster_config import AmiSearchFilters, Tag
@@ -33,7 +33,7 @@ def boto3_stubber_path():
 @pytest.mark.parametrize(
     "region, free_tier_instance_type, default_instance_type, stub_boto3",
     [
-        ("us-east-1", "t2.micro", "t2.micro", True),
+        ("us-east-1", "t3.micro", "t3.micro", True),
         ("eu-north-1", "t3.micro", "t3.micro", True),
         ("us-gov-east-1", None, "t3.micro", True),
     ],
@@ -72,9 +72,13 @@ def test_list_instance_types(boto3_stubber, generate_error):
         MockedBoto3Request(
             method="describe_instance_type_offerings",
             expected_params={},
-            response=dummy_message
-            if generate_error
-            else {"InstanceTypeOfferings": [{"InstanceType": instance_type} for instance_type in dummy_instance_types]},
+            response=(
+                dummy_message
+                if generate_error
+                else {
+                    "InstanceTypeOfferings": [{"InstanceType": instance_type} for instance_type in dummy_instance_types]
+                }
+            ),
             generate_error=generate_error,
         )
     ]
@@ -90,7 +94,7 @@ def test_list_instance_types(boto3_stubber, generate_error):
 @pytest.mark.parametrize(
     "instance_type, supported_architectures, error_message",
     [
-        ("t2.micro", ["x86_64", "i386"], None),
+        ("t3.micro", ["x86_64", "i386"], None),
         ("a1.medium", ["arm64"], None),
         ("valid.exotic.arch.instance", ["exoticArch"], None),
     ],
@@ -112,9 +116,8 @@ def test_get_supported_architectures(mocker, instance_type, supported_architectu
 @pytest.mark.parametrize(
     "os_part, expected_os",
     [
-        ("amzn2-hvm", "alinux2"),
-        ("centos7-hvm", "centos7"),
-        ("ubuntu-2004-lts-hvm", "ubuntu2004"),
+        ("amzn2023-hvm", "alinux2023"),
+        ("ubuntu-2204-lts-hvm", "ubuntu2204"),
         ("nonexistant-hvm", "linux"),
         ("nonexistant", "linux"),
     ],
@@ -134,55 +137,55 @@ def test_extract_os_from_official_image_name(os_part, expected_os):
             {
                 "Images": [
                     {
-                        "Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-created-earlier",
+                        "Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-created-earlier",
                         "Architecture": "x86_64",
                         "CreationDate": "2018-11-09T01:21:00.000Z",
                     },
                     {
-                        "Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-created-later",
+                        "Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-created-later",
                         "Architecture": "x86_64",
                         "CreationDate": "2019-11-09T01:21:00.000Z",
                     },
                     {
-                        "Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-deprecated",
+                        "Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-deprecated",
                         "Architecture": "x86_64",
                         "CreationDate": "2020-11-09T01:21:00.000Z",
                         "DeprecationTime": "2022-11-09T01:21:00.000Z",
                     },
                     {
-                        "Name": "ami-parallelcluster-3.0.0-centos7-hvm-x86_64-other",
+                        "Name": "aws-parallelcluster-3.0.0-ubuntu-2204-lts-hvm-x86_64-other",
                         "Architecture": "x86_64",
                         "CreationDate": "2018-11-09T01:21:00.000Z",
                     },
                 ]
             },
             [
-                ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-created-later"}),
-                ImageInfo({"Name": "ami-parallelcluster-3.0.0-centos7-hvm-x86_64-other"}),
+                ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-created-later"}),
+                ImageInfo({"Name": "aws-parallelcluster-3.0.0-ubuntu-2204-lts-hvm-x86_64-other"}),
             ],
             None,
             id="test with no filter",
         ),
         pytest.param(
-            "alinux2",
+            "alinux2023",
             None,
             {
                 "Images": [
                     {
-                        "Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-created-earlier",
+                        "Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-created-earlier",
                         "Architecture": "x86_64",
                         "CreationDate": "2020-10-09T01:21:00.000Z",
                         "DeprecationTime": "2022-11-09T01:21:00.000Z",
                     },
                     {
-                        "Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-created-later",
+                        "Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-created-later",
                         "Architecture": "x86_64",
                         "CreationDate": "2020-11-09T01:21:00.000Z",
                         "DeprecationTime": "2022-11-09T01:21:00.000Z",
                     },
                 ]
             },
-            [ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-created-later"})],
+            [ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-created-later"})],
             None,
             id="test with os",
         ),
@@ -192,33 +195,35 @@ def test_extract_os_from_official_image_name(os_part, expected_os):
             {
                 "Images": [
                     {
-                        "Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-other",
+                        "Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-other",
                         "Architecture": "x86_64",
                         "CreationDate": "2018-11-09T01:21:00.000Z",
                     },
                 ]
             },
-            [ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-other"})],
+            [ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-other"})],
             None,
             id="test with architecture",
         ),
         pytest.param(
-            "alinux2",
+            "alinux2023",
             "x86_64",
             {
                 "Images": [
                     {
-                        "Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-other",
+                        "Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-other",
                         "Architecture": "x86_64",
                         "CreationDate": "2018-11-09T01:21:00.000Z",
                     },
                 ]
             },
-            [ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2-hvm-x86_64-other"})],
+            [ImageInfo({"Name": "aws-parallelcluster-3.0.0-amzn2023-hvm-x86_64-other"})],
             None,
             id="test with os and architecture",
         ),
-        pytest.param("alinux2", "arm64", Exception("error message"), None, "error message", id="test with boto3 error"),
+        pytest.param(
+            "alinux2023", "arm64", Exception("error message"), None, "error message", id="test with boto3 error"
+        ),
     ],
 )
 def test_get_official_images(boto3_stubber, os, architecture, boto3_response, expected_response, error_message):
@@ -257,30 +262,30 @@ def test_get_official_images(boto3_stubber, os, architecture, boto3_response, ex
     "os, architecture, filters, boto3_response, error_message",
     [
         (
-            "alinux2",
+            "alinux2023",
             "arm64",
             None,
             {"Images": [{"ImageId": "ami-00e87074e52e6", "CreationDate": "2018-11-09T01:21:00.000Z"}]},
             None,
         ),
         (
-            "alinux2",
+            "alinux2023",
             "x86_64",
             AmiSearchFilters(owner="self"),
             {"Images": [{"ImageId": "ami-00e87074e52e6", "CreationDate": "2018-11-09T01:21:00.000Z"}]},
             None,
         ),
         (
-            "alinux2",
+            "alinux2023",
             "x86_64",
             AmiSearchFilters(owner="self", tags=[Tag("key1", "value1"), Tag("key2", "value2")]),
             {"Images": [{"ImageId": "ami-00e87074e52e6", "CreationDate": "2018-11-09T01:21:00.000Z"}]},
             None,
         ),
-        ("alinux2", "arm64", None, Exception("error message"), "error message"),
-        ("alinux2", "arm64", None, {"Images": []}, "Cannot find official ParallelCluster AMI"),
+        ("alinux2023", "arm64", None, Exception("error message"), "error message"),
+        ("alinux2023", "arm64", None, {"Images": []}, "Cannot find official ParallelCluster AMI"),
         (
-            "alinux2",
+            "alinux2023",
             "arm64",
             None,
             {
@@ -297,15 +302,17 @@ def test_get_official_images(boto3_stubber, os, architecture, boto3_response, ex
 )
 def test_get_official_image_id(boto3_stubber, os, architecture, filters, boto3_response, error_message):
     expected_ami_id = "ami-00e87074e52e6"
+    expected_filters = [
+        {"Name": "name", "Values": [f"aws-parallelcluster-{get_installed_version()}-amzn2023-hvm-{architecture}*"]},
+    ]
+    if filters and filters.tags:
+        expected_filters.extend([{"Name": f"tag:{tag.key}", "Values": [tag.value]} for tag in filters.tags])
+    expected_filters.append({"Name": "state", "Values": ["available"]})
     expected_params = {
-        "Filters": [
-            {"Name": "name", "Values": [f"aws-parallelcluster-{get_installed_version()}-amzn2-hvm-{architecture}*"]},
-        ],
+        "Filters": expected_filters,
         "Owners": [filters.owner if filters and filters.owner else "amazon"],
         "IncludeDeprecated": True,
     }
-    if filters and filters.tags:
-        expected_params["Filters"].extend([{"Name": f"tag:{tag.key}", "Values": [tag.value]} for tag in filters.tags])
     mocked_requests = [
         MockedBoto3Request(
             method="describe_images",
@@ -382,7 +389,8 @@ def test_get_official_image_id(boto3_stubber, os, architecture, filters, boto3_r
 def test_get_official_image_id_with_deprecation(boto3_stubber, boto3_response, expected_ami_id):
     expected_params = {
         "Filters": [
-            {"Name": "name", "Values": [f"aws-parallelcluster-{get_installed_version()}-amzn2-hvm-arm64*"]},
+            {"Name": "name", "Values": [f"aws-parallelcluster-{get_installed_version()}-amzn2023-hvm-arm64*"]},
+            {"Name": "state", "Values": ["available"]},
         ],
         "Owners": ["amazon"],
         "IncludeDeprecated": True,
@@ -397,7 +405,7 @@ def test_get_official_image_id_with_deprecation(boto3_stubber, boto3_response, e
     ]
     boto3_stubber("ec2", mocked_requests)
 
-    ami_id = Ec2Client().get_official_image_id("alinux2", "arm64", None)
+    ami_id = Ec2Client().get_official_image_id("alinux2023", "arm64", None)
     assert_that(ami_id).is_equal_to(expected_ami_id)
 
 
@@ -539,7 +547,7 @@ def test_describe_capacity_reservations_cache(boto3_stubber):
         get_describe_capacity_reservation_mocked_request([capacity_reservation], "active"),
     ]
     boto3_stubber("ec2", mocked_requests)
-    assert_that(AWSApi.instance().ec2.describe_capacity_reservations([capacity_reservation])[0]["State"]).is_equal_to(
+    assert_that(AWSApi.instance().ec2.describe_capacity_reservations([capacity_reservation])[0].state()).is_equal_to(
         "pending"
     )
 
@@ -550,15 +558,58 @@ def test_describe_capacity_reservations_cache(boto3_stubber):
     assert_that(response).is_length(2)
 
     # Third boto3 call. The result should be from cache even if the state of the cr is different
-    assert_that(AWSApi.instance().ec2.describe_capacity_reservations([capacity_reservation])[0]["State"]).is_equal_to(
+    assert_that(AWSApi.instance().ec2.describe_capacity_reservations([capacity_reservation])[0].state()).is_equal_to(
         "pending"
     )
 
     # Fourth boto3 call after resetting the AWSApi instance. The latest cr state should be retrieved from boto3
     AWSApi.reset()
-    assert_that(AWSApi.instance().ec2.describe_capacity_reservations([capacity_reservation])[0]["State"]).is_equal_to(
+    assert_that(AWSApi.instance().ec2.describe_capacity_reservations([capacity_reservation])[0].state()).is_equal_to(
         "active"
     )
+
+
+FAKE_CAPACITY_BLOCK_ID = "cr-a1234567"
+FAKE_CAPACITY_BLOCK_INFO = {
+    "CapacityReservationId": FAKE_CAPACITY_BLOCK_ID,
+    "EndDateType": "limited",
+    # "ReservationType": "capacity-block",
+    "AvailabilityZone": "eu-east-2a",
+    "InstanceMatchCriteria": "targeted",
+    "EphemeralStorage": False,
+    "CreateDate": "2023-07-29T14:22:45Z  ",
+    "StartDate": "2023-08-15T12:00:00Z",
+    "EndDate": "2023-08-19T12:00:00Z",
+    "AvailableInstanceCount": 0,
+    "InstancePlatform": "Linux/UNIX",
+    "TotalInstanceCount": 16,
+    "State": "payment-pending",
+    "Tenancy": "default",
+    "EbsOptimized": True,
+    "InstanceType": "p5.48xlarge",
+}
+
+
+@pytest.mark.parametrize("generate_error", [True, False])
+def test_describe_capacity_reservations(boto3_stubber, generate_error):
+    """Verify that describe_capacity_reservations behaves as expected."""
+    dummy_message = "dummy error message"
+    mocked_requests = [
+        MockedBoto3Request(
+            method="describe_capacity_reservations",
+            expected_params={"CapacityReservationIds": [FAKE_CAPACITY_BLOCK_ID]},
+            response=dummy_message if generate_error else {"CapacityReservations": [FAKE_CAPACITY_BLOCK_INFO]},
+            generate_error=generate_error,
+            error_code=None,
+        )
+    ]
+    boto3_stubber("ec2", mocked_requests)
+    if generate_error:
+        with pytest.raises(AWSClientError, match=dummy_message):
+            Ec2Client().describe_capacity_reservations(capacity_reservation_ids=[FAKE_CAPACITY_BLOCK_ID])
+    else:
+        return_value = Ec2Client().describe_capacity_reservations(capacity_reservation_ids=[FAKE_CAPACITY_BLOCK_ID])
+        assert_that(return_value).is_equal_to([CapacityReservationInfo(FAKE_CAPACITY_BLOCK_INFO)])
 
 
 def get_describe_security_groups_mocked_request(security_groups, ip_permissions):
@@ -619,3 +670,107 @@ def test_describe_volume(boto3_stubber):
     response = AWSApi.instance().ec2.describe_volume(volume_id)
 
     assert_that(response["AvailabilityZone"] == az).is_true()
+
+
+def get_describe_route_tables_mocked_request(subnet_id, gateway_id):
+    return MockedBoto3Request(
+        method="describe_route_tables",
+        response={
+            "RouteTables": [
+                {"Routes": [{"GatewayId": gateway_id}]},
+            ]
+        },
+        expected_params={"Filters": [{"Name": "association.subnet-id", "Values": [subnet_id]}]},
+    )
+
+
+def get_describe_route_tables_empty_mocked_request(subnet_id):
+    return MockedBoto3Request(
+        method="describe_route_tables",
+        response={"RouteTables": []},
+        expected_params={"Filters": [{"Name": "association.subnet-id", "Values": [subnet_id]}]},
+    )
+
+
+def get_describe_route_tables_by_vpc_mocked_request(vpc_id, route_tables):
+    return MockedBoto3Request(
+        method="describe_route_tables",
+        response={"RouteTables": route_tables},
+        expected_params={
+            "Filters": [
+                {"Name": "vpc-id", "Values": [vpc_id]},
+                {"Name": "association.main", "Values": ["true"]},
+            ]
+        },
+    )
+
+
+def get_describe_subnets_for_vpc_mocked_request(subnet_id, vpc_id):
+    return MockedBoto3Request(
+        method="describe_subnets",
+        response={"Subnets": [{"SubnetId": subnet_id, "VpcId": vpc_id}]},
+        expected_params={"SubnetIds": [subnet_id]},
+    )
+
+
+def test_is_subnet_public(boto3_stubber):
+    # First boto3 call. The subnet should be private
+    subnet_id = "subnet-12345678"
+    # The first mocked request and the third are about the same subnet. However, the gateway id
+    # changes from not starting with 'igw-' to starting with 'igw-'. The second mocked request is about another subnet
+    mocked_requests = [
+        get_describe_route_tables_mocked_request(subnet_id, "vgw-0123456789abcdef0"),
+        get_describe_route_tables_mocked_request("subnet-01234567", "vgw-0123456789abcdef0"),
+        get_describe_route_tables_mocked_request(subnet_id, "igw-0123456789abcdef0"),
+    ]
+    boto3_stubber("ec2", mocked_requests)
+    assert AWSApi.instance().ec2.is_subnet_public(subnet_id) is False
+
+    # Second boto3 call with another subnet.
+    # The subnet already checked should not be included in the boto3 call.
+    assert AWSApi.instance().ec2.is_subnet_public("subnet-01234567") is False
+
+    # Third boto3 call. The result should be from the latest response even if the gateway id of the subnet is different
+    assert AWSApi.instance().ec2.is_subnet_public(subnet_id) is True
+
+
+@pytest.mark.parametrize(
+    "subnet_id, routes, expected_result",
+    [
+        pytest.param(
+            "subnet-no-explicit-assoc",
+            [
+                {"DestinationCidrBlock": "10.0.0.0/16", "GatewayId": "local"},
+                {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-12345678"},
+            ],
+            True,
+            id="main route table with igw",
+        ),
+        pytest.param(
+            "subnet-private",
+            [{"DestinationCidrBlock": "10.0.0.0/16", "GatewayId": "local"}],
+            False,
+            id="main route table without igw",
+        ),
+    ],
+)
+def test_is_subnet_public_with_main_route_table(boto3_stubber, subnet_id, routes, expected_result):
+    # Test when subnet has no explicit route table association (uses main route table)
+    vpc_id = "vpc-12345678"
+
+    route_tables = [
+        {
+            "RouteTableId": "rtb-main",
+            "Associations": [{"Main": True}],
+            "Routes": routes,
+        },
+    ]
+
+    mocked_requests = [
+        get_describe_route_tables_empty_mocked_request(subnet_id),
+        get_describe_subnets_for_vpc_mocked_request(subnet_id, vpc_id),
+        get_describe_route_tables_by_vpc_mocked_request(vpc_id, route_tables),
+    ]
+    boto3_stubber("ec2", mocked_requests)
+
+    assert AWSApi.instance().ec2.is_subnet_public(subnet_id) is expected_result

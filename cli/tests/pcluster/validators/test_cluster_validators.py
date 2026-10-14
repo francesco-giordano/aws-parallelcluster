@@ -14,15 +14,15 @@ import pytest
 from assertpy import assert_that
 from munch import DefaultMunch
 
-from pcluster.aws.aws_resources import InstanceTypeInfo
+from pcluster.aws.aws_resources import InstanceTypeInfo, NetworkCardInfo
 from pcluster.aws.common import AWSClientError
 from pcluster.config.cluster_config import (
-    AwsBatchScheduling,
     BaseQueue,
     CapacityReservationTarget,
     Database,
+    Efa,
+    ExternalSlurmdbd,
     RootVolume,
-    SchedulerPluginQueueNetworking,
     SharedEbs,
     SlurmComputeResource,
     SlurmQueue,
@@ -31,6 +31,7 @@ from pcluster.config.cluster_config import (
     SlurmSettings,
     Tag,
 )
+from pcluster.config.common import CapacityType, merge_tags
 from pcluster.constants import PCLUSTER_NAME_MAX_LENGTH, PCLUSTER_NAME_MAX_LENGTH_SLURM_ACCOUNTING
 from pcluster.validators.cluster_validators import (
     FSX_MESSAGES,
@@ -50,7 +51,6 @@ from pcluster.validators.cluster_validators import (
     EfsIdValidator,
     ExistingFsxNetworkingValidator,
     FsxArchitectureOsValidator,
-    HeadNodeImdsValidator,
     HostedZoneValidator,
     InstanceArchitectureCompatibilityValidator,
     IntelHpcArchitectureValidator,
@@ -61,12 +61,14 @@ from pcluster.validators.cluster_validators import (
     MultiNetworkInterfacesInstancesValidator,
     NameValidator,
     NumberOfStorageValidator,
+    OsCustomAmiValidator,
     OverlappingMountDirValidator,
     RegionValidator,
     RootVolumeEncryptionConsistencyValidator,
     RootVolumeSizeValidator,
     SchedulableMemoryValidator,
-    SchedulerOsValidator,
+    SharedFileCacheNotHomeValidator,
+    SharedStorageEfsSettingsValidator,
     SharedStorageMountDirValidator,
     SharedStorageNameValidator,
     UnmanagedFsxMultiAzValidator,
@@ -85,6 +87,10 @@ from pcluster.validators.slurm_settings_validator import (
     CustomSlurmSettingLevel,
     CustomSlurmSettingsIncludeFileOnlyValidator,
     CustomSlurmSettingsValidator,
+    ExternalSlurmdbdRequiresCustomMungeKey,
+    ExternalSlurmdbdTrafficNotEncrypted,
+    ExternalSlurmdbdVsDatabaseIncompatibility,
+    SlurmNodePrioritiesWarningValidator,
 )
 from tests.pcluster.aws.dummy_aws_api import mock_aws_api
 from tests.pcluster.validators.utils import assert_failure_level, assert_failure_messages
@@ -109,11 +115,6 @@ def boto3_stubber_path():
         ("2AClusterCanNotBeginByANumber", SlurmScheduling(queues=None), True),
         ("ClusterCanNotContainUnderscores_LikeThis", SlurmScheduling(queues=None), True),
         ("ClusterCanNotContainSpaces LikeThis", SlurmScheduling(queues=None), True),
-        ("ThisClusterNameShouldBeRightSize-ContainAHyphen-AndANumber12", AwsBatchScheduling(queues=None), False),
-        ("ThisClusterNameShouldBeJustOneCharacterTooLongAndShouldntBeOk", AwsBatchScheduling(queues=None), True),
-        ("2AClusterCanNotBeginByANumber", AwsBatchScheduling(queues=None), True),
-        ("ClusterCanNotContainUnderscores_LikeThis", AwsBatchScheduling(queues=None), True),
-        ("ClusterCanNotContainSpaces LikeThis", AwsBatchScheduling(queues=None), True),
     ],
 )
 def test_cluster_name_validator(cluster_name, scheduling, should_trigger_error):
@@ -183,6 +184,26 @@ def test_cluster_name_validator(cluster_name, scheduling, should_trigger_error):
             ),
             False,
         ),
+        (
+            "ClusterNameWith40------------------Chars",
+            SlurmScheduling(
+                queues=None,
+                settings=SlurmSettings(
+                    external_slurmdbd=ExternalSlurmdbd(host="test.slurmdbd.host", port=6819),
+                ),
+            ),
+            False,
+        ),
+        (
+            "ClusterNameWith41-------------------Chars",
+            SlurmScheduling(
+                queues=None,
+                settings=SlurmSettings(
+                    external_slurmdbd=ExternalSlurmdbd(host="test.slurmdbd.host", port=6819),
+                ),
+            ),
+            True,
+        ),
     ],
 )
 def test_cluster_name_validator_slurm_accounting(cluster_name, scheduling, should_trigger_error):
@@ -211,11 +232,18 @@ def test_cluster_name_validator_slurm_accounting(cluster_name, scheduling, shoul
         ),
         (
             "Fails when custom settings at SlurmConf level are in the deny_list, invalid parameters are reported",
-            [{"SlurmctldParameters": "SubPar1,Subpar2=1"}, {"CommunicationParameters": "SubPar1"}],
+            [{"SlurmctldParameters": "SubPar1,Subpar2=1"}],
             SLURM_SETTINGS_DENY_LIST["SlurmConf"]["Global"],  # keep the deny-list lowercase
             CustomSlurmSettingLevel.SLURM_CONF,
-            "Using the following custom Slurm settings at SlurmConf level is not allowed: "
-            "CommunicationParameters,SlurmctldParameters",
+            "Using the following custom Slurm settings at SlurmConf level is not allowed: SlurmctldParameters",
+        ),
+        (
+            "When defining custom partitions or nodelists with parameters that exist also at global level and are"
+            "deny-listed there (e.g. SuspendTime), the validation should not fail",
+            [{"PartitionName": "external", "Nodes": "external-nodes-[1-10]", "State": "UP", "SuspendTime": "INFINITE"}],
+            SLURM_SETTINGS_DENY_LIST["SlurmConf"]["Global"],  # keep the deny-list lowercase
+            CustomSlurmSettingLevel.SLURM_CONF,
+            "",
         ),
         (
             "No error when custom settings are not in the deny_list",
@@ -320,6 +348,204 @@ def test_custom_slurm_settings_include_file_only_validator(
 
 
 @pytest.mark.parametrize(
+    "database, external_slurmdbd, expected_message",
+    [
+        pytest.param(
+            None,
+            None,
+            None,
+            id="Case with no Slurm accounting",
+        ),
+        pytest.param(
+            None,
+            ExternalSlurmdbd(
+                host="test.slurmdbd.host",
+                port=6819,
+            ),
+            None,
+            id="Case with external slurmdbd",
+        ),
+        pytest.param(
+            Database(
+                uri="test.database.server",
+                user_name="databaseadmin",
+                password_secret_arn="fake-password-secret-arn",
+            ),
+            None,
+            None,
+            id="Case with normal Slurm Accounting (via Database)",
+        ),
+        pytest.param(
+            Database(
+                uri="test.database.server",
+                user_name="databaseadmin",
+                password_secret_arn="fake-password-secret-arn",
+            ),
+            ExternalSlurmdbd(
+                host="test.slurmdbd.host",
+                port=6819,
+            ),
+            "Database and ExternalSlurmdbd cannot be defined at the same time within SlurmSettings.",
+            id="Bad case with Slurm Accounting (via Database) and external slurmdbd",
+        ),
+    ],
+)
+def test_external_slurmdbd_vs_database_incompatibility_validator(database, external_slurmdbd, expected_message):
+    actual_failures = ExternalSlurmdbdVsDatabaseIncompatibility().execute(database, external_slurmdbd)
+    assert_failure_messages(actual_failures, expected_message)
+
+
+@pytest.mark.parametrize(
+    "external_slurmdbd, munge_key_secret_arn, expected_message",
+    [
+        pytest.param(None, None, None),
+        pytest.param(None, "arn", None),
+        pytest.param("external_slurmdbd", "arn", None),
+        pytest.param("external_slurmdbd", None, "When ExternalSlurmdbd is defined, MungeKeySecretArn is required."),
+    ],
+)
+def test_external_slurmdbd_requires_munge_key_validator(external_slurmdbd, munge_key_secret_arn, expected_message):
+    actual_failures = ExternalSlurmdbdRequiresCustomMungeKey().execute(external_slurmdbd, munge_key_secret_arn)
+    assert_failure_messages(actual_failures, expected_message)
+
+
+@pytest.mark.parametrize(
+    "external_slurmdbd, expected_message",
+    [
+        pytest.param(None, None),
+        pytest.param(
+            ExternalSlurmdbd(
+                host="test.slurmdbd.host",
+                port=6819,
+            ),
+            "Traffic between ParallelCluster and the external Slurmdbd is not encrypted",
+        ),
+    ],
+)
+def test_external_slurmdbd_traffic_not_encrypted_validator(external_slurmdbd, expected_message):
+    actual_failures = ExternalSlurmdbdTrafficNotEncrypted().execute(external_slurmdbd)
+    assert_failure_messages(actual_failures, expected_message)
+
+
+@pytest.mark.parametrize(
+    "queue_name, compute_resources, expected_message",
+    [
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(name="cr1", instance_type="t3.small", min_count=5),
+                SlurmComputeResource(name="cr2", instance_type="t3.small", min_count=5),
+            ],
+            None,
+            id="Case with default priorities",
+        ),
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(name="cr1", instance_type="t3.small", min_count=5, dynamic_node_priority=120),
+                SlurmComputeResource(name="cr2", instance_type="t3.small", min_count=5, static_node_priority=100),
+            ],
+            None,
+            id="Case with good custom priorities",
+        ),
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(name="cr1", instance_type="t3.small", min_count=0, dynamic_node_priority=100),
+                SlurmComputeResource(name="cr2", instance_type="t3.small", min_count=0, static_node_priority=120),
+            ],
+            None,
+            id="Case with bad custom priorities, but no static nodes, so no issue",
+        ),
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(name="cr1", instance_type="t3.small", min_count=10, dynamic_node_priority=100),
+                SlurmComputeResource(name="cr2", instance_type="t3.small", min_count=10, static_node_priority=120),
+            ],
+            None,
+            id="Case with bad custom priorities, but no dynamic nodes, so no issue",
+        ),
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(name="cr1", instance_type="t3.small", min_count=5, dynamic_node_priority=100),
+                SlurmComputeResource(name="cr2", instance_type="t3.small", min_count=5, static_node_priority=120),
+            ],
+            "Some compute resources in queue queue1 have static nodes with higher or equal priority than "
+            "other dynamic nodes in the same queue. "
+            "The following static node priorities are higher than or equal to the minimum dynamic priority "
+            "(100): {'cr2': 120}. "
+            "The following dynamic node priorities are lower than or equal to the maximum static priority "
+            "(120): {'cr1': 100}.",
+            id="Case with problematic priorities",
+        ),
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(name="cr1", instance_type="t3.small", min_count=5, dynamic_node_priority=100),
+                SlurmComputeResource(name="cr2", instance_type="t3.small", min_count=5, static_node_priority=100),
+            ],
+            "Some compute resources in queue queue1 have static nodes with higher or equal priority than "
+            "other dynamic nodes in the same queue. "
+            "The following static node priorities are higher than or equal to the minimum dynamic priority "
+            "(100): {'cr2': 100}. "
+            "The following dynamic node priorities are lower than or equal to the maximum static priority "
+            "(100): {'cr1': 100}.",
+            id="Case with equal static and dynamic priorities (problematic due to alphabetical sorting)",
+        ),
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(
+                    name="cr1",
+                    instance_type="t3.small",
+                    min_count=5,
+                    static_node_priority=10,
+                    dynamic_node_priority=100,
+                ),
+                SlurmComputeResource(
+                    name="cr2", instance_type="t3.small", min_count=5, static_node_priority=99, dynamic_node_priority=1
+                ),
+            ],
+            "Some compute resources in queue queue1 have static nodes with higher or equal priority than "
+            "other dynamic nodes in the same queue. "
+            "The following static node priorities are higher than or equal to the minimum dynamic priority "
+            "(1): {'cr1': 10, 'cr2': 99}. "
+            "The following dynamic node priorities are lower than or equal to the maximum static priority "
+            "(99): {'cr2': 1}.",
+            id="Case with dynamic priority even lower than or equal to the range of static priorities",
+        ),
+        pytest.param(
+            "queue1",
+            [
+                SlurmComputeResource(name="cr0", instance_type="t3.small", min_count=5, static_node_priority=100),
+                SlurmComputeResource(name="cr1", instance_type="t3.small", min_count=5, static_node_priority=120),
+                SlurmComputeResource(name="cr2", instance_type="t3.small", min_count=5, static_node_priority=140),
+                SlurmComputeResource(name="cr3", instance_type="t3.small", min_count=5, static_node_priority=160),
+                SlurmComputeResource(name="cr4", instance_type="t3.small", min_count=5, static_node_priority=180),
+                SlurmComputeResource(name="cr5", instance_type="t3.small", min_count=5, dynamic_node_priority=150),
+                SlurmComputeResource(name="cr6", instance_type="t3.small", min_count=5, dynamic_node_priority=150),
+                SlurmComputeResource(name="cr7", instance_type="t3.small", min_count=5, dynamic_node_priority=170),
+                SlurmComputeResource(name="cr8", instance_type="t3.small", min_count=5, dynamic_node_priority=190),
+                SlurmComputeResource(name="cr9", instance_type="t3.small", min_count=5, dynamic_node_priority=210),
+            ],
+            "Some compute resources in queue queue1 have static nodes with higher or equal priority than "
+            "other dynamic nodes in the same queue. "
+            "The following static node priorities are higher than or equal to the minimum dynamic priority "
+            "(150): {'cr3': 160, 'cr4': 180}. "
+            "The following dynamic node priorities are lower than or equal to the maximum static priority "
+            "(180): {'cr5': 150, 'cr6': 150, 'cr7': 170}.",
+            id="Case with many compute resources with problematic priorities",
+        ),
+    ],
+)
+def test_slurm_node_weights_warning_validator(queue_name, compute_resources, expected_message):
+    actual_failures = SlurmNodePrioritiesWarningValidator().execute(queue_name, compute_resources)
+    assert_failure_messages(actual_failures, expected_message)
+
+
+@pytest.mark.parametrize(
     "region, expected_message",
     [
         ("invalid-region", "Region 'invalid-region' is not yet officially supported "),
@@ -332,43 +558,53 @@ def test_region_validator(region, expected_message):
 
 
 @pytest.mark.parametrize(
-    "os, scheduler, expected_message",
+    "min_count, max_count, capacity_type, expected_messages",
     [
-        ("centos7", "slurm", None),
-        ("ubuntu1804", "slurm", None),
-        ("ubuntu2004", "slurm", None),
-        ("alinux2", "slurm", None),
-        ("rhel8", "slurm", None),
-        ("centos7", "awsbatch", "scheduler supports the following operating systems"),
-        ("rhel8", "awsbatch", "scheduler supports the following operating systems"),
-        ("ubuntu1804", "awsbatch", "scheduler supports the following operating systems"),
-        ("ubuntu2004", "awsbatch", "scheduler supports the following operating systems"),
-        ("alinux2", "awsbatch", None),
+        (0, 0, None, None),
+        (1, 2, None, None),
+        (1, 1, None, None),
+        (1, 2, CapacityType.ONDEMAND, None),
+        (1, 1, CapacityType.ONDEMAND, None),
+        (1, 2, CapacityType.SPOT, None),
+        (1, 1, CapacityType.SPOT, None),
+        (
+            1,
+            2,
+            CapacityType.CAPACITY_BLOCK,
+            "Max count must be set to the same value of min count when using Capacity Block reservation",
+        ),
+        (
+            0,
+            2,
+            CapacityType.CAPACITY_BLOCK,
+            [
+                "Max count must be set to the same value of min count when using Capacity Block reservation",
+                "Min count must be a value > 0 when using Capacity Block reservation.",
+            ],
+        ),
+        (0, 0, CapacityType.CAPACITY_BLOCK, "Min count must be a value > 0 when using Capacity Block reservation."),
+        (1, 1, CapacityType.CAPACITY_BLOCK, None),
+        (2, 1, None, "Max count must be greater than or equal to min count"),
+        (
+            2,
+            1,
+            CapacityType.CAPACITY_BLOCK,
+            [
+                "Max count must be greater than or equal to min count",
+                "Max count must be set to the same value of min count when using Capacity Block reservation",
+            ],
+        ),
     ],
 )
-def test_scheduler_os_validator(os, scheduler, expected_message):
-    actual_failures = SchedulerOsValidator().execute(os, scheduler)
-    assert_failure_messages(actual_failures, expected_message)
-
-
-@pytest.mark.parametrize(
-    "min_count, max_count, expected_message",
-    [
-        (1, 2, None),
-        (1, 1, None),
-        (2, 1, "Max count must be greater than or equal to min count"),
-    ],
-)
-def test_compute_resource_size_validator(min_count, max_count, expected_message):
-    actual_failures = ComputeResourceSizeValidator().execute(min_count, max_count)
-    assert_failure_messages(actual_failures, expected_message)
+def test_compute_resource_size_validator(min_count, max_count, capacity_type, expected_messages):
+    actual_failures = ComputeResourceSizeValidator().execute(min_count, max_count, capacity_type)
+    assert_failure_messages(actual_failures, expected_messages)
 
 
 @pytest.mark.parametrize(
     "resource_name, resources_length, max_length, expected_message",
     [
         ("SlurmQueues", 5, 10, None),
-        ("SchedulerQueues", 10, 10, None),
         ("ComputeResources", 4, 5, None),
         (
             "SlurmQueues",
@@ -377,16 +613,22 @@ def test_compute_resource_size_validator(min_count, max_count, expected_message)
             "Invalid number of SlurmQueues (11) specified. Currently only supports up to 10 SlurmQueues.",
         ),
         (
-            "SchedulerQueues",
-            12,
-            10,
-            "Invalid number of SchedulerQueues (12) specified. Currently only supports up to 10 SchedulerQueues.",
-        ),
-        (
             "ComputeResources",
             6,
             5,
             "Invalid number of ComputeResources (6) specified. Currently only supports up to 5 ComputeResources.",
+        ),
+        (
+            "LoginNodePools",
+            11,
+            10,
+            "Invalid number of LoginNodePools (11) specified. Currently only supports up to 10 LoginNodePools.",
+        ),
+        (
+            "LoginNodePools",
+            9,
+            10,
+            None,
         ),
     ],
 )
@@ -443,8 +685,8 @@ def test_schedulable_memory_validator(schedulable_memory, ec2memory, instance_ty
         # EFA without EFAGDR
         ("c5n.18xlarge", True, False, True, False, None),
         # Unsupported instance type
-        ("t2.large", True, False, False, False, "does not support EFA"),
-        ("t2.large", False, False, False, False, None),
+        ("t3.large", True, False, False, False, "does not support EFA"),
+        ("t3.large", False, False, False, False, None),
         # EFA not enabled for instance type that supports it
         (
             "c5n.18xlarge",
@@ -467,7 +709,10 @@ def test_efa_validator(
             {
                 "InstanceType": instance_type,
                 "VCpuInfo": {"DefaultVCpus": 4, "DefaultCores": 2},
-                "NetworkInfo": {"EfaSupported": instance_type == "c5n.18xlarge"},
+                "NetworkInfo": {
+                    "EfaSupported": instance_type == "c5n.18xlarge",
+                    "NetworkCards": [{"NetworkCardIndex": 0}],
+                },
             }
         ),
     )
@@ -479,37 +724,82 @@ def test_efa_validator(
 
 
 @pytest.mark.parametrize(
-    "efa_enabled, placement_group_key, placement_group_disabled, multi_az_enabled, expected_message",
+    "efa_enabled, placement_group_key, placement_group_disabled, multi_az_enabled, capacity_type, "
+    "queue_name, expected_message",
     [
         # Efa disabled
-        (False, "test", False, False, None),
-        (False, "test", True, False, None),
-        (False, None, False, False, None),
-        (False, None, True, False, None),
+        (False, "test", False, False, CapacityType.ONDEMAND, "queue1", None),
+        (False, "test", True, False, CapacityType.ONDEMAND, "queue1", None),
+        (False, None, False, False, CapacityType.ONDEMAND, "queue1", None),
+        (False, None, True, False, CapacityType.ONDEMAND, "queue1", None),
+        (False, "test", False, False, CapacityType.CAPACITY_BLOCK, "queue1", None),
         # Efa enabled
         (
             True,
             None,
             False,
             False,
-            "The placement group for EFA-enabled compute resources must be explicit. "
-            "You may see better performance using a placement group, "
-            "but if you don't wish to use one please add "
-            "'Enabled: false' to the compute resource's configuration section.",
+            CapacityType.ONDEMAND,
+            "queue1",
+            "The placement group for EFA-enabled compute resources in queue 'queue1' must be explicit. "
+            "You may see better performance using a placement group, but if you don't wish to use one or "
+            "the compute resources in the queue use a capacity reservation with its own placement group, "
+            "please add 'Enabled: false' to the compute resource's configuration section.",
         ),
-        (True, None, True, False, "You may see better performance using a placement group for the queue."),
-        (True, "test", False, False, None),
-        (True, "test", True, False, "You may see better performance using a placement group for the queue."),
+        (
+            True,
+            None,
+            True,
+            False,
+            CapacityType.ONDEMAND,
+            "queue1",
+            "Placement group is disabled for queue 'queue1'. "
+            "This is expected when using a capacity reservation with its own placement group. "
+            "Otherwise, enabling a placement group may improve network performance.",
+        ),
+        (True, "test", False, False, CapacityType.ONDEMAND, "queue1", None),
+        (
+            True,
+            "test",
+            True,
+            False,
+            CapacityType.ONDEMAND,
+            "queue1",
+            "Placement group is disabled for queue 'queue1'. "
+            "This is expected when using a capacity reservation with its own placement group. "
+            "Otherwise, enabling a placement group may improve network performance.",
+        ),
+        (
+            True,
+            None,
+            False,
+            False,
+            CapacityType.CAPACITY_BLOCK,
+            "queue1",
+            None,
+        ),
         # EFA and MultiAZ enabled
-        (True, "test", False, True, None),
-        (True, "test", True, True, None),
+        (True, "test", False, True, CapacityType.ONDEMAND, "queue1", None),
+        (True, "test", True, True, CapacityType.ONDEMAND, "queue1", None),
+        (True, "test", True, True, CapacityType.CAPACITY_BLOCK, "queue1", None),
     ],
 )
 def test_efa_placement_group_validator(
-    efa_enabled, placement_group_key, placement_group_disabled, multi_az_enabled, expected_message
+    efa_enabled,
+    placement_group_key,
+    placement_group_disabled,
+    multi_az_enabled,
+    capacity_type,
+    queue_name,
+    expected_message,
 ):
     actual_failures = EfaPlacementGroupValidator().execute(
-        efa_enabled, placement_group_key, placement_group_disabled, multi_az_enabled
+        efa_enabled,
+        placement_group_key,
+        placement_group_disabled,
+        multi_az_enabled,
+        capacity_type,
+        queue_name,
     )
 
     assert_failure_messages(actual_failures, expected_message)
@@ -661,12 +951,11 @@ def test_efa_security_group_validator(
 @pytest.mark.parametrize(
     "efa_enabled, os, architecture, expected_message",
     [
-        (True, "alinux2", "x86_64", None),
-        (True, "alinux2", "arm64", None),
-        (True, "ubuntu1804", "x86_64", None),
-        (True, "ubuntu1804", "arm64", None),
-        (True, "ubuntu2004", "x86_64", None),
-        (True, "ubuntu2004", "arm64", None),
+        (True, "alinux2023", "x86_64", None),
+        (True, "alinux2023", "arm64", None),
+        (True, "ubuntu2204", "arm64", None),
+        (True, "ubuntu2404", "x86_64", None),
+        (True, "rocky9", "arm64", None),
         (True, "rhel8", "x86_64", None),
         (True, "rhel8", "arm64", None),
     ],
@@ -697,38 +986,35 @@ def test_efa_multi_az_validator(multi_az_enabled, efa_enabled, expected_message)
 
 
 @pytest.mark.parametrize(
-    "os, architecture, custom_ami, ami_search_filters, expected_message",
+    "os, architecture, expected_message",
     [
         # All OSes supported for x86_64
-        ("alinux2", "x86_64", None, None, None),
-        ("alinux2", "x86_64", "custom-ami", None, None),
-        ("rhel8", "x86_64", None, None, None),
-        ("rhel8", "x86_64", "custom-ami", None, None),
-        ("centos7", "x86_64", None, None, None),
-        ("centos7", "x86_64", "custom-ami", None, None),
-        ("ubuntu1804", "x86_64", None, None, None),
-        ("ubuntu2004", "x86_64", None, None, None),
-        # All OSes supported for ARM
-        ("alinux2", "arm64", None, None, None),
-        ("alinux2", "arm64", "custom-ami", None, None),
+        ("alinux2023", "x86_64", None),
+        ("alinux2023", "x86_64", None),
+        ("rhel8", "x86_64", None),
+        ("rhel8", "x86_64", None),
         (
-            "centos7",
-            "arm64",
-            None,
-            None,
-            "The aarch64 CentOS 7 OS is not validated for the 6th generation aarch64 instances",
+            "ubuntu1804",
+            "x86_64",
+            "The architecture x86_64 is only supported for the following operating systems",
         ),
-        ("centos7", "arm64", None, {"ami_search_filters"}, None),
-        ("centos7", "arm64", "custom-ami", None, None),
-        ("ubuntu1804", "arm64", None, None, None),
-        ("ubuntu2004", "arm64", None, None, None),
-        ("rhel8", "arm64", None, None, None),
-        ("rhel8", "arm64", "custom-ami", None, None),
+        ("ubuntu2404", "x86_64", None),
+        # All OSes supported for ARM
+        ("alinux2023", "arm64", None),
+        ("alinux2023", "arm64", None),
+        (
+            "ubuntu04",
+            "arm64",
+            "The architecture arm64 is only supported for the following operating systems",
+        ),
+        ("ubuntu2204", "arm64", None),
+        ("rhel8", "arm64", None),
+        ("rhel8", "arm64", None),
     ],
 )
-def test_architecture_os_validator(os, architecture, custom_ami, ami_search_filters, expected_message):
+def test_architecture_os_validator(os, architecture, expected_message):
     """Verify that the correct set of OSes is supported for each supported architecture."""
-    actual_failures = ArchitectureOsValidator().execute(os, architecture, custom_ami, ami_search_filters)
+    actual_failures = ArchitectureOsValidator().execute(os, architecture)
     assert_failure_messages(actual_failures, expected_message)
 
 
@@ -789,11 +1075,13 @@ def test_queue_name_validator(name, expected_message):
 
 
 @pytest.mark.parametrize(
-    "fsx_file_system_type, fsx_vpc, ip_permissions, nodes_security_groups, network_interfaces, " "expected_message",
+    "fsx_file_system_type, fsx_vpc, ip_permissions, ip_permissions_egress, nodes_security_groups, network_interfaces, "
+    "expected_message",
     [
         (  # working case, right vpc and sg, multiple network interfaces
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
+            [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             ["eni-09b9460295ddd4e5f", "eni-001b3cef7c78b45c4"],
@@ -803,6 +1091,7 @@ def test_queue_name_validator(name, expected_message):
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
+            [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             ["eni-09b9460295ddd4e5f"],
             None,
@@ -810,6 +1099,7 @@ def test_queue_name_validator(name, expected_message):
         (  # working case (LUSTRE) CIDR specified in the security group through ip ranges
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
+            [{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
             [{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
             {frozenset({None}), frozenset({None})},
             ["eni-09b9460295ddd4e5f"],
@@ -820,6 +1110,10 @@ def test_queue_name_validator(name, expected_message):
             # do not cover the subnet
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
+            [
+                {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "10.0.1.0/25"}]},
+                {"IpProtocol": "tcp", "FromPort": 988, "ToPort": 988, "IpRanges": [{"CidrIp": "10.0.1.128/25"}]},
+            ],
             [
                 {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "10.0.1.0/25"}]},
                 {"IpProtocol": "tcp", "FromPort": 988, "ToPort": 988, "IpRanges": [{"CidrIp": "10.0.1.128/25"}]},
@@ -836,6 +1130,10 @@ def test_queue_name_validator(name, expected_message):
                 {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "10.1.1.0/25"}]},
                 {"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]},
             ],
+            [
+                {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "10.1.1.0/25"}]},
+                {"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]},
+            ],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             ["eni-09b9460295ddd4e5f"],
             None,
@@ -848,14 +1146,19 @@ def test_queue_name_validator(name, expected_message):
                 {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "10.0.0.0/23"}]},
                 {"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-34567890"}]},
             ],
+            [
+                {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "10.0.0.0/23"}]},
+                {"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-34567890"}]},
+            ],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             ["eni-09b9460295ddd4e5f"],
             None,
         ),
-        (  # working case (OPENZFS), CIDR specified in the security group through ip ranges
+        (  # working case (OPENZFS), CIDR specified in the security group through ip ranges, no egress rules
             "OPENZFS",
             "vpc-06e4ab6c6cEXAMPLE",
             [{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
+            [],
             {frozenset({None}), frozenset({None})},
             ["eni-09b9460295ddd4e5f"],
             None,
@@ -863,6 +1166,7 @@ def test_queue_name_validator(name, expected_message):
         (  # working case (ONTAP), CIDR specified in the security group through ip ranges
             "ONTAP",
             "vpc-06e4ab6c6cEXAMPLE",
+            [{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
             [{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
             {frozenset({None}), frozenset({None})},
             ["eni-09b9460295ddd4e5f"],
@@ -872,6 +1176,7 @@ def test_queue_name_validator(name, expected_message):
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
             [{"IpProtocol": "-1", "PrefixListIds": [{"PrefixListId": "pl-12345"}]}],
+            [{"IpProtocol": "-1", "PrefixListIds": [{"PrefixListId": "pl-12345"}]}],
             {frozenset({None}), frozenset({None})},
             ["eni-09b9460295ddd4e5f"],
             None,
@@ -880,6 +1185,7 @@ def test_queue_name_validator(name, expected_message):
             # Security group without CIDR/prefix cannot work with clusters containing pcluster created security group.
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
+            [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             {frozenset({None}), frozenset({None})},
             ["eni-09b9460295ddd4e5f"],
@@ -892,6 +1198,7 @@ def test_queue_name_validator(name, expected_message):
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-23456789"}]}],
+            [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-23456789"}]}],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             ["eni-09b9460295ddd4e5f"],
             "The current security group settings on file storage .* does not satisfy mounting requirement. "
@@ -903,16 +1210,18 @@ def test_queue_name_validator(name, expected_message):
             "OPENZFS",
             "vpc-06e4ab6c6cEXAMPLE",
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
+            [],
             {frozenset({None}), frozenset({None})},
             ["eni-09b9460295ddd4e5f"],
             "The current security group settings on file storage .* does not satisfy mounting requirement. "
             "The file storage must be associated to a security group that "
-            r"allows inbound and outbound TCP traffic through ports \[111, 2049, 20001, 20002, 20003\].",
+            r"allows inbound TCP traffic through ports \[111, 2049, 20001, 20002, 20003\].",
         ),
         (  # not working case, wrong security group. Ontap
             # Security group without CIDR cannot work with clusters containing pcluster created security group.
             "ONTAP",
             "vpc-06e4ab6c6cEXAMPLE",
+            [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             {frozenset({None}), frozenset({None})},
             ["eni-09b9460295ddd4e5f"],
@@ -924,6 +1233,7 @@ def test_queue_name_validator(name, expected_message):
             "LUSTRE",
             "vpc-06e4ab6c6cEXAMPLE",
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
+            [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             [],
             "doesn't have Elastic Network Interfaces attached",
@@ -931,6 +1241,7 @@ def test_queue_name_validator(name, expected_message):
         (  # not working case --> wrong vpc
             "LUSTRE",
             "vpc-06e4ab6c6ccWRONG",
+            [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             [{"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}]}],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             ["eni-09b9460295ddd4e5f"],
@@ -949,12 +1260,106 @@ def test_queue_name_validator(name, expected_message):
                     "UserIdGroupPairs": [],
                 }
             ],
+            [
+                {
+                    "PrefixListIds": [],
+                    "FromPort": 22,
+                    "IpRanges": [{"CidrIp": "203.0.113.0/24"}],
+                    "ToPort": 22,
+                    "IpProtocol": "tcp",
+                    "UserIdGroupPairs": [],
+                }
+            ],
             {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
             ["eni-09b9460295ddd4e5f"],
             [
                 "only support using FSx file storage that is in the same VPC as the cluster",
                 "does not satisfy mounting requirement",
             ],
+        ),
+        (  # not working case (OPENZFS), ingress rules don't cover all ports required
+            "OPENZFS",
+            "vpc-06e4ab6c6cEXAMPLE",
+            [
+                {
+                    "PrefixListIds": [],
+                    "FromPort": 111,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    "ToPort": 111,
+                    "IpProtocol": "tcp",
+                    "UserIdGroupPairs": [],
+                },
+            ],
+            [],
+            {frozenset({None}), frozenset({None})},
+            ["eni-09b9460295ddd4e5f"],
+            "The current security group settings on file storage .* does not satisfy mounting requirement. "
+            "The file storage must be associated to a security group that "
+            r"allows inbound TCP traffic through ports \[111, 2049, 20001, 20002, 20003\]. Missing ports: "
+            r"\[2049, 20001, 20002, 20003\]",
+        ),
+        (  # working case: The rule has both IpRanges and UserIdGroupPairs. Wrong ip permissions. But SG matches.
+            "LUSTRE",
+            "vpc-06e4ab6c6cEXAMPLE",
+            [
+                {
+                    "IpProtocol": "-1",
+                    "IpRanges": [{"CidrIp": "10.1.1.0/25"}],
+                    "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}],
+                }
+            ],
+            [
+                {
+                    "IpProtocol": "-1",
+                    "IpRanges": [{"CidrIp": "10.1.1.0/25"}],
+                    "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-12345678"}],
+                }
+            ],
+            {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
+            ["eni-09b9460295ddd4e5f"],
+            None,
+        ),
+        (  # not-working case：The rule has both IpRanges and UserIdGroupPairs. Both don't match.
+            "LUSTRE",
+            "vpc-06e4ab6c6cEXAMPLE",
+            [
+                {
+                    "IpProtocol": "-1",
+                    "IpRanges": [{"CidrIp": "10.1.1.0/25"}],
+                    "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-99999999"}],
+                }
+            ],
+            [
+                {
+                    "IpProtocol": "-1",
+                    "IpRanges": [{"CidrIp": "10.1.1.0/25"}],
+                    "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-99999999"}],
+                }
+            ],
+            {frozenset({"sg-12345678"}), frozenset({"sg-12345678", "sg-23456789"})},
+            ["eni-09b9460295ddd4e5f"],
+            r"allows inbound and outbound TCP traffic through ports \[988\]",
+        ),
+        (  # working case：IpRanges covers the subnet, but UserIdGroupPairs do not match
+            "LUSTRE",
+            "vpc-06e4ab6c6cEXAMPLE",
+            [
+                {
+                    "IpProtocol": "-1",
+                    "IpRanges": [{"CidrIp": "10.0.0.0/16"}],
+                    "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-99999999"}],
+                }
+            ],
+            [
+                {
+                    "IpProtocol": "-1",
+                    "IpRanges": [{"CidrIp": "10.0.0.0/16"}],
+                    "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-99999999"}],
+                }
+            ],
+            {frozenset({"sg-12345678"})},
+            ["eni-09b9460295ddd4e5f"],
+            None,
         ),
     ],
 )
@@ -963,13 +1368,14 @@ def test_fsx_network_validator(
     fsx_file_system_type,
     fsx_vpc,
     ip_permissions,
+    ip_permissions_egress,
     nodes_security_groups,
     network_interfaces,
     expected_message,
 ):
     fsx_mocked_requests = []
     if fsx_file_system_type == "LUSTRE":
-        # Creating describe Fsx Filecache mocker
+        # Creating describe FileCache mocker
         describe_file_caches_response = {
             "FileCaches": [
                 {
@@ -1123,7 +1529,7 @@ def test_fsx_network_validator(
             describe_security_groups_response = {
                 "SecurityGroups": [
                     {
-                        "IpPermissionsEgress": ip_permissions,
+                        "IpPermissionsEgress": ip_permissions_egress,
                         "Description": "My security group",
                         "IpPermissions": ip_permissions,
                         "GroupName": "MySecurityGroup",
@@ -1155,7 +1561,7 @@ def test_fsx_network_validator(
     boto3_stubber("ec2", ec2_mocked_requests)
 
     if fsx_file_system_type == "LUSTRE":
-        # Testing for FSx File Cache
+        # Testing for File Cache
         actual_failures = ExistingFsxNetworkingValidator().execute(
             subnet_ids=["subnet-12345678"],
             security_groups_by_nodes=nodes_security_groups,
@@ -1176,21 +1582,25 @@ def test_fsx_network_validator(
     "architecture, os, expected_message",
     [
         # Supported combinations
-        ("x86_64", "alinux2", None),
-        ("x86_64", "centos7", None),
+        ("x86_64", "alinux2023", None),
         ("x86_64", "rhel8", None),
-        ("x86_64", "ubuntu1804", None),
-        ("x86_64", "ubuntu2004", None),
-        ("arm64", "ubuntu1804", None),
-        ("arm64", "ubuntu2004", None),
+        ("x86_64", "ubuntu2204", None),
+        ("arm64", "ubuntu2404", None),
         ("arm64", "rhel8", None),
-        ("arm64", "alinux2", None),
+        ("arm64", "alinux2023", None),
         # Unsupported combinations
         (
-            "UnsupportedArchitecture",
-            "alinux2",
-            FSX_MESSAGES["errors"]["unsupported_architecture"].format(
-                supported_architectures=list(FSX_SUPPORTED_ARCHITECTURES_OSES.keys())
+            "x86_64",
+            "ubuntu1804",
+            FSX_MESSAGES["errors"]["unsupported_os"].format(
+                architecture="x86_64", supported_oses=FSX_SUPPORTED_ARCHITECTURES_OSES.get("x86_64")
+            ),
+        ),
+        (
+            "arm64",
+            "ubuntu1804",
+            FSX_MESSAGES["errors"]["unsupported_os"].format(
+                architecture="arm64", supported_oses=FSX_SUPPORTED_ARCHITECTURES_OSES.get("arm64")
             ),
         ),
     ],
@@ -1339,7 +1749,8 @@ def test_shared_storage_name_validator(name, expected_message):
         ("shared_ebs_1", None),
         ("shared", None),
         ("/shared", None),
-        ("home", "mount directory .* is reserved"),
+        ("home", None),
+        ("/opt", "The shared storage mount directory .* is reserved. Please use another directory"),
     ],
 )
 def test_shared_storage_mount_dir_validator(mount_dir, expected_message):
@@ -1347,36 +1758,81 @@ def test_shared_storage_mount_dir_validator(mount_dir, expected_message):
     assert_failure_messages(actual_failures, expected_message)
 
 
+@pytest.mark.parametrize(
+    "mount_dir, expected_message",
+    [
+        ("my_dir", None),
+        (
+            "home",
+            "Error: FileCache cannot be used to mount the shared storage directory 'home'.  "
+            "Please select a supported filesystem.",
+        ),
+        (
+            "/home",
+            "Error: FileCache cannot be used to mount the shared storage directory '/home'.  "
+            "Please select a supported filesystem.",
+        ),
+    ],
+)
+def test_shared_filecache_not_home_validator(mount_dir, expected_message):
+    actual_failures = SharedFileCacheNotHomeValidator().execute(mount_dir)
+    assert_failure_messages(actual_failures, expected_message)
+
+
 # -------------- Third party software validators -------------- #
 
 
 @pytest.mark.parametrize(
-    "dcv_enabled, os, instance_type, allowed_ips, port, expected_message",
+    "dcv_enabled, os, instance_type, allowed_ips, port, gpu_count, expected_message",
     [
-        (True, "centos7", "t2.medium", None, None, None),
-        (True, "ubuntu1804", "t2.medium", None, None, None),
-        (True, "rhel8", "t2.medium", None, None, None),
-        (True, "ubuntu1804", "t2.medium", None, "1.2.3.4/32", None),
-        (True, "ubuntu2004", "t2.medium", None, None, None),
-        (True, "centos7", "t2.medium", "0.0.0.0/0", 8443, "port 8443 to the world"),
-        (True, "alinux2", "t2.medium", None, None, None),
-        (True, "alinux2", "t2.nano", None, None, "is recommended to use an instance type with at least"),
-        (True, "alinux2", "t2.micro", None, None, "is recommended to use an instance type with at least"),
-        (False, "alinux2", "t2.micro", None, None, None),  # doesn't fail because DCV is disabled
-        (True, "ubuntu1804", "m6g.xlarge", None, None, None),
-        (True, "alinux2", "m6g.xlarge", None, None, None),
-        (True, "rhel8", "m6g.xlarge", None, None, None),
-        (True, "ubuntu2004", "m6g.xlarge", None, None, "Please double check the os configuration"),
+        (True, "rhel8", "t3.medium", None, None, 1, None),
+        (True, "ubuntu1804", "t3.medium", None, "1.2.3.4/32", 1, "Please double check the os configuration"),
+        (True, "ubuntu2404", "t3.medium", None, None, 1, None),
+        (True, "alinux2023", "t3.medium", None, None, 1, None),
+        (True, "alinux2023", "t3.nano", None, None, 1, "is recommended to use an instance type with at least"),
+        (True, "alinux2023", "t3.micro", None, None, 1, "is recommended to use an instance type with at least"),
+        (False, "alinux2023", "t3.micro", None, None, 1, None),  # doesn't fail because DCV is disabled
+        (True, "alinux2023", "m6g.xlarge", None, None, 1, None),
+        (True, "rhel8", "m6g.xlarge", None, None, 1, None),
+        (False, "rhel9", "m6g.xlarge", None, None, 0, None),
+        (
+            True,
+            "alinux2023",
+            "m6g.xlarge",
+            None,
+            None,
+            0,
+            "It is recommended to use DCV with a GPU-enabled instance type.",
+        ),
     ],
 )
-def test_dcv_validator(dcv_enabled, os, instance_type, allowed_ips, port, expected_message):
+def test_dcv_validator(
+    mocker, boto3_stubber, dcv_enabled, os, instance_type, allowed_ips, port, gpu_count, expected_message
+):
+    mock_aws_api(mocker)
+    mocker.patch(
+        "pcluster.aws.ec2.Ec2Client.get_instance_type_info",
+        return_value=InstanceTypeInfo(
+            {
+                "InstanceType": instance_type,
+                "GpuInfo": {
+                    "Gpus": [
+                        {
+                            "Manufacturer": "NVIDIA",
+                            "Count": gpu_count,
+                        },
+                    ]
+                },
+            }
+        ),
+    )
     actual_failures = DcvValidator().execute(
         instance_type,
         dcv_enabled,
         allowed_ips,
         port,
         os,
-        "x86_64" if instance_type.startswith("t2") else "arm64",
+        "x86_64" if instance_type.startswith("t3") else "arm64",
     )
     assert_failure_messages(actual_failures, expected_message)
 
@@ -1399,41 +1855,14 @@ def test_intel_hpc_architecture_validator(architecture, expected_message):
 @pytest.mark.parametrize(
     "os, expected_message",
     [
-        ("centos7", None),
-        ("alinux2", "the operating system is required to be set"),
-        ("ubuntu1804", "the operating system is required to be set"),
-        ("ubuntu2004", "the operating system is required to be set"),
+        ("alinux2023", "the operating system is required to be set"),
+        ("ubuntu2204", "the operating system is required to be set"),
+        ("ubuntu2404", "the operating system is required to be set"),
         ("rhel8", "the operating system is required to be set"),
-        # TODO migrate the parametrization below to unit test for the whole model
-        # intel hpc disabled, you can use any os
-        # ({"enable_intel_hpc_platform": "false", "base_os": "alinux"}, None),
     ],
 )
 def test_intel_hpc_os_validator(os, expected_message):
     actual_failures = IntelHpcOsValidator().execute(os)
-    assert_failure_messages(actual_failures, expected_message)
-
-
-@pytest.mark.parametrize(
-    "imds_secured, scheduler, expected_message",
-    [
-        (None, "slurm", "Cannot validate IMDS configuration if IMDS Secured is not set."),
-        (True, "slurm", None),
-        (False, "slurm", None),
-        (None, "awsbatch", "Cannot validate IMDS configuration if IMDS Secured is not set."),
-        (False, "awsbatch", None),
-        (
-            True,
-            "awsbatch",
-            "IMDS Secured cannot be enabled when using scheduler awsbatch. Please, disable IMDS Secured.",
-        ),
-        (None, None, "Cannot validate IMDS configuration if scheduler is not set."),
-        (True, None, "Cannot validate IMDS configuration if scheduler is not set."),
-        (False, None, "Cannot validate IMDS configuration if scheduler is not set."),
-    ],
-)
-def test_head_node_imds_validator(imds_secured, scheduler, expected_message):
-    actual_failures = HeadNodeImdsValidator().execute(imds_secured=imds_secured, scheduler=scheduler)
     assert_failure_messages(actual_failures, expected_message)
 
 
@@ -1510,10 +1939,46 @@ def test_generate_tag_specifications(input_tags):
 
 
 @pytest.mark.parametrize(
-    "network_interfaces_count, use_efa, security_group_ids, subnet, use_public_ips, expected_result",
+    "tag_lists, expected",
+    [
+        # No tags at all
+        ([], []),
+        ([None, None], []),
+        # Single source
+        ([[{"key": "A", "value": "1"}]], [("A", "1")]),
+        # Distinct keys across sources are all kept
+        (
+            [[{"key": "A", "value": "1"}], [{"key": "B", "value": "2"}], [{"key": "C", "value": "3"}]],
+            [("A", "1"), ("B", "2"), ("C", "3")],
+        ),
+        # Duplicate keys: later sources (queue, compute resource) override earlier (cluster)
+        (
+            [[{"key": "A", "value": "cluster"}], [{"key": "A", "value": "queue"}], [{"key": "A", "value": "cr"}]],
+            [("A", "cr")],
+        ),
+        # None sources are skipped without affecting precedence
+        (
+            [[{"key": "A", "value": "cluster"}], None, [{"key": "A", "value": "cr"}]],
+            [("A", "cr")],
+        ),
+    ],
+)
+def test_merge_tags(tag_lists, expected):
+    """Verify tag merging deduplicates by key with later sources taking precedence."""
+    tag_lists = [[Tag(tag["key"], tag["value"]) for tag in tags] if tags is not None else None for tags in tag_lists]
+    merged = merge_tags(*tag_lists)
+    assert_that([(tag.key, tag.value) for tag in merged]).is_equal_to(expected)
+
+
+def get_network_card_list(index_list):
+    return [NetworkCardInfo({"NetworkCardIndex": index}) for index in index_list]
+
+
+@pytest.mark.parametrize(
+    "network_cards_list, use_efa, security_group_ids, subnet, use_public_ips, expected_result",
     [
         [
-            1,
+            get_network_card_list([0]),
             False,
             "sg-1",
             "subnet-1",
@@ -1529,7 +1994,23 @@ def test_generate_tag_specifications(input_tags):
             ],
         ],
         [
-            4,
+            get_network_card_list([1]),
+            False,
+            "sg-1",
+            "subnet-1",
+            False,
+            [
+                {
+                    "DeviceIndex": 0,
+                    "NetworkCardIndex": 1,
+                    "InterfaceType": "interface",
+                    "Groups": "sg-1",
+                    "SubnetId": "subnet-1",
+                }
+            ],
+        ],
+        [
+            get_network_card_list([0, 1, 2, 3]),
             True,
             "sg-2",
             "subnet-2",
@@ -1569,11 +2050,11 @@ def test_generate_tag_specifications(input_tags):
     ],
 )
 def test_build_launch_network_interfaces(
-    network_interfaces_count, use_efa, security_group_ids, subnet, use_public_ips, expected_result
+    network_cards_list, use_efa, security_group_ids, subnet, use_public_ips, expected_result
 ):
     """Verify function to build network interfaces for dry runs of RunInstances works as expected."""
     lt_network_interfaces = _LaunchTemplateValidator._build_launch_network_interfaces(
-        network_interfaces_count, use_efa, security_group_ids, subnet, use_public_ips
+        network_cards_list, use_efa, security_group_ids, subnet, use_public_ips
     )
     assert_that(lt_network_interfaces).is_equal_to(expected_result)
 
@@ -1609,6 +2090,54 @@ def test_mixed_security_group_overwrite_validator(head_node_security_groups, que
         queues=queues,
     )
     expected_message = "make sure.*cluster nodes are reachable" if expect_warning else None
+    assert_failure_messages(actual_failures, expected_message)
+
+
+@pytest.mark.parametrize(
+    "shared_storage_type, shared_storage_efs_settings, expected_message",
+    [
+        pytest.param(
+            "Efs",
+            {"encrypted": True},
+            None,
+            id="test Efs SharedStorageType with SharedStorageEfsSettings/encrypted is True",
+        ),
+        pytest.param(
+            "Efs",
+            {"encrypted": False},
+            None,
+            id="test Efs SharedStorageType with SharedStorageEfsSettings/encrypted is False",
+        ),
+        pytest.param(
+            "Efs",
+            None,
+            None,
+            id="test Efs SharedStorageType without SharedStorageEfsSettings",
+        ),
+        pytest.param(
+            "Ebs",
+            {"encrypted": True},
+            "SharedStorageEfsSettings is specified but the SharedStorageType is set to Ebs. "
+            "SharedStorageEfsSettings can only be used when SharedStorageType is Efs.",
+            id="test Ebs SharedStorageType with SharedStorageEfsSettings/encrypted is True",
+        ),
+        pytest.param(
+            "Ebs",
+            {"encrypted": False},
+            "SharedStorageEfsSettings is specified but the SharedStorageType is set to Ebs. "
+            "SharedStorageEfsSettings can only be used when SharedStorageType is Efs.",
+            id="test Ebs SharedStorageType with SharedStorageEfsSettings/encrypted is False",
+        ),
+        pytest.param(
+            "Ebs",
+            None,
+            None,
+            id="test Ebs SharedStorageType without SharedStorageEfsSettings",
+        ),
+    ],
+)
+def test_shared_storage_efs_settings_validator(shared_storage_type, shared_storage_efs_settings, expected_message):
+    actual_failures = SharedStorageEfsSettingsValidator().execute(shared_storage_type, shared_storage_efs_settings)
     assert_failure_messages(actual_failures, expected_message)
 
 
@@ -2327,40 +2856,6 @@ def test_new_storage_multiple_subnets_validator(
         (
             [
                 dict(
-                    name="multi-az-queue-partial-match",
-                    compute_resources=[],
-                    networking=SchedulerPluginQueueNetworking(
-                        subnet_ids=["subnet-1", "subnet-2"],
-                    ),
-                ),
-            ],
-            [{"subnet-1": "us-east-1a", "subnet-2": "us-east-1b"}],
-            ["us-east-1b"],
-            FailureLevel.INFO,
-            [
-                "Your configuration for Queue 'multi-az-queue-partial-match' includes multiple subnets and external "
-                "shared storage configuration. Accessing a shared storage from different AZs can lead to increased "
-                "storage networking latency and added inter-AZ data transfer costs."
-            ],
-        ),
-        (
-            [
-                dict(
-                    name="multi-az-queue-match",
-                    compute_resources=[],
-                    networking=SchedulerPluginQueueNetworking(
-                        subnet_ids=["subnet-1", "subnet-2"],
-                    ),
-                ),
-            ],
-            [{"subnet-1": "us-east-1a", "subnet-2": "us-east-1b"}],
-            ["us-east-1a", "us-east-1b"],
-            None,
-            [],
-        ),
-        (
-            [
-                dict(
                     name="different-az-queue-1",
                     compute_resources=[],
                     networking=SlurmQueueNetworking(
@@ -2718,7 +3213,7 @@ def test_are_subnets_covered_by_cidrs(mocker, ip_ranges, subnet_cidrs, covered):
 @pytest.mark.usefixtures("get_region")
 class TestDictLaunchTemplateBuilder:
     @pytest.mark.parametrize(
-        "root_volume_parameters, image_os, region, expected_response",
+        "root_volume_parameters, root_volume_device_name, region, expected_response",
         [
             pytest.param(
                 dict(
@@ -2729,7 +3224,7 @@ class TestDictLaunchTemplateBuilder:
                     throughput=30,
                     delete_on_termination=False,
                 ),
-                "centos7",
+                "/dev/sda1",
                 "WHATEVER-NON-US-ISO-REGION",
                 [
                     {"DeviceName": "/dev/xvdba", "VirtualName": "ephemeral0"},
@@ -2778,7 +3273,7 @@ class TestDictLaunchTemplateBuilder:
                     throughput=20,
                     delete_on_termination=True,
                 ),
-                "alinux2",
+                "/dev/xvda",
                 "WHATEVER-NON-US-ISO-REGION",
                 [
                     {"DeviceName": "/dev/xvdba", "VirtualName": "ephemeral0"},
@@ -2826,7 +3321,7 @@ class TestDictLaunchTemplateBuilder:
                     throughput=20,
                     delete_on_termination=True,
                 ),
-                "alinux2",
+                "/dev/xvda",
                 "us-isoWHATEVER",
                 [
                     {"DeviceName": "/dev/xvdba", "VirtualName": "ephemeral0"},
@@ -2858,7 +3353,7 @@ class TestDictLaunchTemplateBuilder:
                         "Ebs": {
                             "Encrypted": True,
                             "VolumeType": "mockVolumeType",
-                            "VolumeSize": 35,
+                            "VolumeSize": 50,
                             "Iops": 15,
                             "Throughput": 20,
                             "DeleteOnTermination": True,
@@ -2869,19 +3364,21 @@ class TestDictLaunchTemplateBuilder:
             ),
         ],
     )
-    def test_get_block_device_mappings(self, mocker, root_volume_parameters, image_os, region, expected_response):
+    def test_get_block_device_mappings(
+        self, mocker, root_volume_parameters, root_volume_device_name, region, expected_response
+    ):
         mocker.patch("pcluster.config.cluster_config.get_region", return_value=region)
         root_volume = RootVolume(**root_volume_parameters)
-        assert_that(DictLaunchTemplateBuilder().get_block_device_mappings(root_volume, image_os)).is_equal_to(
-            expected_response
-        )
+        assert_that(
+            DictLaunchTemplateBuilder().get_block_device_mappings(root_volume, root_volume_device_name)
+        ).is_equal_to(expected_response)
 
     @pytest.mark.parametrize(
         "queue, compute_resource, expected_response",
         [
             pytest.param(
                 BaseQueue(name="queue1", capacity_type="spot"),
-                SlurmComputeResource(name="compute1", instance_type="t2.medium", spot_price=10.0),
+                SlurmComputeResource(name="compute1", instance_type="t3.medium", spot_price=10.0),
                 {
                     "MarketType": "spot",
                     "SpotOptions": {
@@ -2894,7 +3391,7 @@ class TestDictLaunchTemplateBuilder:
             ),
             pytest.param(
                 BaseQueue(name="queue2", capacity_type="spot"),
-                SlurmComputeResource(name="compute2", instance_type="t2.medium"),
+                SlurmComputeResource(name="compute2", instance_type="t3.medium"),
                 {
                     "MarketType": "spot",
                     "SpotOptions": {
@@ -2906,7 +3403,7 @@ class TestDictLaunchTemplateBuilder:
             ),
             pytest.param(
                 BaseQueue(name="queue2", capacity_type="ondemand"),
-                SlurmComputeResource(name="compute2", instance_type="t2.medium", spot_price=10.0),
+                SlurmComputeResource(name="compute2", instance_type="t3.medium", spot_price=10.0),
                 None,
                 id="test without spot capacity",
             ),
@@ -2931,7 +3428,7 @@ class TestDictLaunchTemplateBuilder:
                 ),
                 SlurmComputeResource(
                     name="compute1",
-                    instance_type="t2.medium",
+                    instance_type="t3.medium",
                     capacity_reservation_target=CapacityReservationTarget(
                         capacity_reservation_resource_group_arn="comp_res_cr_rg_arn",
                     ),
@@ -2954,7 +3451,7 @@ class TestDictLaunchTemplateBuilder:
                 ),
                 SlurmComputeResource(
                     name="compute1",
-                    instance_type="t2.medium",
+                    instance_type="t3.medium",
                 ),
                 {
                     "CapacityReservationTarget": {
@@ -2971,7 +3468,7 @@ class TestDictLaunchTemplateBuilder:
                 ),
                 SlurmComputeResource(
                     name="compute1",
-                    instance_type="t2.medium",
+                    instance_type="t3.medium",
                 ),
                 None,
                 id="test with no capacity reservation",
@@ -3023,97 +3520,314 @@ def test_root_volume_encryption_consistency_validator(
         assert_that(actual_failures).is_empty()
 
 
+PUBLIC_IP_LIMITATION = "AWS can't auto-assign a public IP to instances launched with more than one network interface."
+NAT_FIX = "Use a private subnet with a NAT gateway to provide internet access to the compute nodes."
+ASSIGN_PUBLIC_IP_FIX = (
+    "Set AssignPublicIp to false and use a private subnet with a NAT gateway to provide internet access to the "
+    "compute nodes."
+)
+MULTI_CARD_REASON = "The queue queue_1 contains the instance types instance_type with multiple network interfaces"
+EFA_REASON = (
+    "The queue queue_1 has EFA enabled on the single-network-card instance types instance_type, so its compute "
+    "nodes are launched with multiple network interfaces (a primary interface plus a dedicated efa-only interface)"
+)
+# Multi-network-card instances (e.g. p4d, hpc6id).
+MULTI_CARD_ASSIGN_PUBLIC_IP_FAILURE = (
+    f"{MULTI_CARD_REASON}, but AssignPublicIp is set to true. {PUBLIC_IP_LIMITATION} {ASSIGN_PUBLIC_IP_FIX}"
+)
+MULTI_CARD_PUBLIC_IP_SUBNET_FAILURE = (
+    f"{MULTI_CARD_REASON}, but the subnets ['subnet_1'] auto-assign public IPs. {PUBLIC_IP_LIMITATION} {NAT_FIX}"
+)
+# Single-network-card instances with EFA enabled (e.g. hpc6a, c5n).
+EFA_ASSIGN_PUBLIC_IP_FAILURE = (
+    f"{EFA_REASON}, but AssignPublicIp is set to true. {PUBLIC_IP_LIMITATION} {ASSIGN_PUBLIC_IP_FIX}"
+)
+EFA_PUBLIC_IP_SUBNET_FAILURE = (
+    f"{EFA_REASON}, but the subnets ['subnet_1'] auto-assign public IPs. {PUBLIC_IP_LIMITATION} {NAT_FIX}"
+)
+
+
 @pytest.mark.parametrize(
-    "num_cards, assign_public_ip, public_ip_subnets, expected_error_messages",
+    "num_cards, max_efa_interfaces, card0_max_enis, efa_enabled, efa_interface_type, "
+    "assign_public_ip, public_ip_subnets, expected_error_messages",
     [
         pytest.param(
             1,
+            1,
+            2,
+            False,
+            None,
             True,
             [
                 {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": True},
                 {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
             ],
             None,
-            id="Test with single nic queue with assigned public ip and subnet with public ip",
+            id="Single-card, EFA disabled, public ip -> single ENI, no failure",
+        ),
+        pytest.param(
+            1,
+            1,
+            2,
+            False,
+            None,
+            False,
+            [
+                {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": True},
+                {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
+            ],
+            None,
+            id="Single-card, EFA disabled, no assigned public ip -> single ENI, no failure",
         ),
         pytest.param(
             2,
+            2,
+            2,
+            False,
+            None,
             False,
             [
                 {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": False},
                 {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
             ],
             None,
-            id="Test with multi nic queue with neither assigned public ip nor subnet with public ip",
+            id="Multi-card, neither assigned public ip nor subnet with public ip, no failure",
         ),
         pytest.param(
             2,
+            2,
+            2,
+            False,
+            None,
             True,
             [
                 {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": False},
                 {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
             ],
-            [
-                "The queue queue_1 contains an instance type with multiple network interfaces however the "
-                "AssignPublicIp value is set to true. AWS public IPs can only be assigned to instances "
-                "launched with a single network interface."
-            ],
-            id="Test with multi nic queue with assigned public ip and no subnet with public ip",
+            [MULTI_CARD_ASSIGN_PUBLIC_IP_FAILURE],
+            id="Multi-card, assigned public ip and no subnet with public ip",
         ),
         pytest.param(
             2,
+            2,
+            2,
+            False,
+            None,
             False,
             [
                 {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": True},
                 {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
             ],
-            [
-                "The queue queue_1 contains an instance type with multiple network interfaces however the subnets "
-                "['subnet_1'] is configured to automatically assign public IPs. AWS public IPs can only be assigned "
-                "to instances launched with a single network interface."
-            ],
-            id="Test with multi nic queue with no assigned public ip and subnet with public ip",
+            [MULTI_CARD_PUBLIC_IP_SUBNET_FAILURE],
+            id="Multi-card, no assigned public ip and subnet with public ip",
         ),
         pytest.param(
             2,
+            2,
+            2,
+            False,
+            None,
             True,
             [
                 {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": True},
                 {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
             ],
+            [MULTI_CARD_ASSIGN_PUBLIC_IP_FAILURE, MULTI_CARD_PUBLIC_IP_SUBNET_FAILURE],
+            id="Multi-card, assigned public ip and subnet with public ip",
+        ),
+        # Single-network-card EFA instances (e.g. hpc6a, c5n) launch a 2nd efa-only ENI in PC 3.15+.
+        pytest.param(
+            1,
+            1,
+            2,
+            True,
+            None,
+            True,
             [
-                "The queue queue_1 contains an instance type with multiple network interfaces however the "
-                "AssignPublicIp value is set to true. AWS public IPs can only be assigned to instances "
-                "launched with a single network interface.",
-                "The queue queue_1 contains an instance type with multiple network interfaces however the subnets "
-                "['subnet_1'] is configured to automatically assign public IPs. AWS public IPs can only be assigned "
-                "to instances launched with a single network interface.",
+                {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": False},
+                {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
             ],
-            id="Test with multi nic queue with assigned public ip and subnet with public ip",
+            [EFA_ASSIGN_PUBLIC_IP_FAILURE],
+            id="Single-card EFA, 2nd efa-only ENI, assigned public ip -> failure",
+        ),
+        pytest.param(
+            1,
+            1,
+            2,
+            True,
+            None,
+            False,
+            [
+                {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": True},
+                {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
+            ],
+            [EFA_PUBLIC_IP_SUBNET_FAILURE],
+            id="Single-card EFA, 2nd efa-only ENI, subnet with public ip -> failure",
+        ),
+        pytest.param(
+            1,
+            1,
+            2,
+            True,
+            "efa",
+            True,
+            [
+                {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": True},
+                {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
+            ],
+            None,
+            id="Single-card EFA with EfaInterfaceType=efa opt-out -> single ENI, no failure",
+        ),
+        pytest.param(
+            1,
+            1,
+            1,
+            True,
+            None,
+            True,
+            [
+                {"SubnetId": "subnet_1", "MapPublicIpOnLaunch": True},
+                {"SubnetId": "subnet_2", "MapPublicIpOnLaunch": False},
+            ],
+            None,
+            id="Single-card EFA where card0 cannot hold 2 ENIs -> single combined efa ENI, no failure",
         ),
     ],
 )
 @pytest.mark.usefixtures("get_region")
 def test_multi_network_interfaces_instances_validator(
-    aws_api_mock, num_cards, assign_public_ip, public_ip_subnets, expected_error_messages
+    aws_api_mock,
+    num_cards,
+    max_efa_interfaces,
+    card0_max_enis,
+    efa_enabled,
+    efa_interface_type,
+    assign_public_ip,
+    public_ip_subnets,
+    expected_error_messages,
 ):
+    network_cards_list = []
+    for card in range(num_cards):
+        network_cards_list.append(
+            {"NetworkCardIndex": card, "MaximumNetworkInterfaces": card0_max_enis if card == 0 else 1}
+        )
     aws_api_mock.ec2.get_instance_type_info.return_value = InstanceTypeInfo(
-        {"NetworkInfo": {"MaximumNetworkCards": num_cards}}
+        {
+            "NetworkInfo": {
+                "MaximumNetworkCards": num_cards,
+                "NetworkCards": network_cards_list,
+                "EfaSupported": efa_enabled,
+                "EfaInfo": {"MaximumEfaInterfaces": max_efa_interfaces},
+            }
+        }
     )
     aws_api_mock.ec2.describe_subnets.return_value = public_ip_subnets
 
     queues = [
         SlurmQueue(
             name="queue_1",
-            compute_resources=[SlurmComputeResource(name="compute_resource_1", instance_type="instance_type")],
+            compute_resources=[
+                SlurmComputeResource(
+                    name="compute_resource_1",
+                    instance_type="instance_type",
+                    efa=Efa(enabled=efa_enabled),
+                )
+            ],
             networking=SlurmQueueNetworking(subnet_ids=["subnet_1", "subnet_2"], assign_public_ip=assign_public_ip),
         ),
     ]
 
-    actual_failures = MultiNetworkInterfacesInstancesValidator().execute(queues)
+    actual_failures = MultiNetworkInterfacesInstancesValidator().execute(queues, efa_interface_type=efa_interface_type)
 
     if expected_error_messages:
         assert_failure_messages(actual_failures, expected_error_messages)
         assert_failure_level(actual_failures, FailureLevel.ERROR)
     else:
         assert_that(actual_failures).is_empty()
+
+
+@pytest.mark.usefixtures("get_region")
+def test_multi_network_interfaces_instances_validator_mixed_queue(aws_api_mock):
+    """A queue with both a multi-network-card and a single-card EFA compute resource reports both reasons."""
+    instance_type_info = {
+        # Multi-network-card instance (e.g. p4d): launched with one interface per card.
+        "multi_card.instance": InstanceTypeInfo(
+            {
+                "NetworkInfo": {
+                    "MaximumNetworkCards": 2,
+                    "NetworkCards": [
+                        {"NetworkCardIndex": 0, "MaximumNetworkInterfaces": 1},
+                        {"NetworkCardIndex": 1, "MaximumNetworkInterfaces": 1},
+                    ],
+                    "EfaSupported": True,
+                    "EfaInfo": {"MaximumEfaInterfaces": 2},
+                }
+            }
+        ),
+        # Single-network-card EFA instance (e.g. c5n): launched with a primary + an efa-only interface.
+        "efa.instance": InstanceTypeInfo(
+            {
+                "NetworkInfo": {
+                    "MaximumNetworkCards": 1,
+                    "NetworkCards": [{"NetworkCardIndex": 0, "MaximumNetworkInterfaces": 2}],
+                    "EfaSupported": True,
+                    "EfaInfo": {"MaximumEfaInterfaces": 1},
+                }
+            }
+        ),
+    }
+    aws_api_mock.ec2.get_instance_type_info.side_effect = lambda instance_type: instance_type_info[instance_type]
+    aws_api_mock.ec2.describe_subnets.return_value = [{"SubnetId": "subnet_1", "MapPublicIpOnLaunch": False}]
+
+    queues = [
+        SlurmQueue(
+            name="queue_1",
+            compute_resources=[
+                SlurmComputeResource(name="multi_card_cr", instance_type="multi_card.instance"),
+                SlurmComputeResource(name="efa_cr", instance_type="efa.instance", efa=Efa(enabled=True)),
+            ],
+            networking=SlurmQueueNetworking(subnet_ids=["subnet_1"], assign_public_ip=True),
+        ),
+    ]
+
+    actual_failures = MultiNetworkInterfacesInstancesValidator().execute(queues)
+
+    # Exactly one failure (queue is reported once, not once per compute resource) that names both reasons.
+    assert_that(actual_failures).is_length(1)
+    assert_that(actual_failures[0].message).is_equal_to(
+        "The queue queue_1 contains the instance types multi_card.instance with multiple network interfaces and "
+        "has EFA enabled on the single-network-card instance types efa.instance, so its compute nodes are launched "
+        "with multiple network interfaces (a primary interface plus a dedicated efa-only interface), but "
+        f"AssignPublicIp is set to true. {PUBLIC_IP_LIMITATION} {ASSIGN_PUBLIC_IP_FIX}"
+    )
+    assert_failure_level(actual_failures, FailureLevel.ERROR)
+
+
+@pytest.mark.parametrize(
+    "custom_ami_id, os, expected_message, expected_failure_level",
+    [
+        ("ami-000000000000", "rocky8", None, None),
+        ("ami-000000000000", "alinux2023", None, None),
+        ("ami-000000000000", "rhel8", None, None),
+        ("ami-000000000000", "ubuntu2204", None, None),
+        ("ami-000000000000", "ubuntu2404", None, None),
+        (
+            None,
+            "rocky8",
+            "ParallelCluster has no official AMI for rocky8. "
+            "Please build your own AMI using pcluster build-image command, "
+            "as explained in the documentation: "
+            "https://docs.aws.amazon.com/parallelcluster/latest/ug/building-custom-ami-v3.html",
+            FailureLevel.ERROR,
+        ),
+        (None, "alinux2023", None, None),
+        (None, "rhel8", None, None),
+        (None, "ubuntu2204", None, None),
+        (None, "ubuntu2404", None, None),
+    ],
+)
+def test_compute_ami_os_compatible_validator(mocker, custom_ami_id, os, expected_message, expected_failure_level):
+    mock_aws_api(mocker)
+    actual_failures = OsCustomAmiValidator().execute(custom_ami=custom_ami_id, os=os)
+    assert_failure_messages(actual_failures, expected_message)
+    assert_failure_level(actual_failures, expected_failure_level)

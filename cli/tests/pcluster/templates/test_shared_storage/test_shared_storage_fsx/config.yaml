@@ -1,7 +1,7 @@
 Image:
-  Os: alinux2
+  Os: alinux2023
 HeadNode:
-  InstanceType: t2.micro
+  InstanceType: t3.micro
   Networking:
     SubnetId: subnet-12345678
 Scheduling:
@@ -14,6 +14,16 @@ Scheduling:
       ComputeResources:
         - Name: compute_resource1
           InstanceType: c5.2xlarge
+LoginNodes:
+  Pools:
+    - Name: login
+      InstanceType: t3.small
+      Count: 1
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+        AdditionalSecurityGroups:
+          - sg-12345678
 SharedStorage:
   - MountDir: /opt/shared/fsx-lustre/managed/1
     Name: shared-fsx-lustre-managed-1

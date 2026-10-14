@@ -15,6 +15,7 @@ from pcluster.constants import (
     PCLUSTER_IMAGE_CONFIG_TAG,
     PCLUSTER_IMAGE_ID_TAG,
     PCLUSTER_IMAGE_OS_TAG,
+    PCLUSTER_LOGIN_NODES_POOL_NAME_TAG,
     PCLUSTER_NODE_TYPE_TAG,
     PCLUSTER_QUEUE_NAME_TAG,
     PCLUSTER_S3_BUCKET_TAG,
@@ -22,6 +23,9 @@ from pcluster.constants import (
     PCLUSTER_VERSION_TAG,
     SUPPORTED_ARCHITECTURES,
 )
+
+CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY = "aws:ec2capacityreservation:incrementalRequestedQuantity"
+CAPACITY_BLOCK_RESERVATION_TYPE_TAG_KEY = "aws:ec2capacityreservation:capacityReservationType"
 
 
 class StackInfo:
@@ -166,8 +170,30 @@ class InstanceInfo:
         """Return queue name of the instance."""
         return self._get_tag(PCLUSTER_QUEUE_NAME_TAG)
 
+    @property
+    def pool_name(self) -> str:
+        """Return pool name of the instance."""
+        return self._get_tag(PCLUSTER_LOGIN_NODES_POOL_NAME_TAG)
+
     def _get_tag(self, tag_key):
         return next(iter([tag["Value"] for tag in self._tags if tag["Key"] == tag_key]), None)
+
+
+class NetworkCardInfo:
+    """Data object wrapping the "NetworkCards" section of the result of a describe_instance_types call."""
+
+    def __init__(self, network_card_data):
+        self.network_card_data = network_card_data
+
+    def network_card_index(self) -> int:
+        """Return the network card index."""
+        result = self.network_card_data.get("NetworkCardIndex")
+        return None if result is None else int(result)
+
+    def maximum_network_interfaces(self) -> int:
+        """Return maximum network interfaces."""
+        result = self.network_card_data.get("MaximumNetworkInterfaces")
+        return None if result is None else int(result)
 
 
 class InstanceTypeInfo:
@@ -229,9 +255,23 @@ class InstanceTypeInfo:
 
         return cores
 
-    def max_network_interface_count(self) -> int:
+    def network_cards(self) -> list:
+        """Return the list of network cards."""
+        try:
+            return self.instance_type_data["NetworkInfo"]["NetworkCards"]
+        except KeyError:
+            instance_type = self.instance_type_data.get("InstanceType", "unknown")
+            raise RuntimeError(f"Could not determine network cards for instance type {instance_type}.")
+
+    def max_network_cards(self) -> int:
         """Max number of NICs for the instance."""
-        return int(self.instance_type_data.get("NetworkInfo", {}).get("MaximumNetworkCards", 1))
+        return len(self.network_cards())
+
+    def network_cards_list(self) -> list:
+        """List of NICs for the instance, sorted by NetworkCardIndex."""
+        cards = [NetworkCardInfo(nic) for nic in self.network_cards() if nic.get("NetworkCardIndex") is not None]
+        cards.sort(key=lambda c: c.network_card_index())
+        return cards
 
     def default_threads_per_core(self):
         """Return the default threads per core for the given instance type."""
@@ -287,6 +327,18 @@ class InstanceTypeInfo:
         """Return the amount of memory in MiB."""
         return self.instance_type_data.get("MemoryInfo", {}).get("SizeInMiB")
 
+    def max_efa_interfaces(self) -> int:
+        """Return the maximum number of EFA interfaces for the instance.
+
+        If EfaInfo/MaximumEfaInterfaces is not present in the API response (older API versions),
+        fall back to 1 if EfaSupported is true, 0 otherwise.
+        """
+        efa_info = self.instance_type_data.get("NetworkInfo", {}).get("EfaInfo", {})
+        max_efa = efa_info.get("MaximumEfaInterfaces")
+        if max_efa is not None:
+            return max_efa
+        return 1 if self.is_efa_supported() else 0
+
 
 class FsxStorageInfo:
     """Data object wrapping the result of a describe_file_systems and describe_file_caches call."""
@@ -339,7 +391,7 @@ class FsxStorageInfo:
     @property
     def network_interface_ids(self):
         """Return network interface ids of the file system."""
-        return self.file_storage_info.get("NetworkInterfaceIds")
+        return self.file_storage_info.get("NetworkInterfaceIds", [])
 
     @property
     def subnet_ids(self):
@@ -449,3 +501,139 @@ class ImageInfo:
 
     def _get_tag(self, tag_key: str):
         return next(iter([tag["Value"] for tag in self.tags if tag["Key"] == tag_key]), None)
+
+
+class CapacityReservationInfo:
+    """
+    Data object wrapping the result of a describe-capacity-reservations call.
+
+    {
+        "CapacityReservationId": "cr-a1234567",
+        "OwnerId": "123",
+        "CapacityReservationArn": "arn:aws:ec2:eu-west-1:123:capacity-reservation/cr-a123456",
+        "AvailabilityZoneId": "euw1-az3",
+        "InstanceType": "t3.large",
+        "InstancePlatform": "Linux/UNIX",
+        "AvailabilityZone": "eu-west-1a",
+        "Tenancy": "default",
+        "TotalInstanceCount": 1,
+        "AvailableInstanceCount": 0,
+        "EbsOptimized": false,
+        "EphemeralStorage": false,
+        "State": "active",
+        "StartDate": "2023-11-02T12:16:35+00:00",
+        "EndDate": "2023-11-03T09:00:00+00:00",
+        "EndDateType": "limited",
+        "InstanceMatchCriteria": "open",
+        "CreateDate": "2023-11-02T12:16:35+00:00",
+        "Tags": [],
+        "CapacityAllocations": [
+            {
+                "AllocationType": "used",
+                "Count": 1
+            }
+        ]
+    },
+
+    # describe-capacity-reservations --capacity-type capacity-block
+    {
+        "CapacityReservationId": "cr-a1234567",
+        "OwnerId": "123",
+        "CapacityReservationArn": "arn:aws:ec2:us-east-2:123:capacity-reservation/cr-a123456",
+        "AvailabilityZoneId": "use2-az1",
+        "InstanceType": "p5.48xlarge",
+        "InstancePlatform": "Linux/UNIX",
+        "AvailabilityZone": "us-east-2a",
+        "Tenancy": "default",
+        "TotalInstanceCount": 0,
+        "AvailableInstanceCount": 0,
+        "EbsOptimized": false,
+        "EphemeralStorage": false,
+        "State": "scheduled",
+        "StartDate": "2023-11-20T11:30:00+00:00",
+        "EndDate": "2023-11-21T11:30:00+00:00",
+        "EndDateType": "limited",
+        "InstanceMatchCriteria": "targeted",
+        "CreateDate": "2023-11-06T12:03:21+00:00",
+        "Tags": [
+            {
+                "Key": "aws:ec2capacityreservation:incrementalRequestedQuantity",
+                "Value": "1"
+            },
+            {
+                "Key": "aws:ec2capacityreservation:capacityReservationType",
+                "Value": "capacity-block"
+            }
+        ],
+        "CapacityAllocations": [],
+        "ReservationType": "capacity-block"
+    }
+    """
+
+    def __init__(self, capacity_reservation_data):
+        self.capacity_reservation_data = capacity_reservation_data
+
+    def capacity_reservation_arn(self):
+        """Return the arn of the Capacity Reservation."""
+        return self.capacity_reservation_data.get("CapacityReservationArn")
+
+    def capacity_reservation_id(self):
+        """Return the id of the Capacity Reservation."""
+        return self.capacity_reservation_data.get("CapacityReservationId")
+
+    def state(self):
+        """Return the state of the Capacity Reservation."""
+        return self.capacity_reservation_data.get("State")
+
+    def instance_type(self):
+        """Return the instance type associated to the Capacity Reservation."""
+        return self.capacity_reservation_data.get("InstanceType")
+
+    def instance_platform(self):
+        """Return the instance platform associated to the Capacity Reservation."""
+        return self.capacity_reservation_data.get("InstancePlatform")
+
+    def availability_zone(self):
+        """Return the availability zone associated to the Capacity Reservation."""
+        return self.capacity_reservation_data.get("AvailabilityZone")
+
+    def placement_group_arn(self):
+        """Return the placement group arn of the Capacity Reservation."""
+        return self.capacity_reservation_data.get("PlacementGroupArn")
+
+    def reservation_type(self):
+        """
+        Return the reservation type, if present, None otherwise.
+
+        Return the value of the tag CAPACITY_BLOCK_RESERVATION_TYPE_TAG_KEY, if ReservationType tag is not valued.
+        """
+        return self.capacity_reservation_data.get(
+            "ReservationType", self.get_tag(CAPACITY_BLOCK_RESERVATION_TYPE_TAG_KEY)
+        )
+
+    def total_instance_count(self):
+        """Return the total instance count, if present, 0 otherwise."""
+        return self.capacity_reservation_data.get("TotalInstanceCount", 0)
+
+    def available_instance_count(self):
+        """Return the available instance count, if present, 0 otherwise."""
+        return self.capacity_reservation_data.get("AvailableInstanceCount", 0)
+
+    def get_tag(self, tag_key: str):
+        """Get stack tag by tag key."""
+        return next(
+            iter([tag["Value"] for tag in self.capacity_reservation_data.get("Tags", []) if tag["Key"] == tag_key]),
+            None,
+        )
+
+    def incremental_requested_quantity(self):
+        """
+        Return the value of the tag CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY, 0 otherwise.
+
+        This only exists for Capacity Blocks reservation.
+        """
+        requested_quantity = self.get_tag(CAPACITY_BLOCK_REQUESTED_QUANTITY_TAG_KEY)
+        return int(requested_quantity) if requested_quantity and isinstance(requested_quantity, str) else 0
+
+    def __eq__(self, other):
+        return self.__dict__ == other.__dict__
