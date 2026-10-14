@@ -131,6 +131,39 @@ def test_shared_storage_efs(mocker, test_datadir, config_file_name, storage_name
 
 
 @pytest.mark.parametrize(
+    "existing_subnet_id, expected_subnet_id",
+    [
+        (None, "subnet-11111111"),
+        ("subnet-22222222", "subnet-22222222"),
+        ("subnet-11111111", "subnet-11111111"),
+        ("subnet-33333333", "subnet-11111111"),
+    ],
+)
+def test_efs_mount_target_keeps_existing_subnet(mocker, test_datadir, existing_subnet_id, expected_subnet_id):
+    mock_aws_api(mocker)
+    mock_bucket_object_utils(mocker)
+    cluster_config = ClusterSchema(cluster_name="clustername").load(load_yaml_dict(test_datadir / "config.yaml"))
+
+    def mount_targets(existing_efs_mount_target_subnets=None):
+        template, _ = CDKTemplateBuilder().build_cluster_template(
+            cluster_config=cluster_config,
+            bucket=dummy_cluster_bucket(),
+            stack_name="clustername",
+            existing_efs_mount_target_subnets=existing_efs_mount_target_subnets,
+        )
+        return get_resources(template, type="AWS::EFS::MountTarget")
+
+    # Both subnets are in the same AZ, so a single mount target is created
+    logical_id = next(iter(mount_targets()))
+    existing = {logical_id: existing_subnet_id} if existing_subnet_id else None
+
+    targets = mount_targets(existing)
+
+    assert_that(targets).is_length(1)
+    assert_that(targets[logical_id]["Properties"]["SubnetId"]).is_equal_to(expected_subnet_id)
+
+
+@pytest.mark.parametrize(
     "config_file_name, storage_name, fs_type, deletion_policy",
     [
         ("config.yaml", "shared-fsx-lustre-managed-1", "LUSTRE", "Delete"),

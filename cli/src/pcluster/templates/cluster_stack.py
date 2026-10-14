@@ -123,9 +123,12 @@ class ClusterCdkStack:
         cluster_config: SlurmClusterConfig,
         bucket: S3Bucket,
         log_group_name=None,
+        existing_efs_mount_target_subnets: dict = None,
         **kwargs,
     ) -> None:
         self.stack = Stack(scope=scope, id=construct_id, **kwargs)
+        # Logical ID -> subnet of the EFS mount targets in the deployed stack, empty on cluster creation
+        self._existing_efs_mount_target_subnets = existing_efs_mount_target_subnets or {}
         self._stack_name = stack_name
         self._launch_template_builder = CdkLaunchTemplateBuilder()
         self.config = cluster_config
@@ -1178,9 +1181,14 @@ class ClusterCdkStack:
         """Create a EFS Mount Point for the file system, if not already available on the same AZ."""
         availability_zone = AWSApi.instance().ec2.get_subnet_avail_zone(subnet_id)
         if availability_zone not in checked_availability_zones:
+            logical_id = "{0}MT{1}".format(efs_cfn_resource_id, availability_zone)
+            # EFS allows one mount target per AZ: moving it to another subnet would fail with AlreadyExists
+            existing_subnet_id = self._existing_efs_mount_target_subnets.get(logical_id)
+            if existing_subnet_id in self.config.compute_subnet_ids + [self.config.head_node.networking.subnet_id]:
+                subnet_id = existing_subnet_id
             efs_resource = efs.CfnMountTarget(
                 self.stack,
-                "{0}MT{1}".format(efs_cfn_resource_id, availability_zone),
+                logical_id,
                 file_system_id=file_system_id,
                 security_groups=[sg.ref for sg in security_groups],
                 subnet_id=subnet_id,

@@ -407,6 +407,29 @@ class TestCluster:
         assert_that(observed_return).is_equal_to(expected_return)
 
     @pytest.mark.parametrize(
+        "template,expected_return",
+        [
+            ({}, {}),
+            ({"Resources": {"Volume": {"Type": "AWS::EC2::Volume", "Properties": {"Size": 10}}}}, {}),
+            (
+                {
+                    "Resources": {
+                        "EFSabcMTus-east-1a": {
+                            "Type": "AWS::EFS::MountTarget",
+                            "Properties": {"SubnetId": "subnet-2", "FileSystemId": {"Ref": "EFSabc"}},
+                        },
+                        "EFSabcMTus-east-1b": {"Type": "AWS::EFS::MountTarget", "Properties": {"SubnetId": "subnet-3"}},
+                    }
+                },
+                {"EFSabcMTus-east-1a": "subnet-2", "EFSabcMTus-east-1b": "subnet-3"},
+            ),
+        ],
+    )
+    def test_get_efs_mount_target_subnets(self, cluster, mocker, template, expected_return):
+        mocker.patch("pcluster.models.cluster.Cluster._get_stack_template", return_value=template)
+        assert_that(cluster._get_efs_mount_target_subnets()).is_equal_to(expected_return)
+
+    @pytest.mark.parametrize(
         "stack_exists, expected_error, next_token",
         [
             (False, "Cluster .* does not exist", None),

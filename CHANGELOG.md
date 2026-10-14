@@ -21,7 +21,8 @@ the validator fails with a clear error message instead of a generic `NoneType` e
 - Reduce IAM role and policy naming collisions by using a more unique name suffix.
 - Fix `describe-cluster` reporting incomplete events with a large stack event history.
 - Fix cluster updates failing with `mount target already exists in this AZ` when queues use more than one subnet
-  in the same Availability Zone, caused by EFS mount targets moving to a randomly selected subnet on each update.
+  in the same Availability Zone. Cluster updates now keep each EFS mount target in its current subnet, and the subnet
+  for a new mount target no longer depends on random ordering.
 
 3.16.1
 ------

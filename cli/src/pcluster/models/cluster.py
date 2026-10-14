@@ -669,6 +669,14 @@ class Cluster:
         while self._get_updated_stack_status() == "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS":
             time.sleep(2)
 
+    def _get_efs_mount_target_subnets(self):
+        """Return the subnet of each EFS mount target in the deployed stack, keyed by logical ID."""
+        return {
+            logical_id: resource.get("Properties", {}).get("SubnetId")
+            for logical_id, resource in self._get_stack_template().get("Resources", {}).items()
+            if resource.get("Type") == "AWS::EFS::MountTarget"
+        }
+
     def _get_stack_template(self):
         """Return the template body of the stack."""
         try:
@@ -888,6 +896,7 @@ class Cluster:
                     bucket=self.bucket,
                     stack_name=self.stack_name,
                     log_group_name=self.stack.log_group_name,
+                    existing_efs_mount_target_subnets=self._get_efs_mount_target_subnets(),
                 )
 
             # upload cluster artifacts and generated template
