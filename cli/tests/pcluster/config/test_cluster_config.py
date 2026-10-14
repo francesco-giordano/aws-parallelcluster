@@ -400,6 +400,33 @@ class TestBaseClusterConfig:
             )
         )
 
+    def test_compute_subnet_ids_preserve_first_appearance_order(self):
+        cluster_config = SlurmClusterConfig(
+            cluster_name="clustername",
+            image=Image("alinux2023"),
+            head_node=HeadNode("c5.xlarge", HeadNodeNetworking("subnet-head")),
+            scheduling=SlurmScheduling(
+                [
+                    SlurmQueue(
+                        name=f"queue{index}",
+                        networking=SlurmQueueNetworking(subnet_ids=subnet_ids),
+                        compute_resources=[SlurmComputeResource(name="cr", instance_type="c5.xlarge")],
+                    )
+                    for index, subnet_ids in enumerate(
+                        [
+                            ["subnet-z", "subnet-b"],
+                            ["subnet-b", "subnet-y", "subnet-a"],
+                            ["subnet-z", "subnet-c"],
+                        ]
+                    )
+                ]
+            ),
+        )
+
+        assert_that(cluster_config.compute_subnet_ids).is_equal_to(
+            ["subnet-z", "subnet-b", "subnet-y", "subnet-a", "subnet-c"]
+        )
+
     def test_instances_in_slurm_queue(self):
         queue = SlurmQueue(
             name="queue0",

@@ -1914,12 +1914,15 @@ class BaseClusterConfig(Resource):
 
     @property
     def compute_subnet_ids(self):
-        """Return the list of all compute subnet ids in the cluster."""
-        subnet_ids_set = set()
-        for queue in self.scheduling.queues:
-            for subnet_id in queue.networking.subnet_ids:
-                subnet_ids_set.add(subnet_id)
-        return list(subnet_ids_set)
+        """
+        Return the list of all compute subnet ids in the cluster, deduplicated in order of first appearance.
+
+        The order must be deterministic: it selects the subnet of per-AZ resources such as EFS mount targets,
+        so a different order on update would replace them.
+        """
+        return list(
+            dict.fromkeys(subnet_id for queue in self.scheduling.queues for subnet_id in queue.networking.subnet_ids)
+        )
 
     @property
     def availability_zones_subnets_mapping(self):
